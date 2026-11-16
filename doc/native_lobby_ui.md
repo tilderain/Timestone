@@ -593,6 +593,15 @@ links loop-free). A fighting player feeds one spectator, a spectator feeds
 two; whoever claims a full source and is not among its earliest claimers
 picks again. A member serves exactly the members whose `upstream` names it.
 
+Links are opened ahead of need (`Spectate_Pump`): a setup's two players and
+everyone watching it link up as soon as there is a watcher, and lining up
+starts the watching once both players are ready (`SlotState::Starting`), not
+only when they fight. A spectator therefore has links to both players before
+the match runs; `ChooseUpstream` takes a source whose link is already up over
+one still dialling. On Steam a request that arrives before this side has
+dialled is kept and accepted (`AcceptIncomingConnection`), and the listen
+sockets stay open for the life of the room.
+
 The child sends `MSG_SUB` (the game and frame it has); the parent answers
 with `MSG_GAME`, `MSG_START`, run-length encoded `MSG_FRAMES`, `MSG_CHECK`
 and `MSG_FINISH`, then keeps appending. Live frames go out in batches of 12.

@@ -101,7 +101,10 @@ bool SteamRoom_TakePeerFailed();
 // the match connection (their own virtual port). A link exists once both
 // ends have opened it; who opens which is derived from the room's published
 // state (spectate.cpp), so both always do.
-void SteamRoom_SpecOpen(uint64_t memberId);  // idempotent
+// `dial` says which end this is: the one that calls (a spectator, towards
+// whoever it is or may be fed by) or the one that answers. Only one end
+// dials, so two connection attempts never meet half-way.
+void SteamRoom_SpecOpen(uint64_t memberId, bool dial);  // idempotent
 void SteamRoom_SpecClose(uint64_t memberId);
 void SteamRoom_SpecCloseAll();
 // 0 = not open, 1 = connecting, 2 = connected, 3 = failed.

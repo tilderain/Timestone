@@ -23,6 +23,7 @@ namespace {
 
 constexpr const char* kLobbyProtocol = UMVC3HOOK_VERSION;
 constexpr ULONGLONG kPeerConnectionTimeoutMs = 25000;
+constexpr ULONGLONG kMatchAnswerWaitMs = 4000; // player 1 waits this long to be called
 constexpr size_t kMaxPublicLobbyResults = 50;
 constexpr size_t kMaxFriendLobbyCandidates = 50;
 constexpr size_t kMaxLobbyResults = kMaxPublicLobbyResults + kMaxFriendLobbyCandidates;
@@ -265,6 +266,54 @@ public:
 };
 
 LobbyChatMsgCallback g_lobbyChatMsgCallback;
+
+// Connection state changes. Two uses: every transition of a peer-to-peer
+// connection goes in the log (the failing end of a connection otherwise only
+// ever reports a timeout), and a request that arrives on one of our listen
+// sockets before we have dialled that player is kept, to be accepted when we
+// would otherwise dial. Runs on whichever thread pumps Steam's callbacks.
+struct IncomingConnection {
+    HSteamNetConnection connection;
+    HSteamListenSocket listenSocket;
+    uint64_t remoteId;
+    ULONGLONG tick;
+};
+std::atomic<uint32_t> g_incomingHead{0}, g_incomingTail{0};
+IncomingConnection g_incomingQueue[16] = {};
+IncomingConnection g_incomingPending[8] = {}; // game thread
+bool g_connectionCallbackRegistered = false;
+
+class ConnectionStatusCallback final : public SteamCallbackBase {
+public:
+    ConnectionStatusCallback() { m_iCallback = k_iCallbackSteamNetConnectionStatusChanged; }
+
+    void Run(void* param) override
+    {
+        if (!param) return;
+        const auto* change = static_cast<const SteamNetConnectionStatusChangedCompat_t*>(param);
+        const SteamNetConnectionInfo_t& info = change->m_info;
+        const uint64_t remote = info.m_identityRemote.m_eType == k_ESteamNetworkingIdentityType_SteamID
+            ? info.m_identityRemote.data.m_steamID64 : 0;
+        HookLog("SteamLobby: connection #%u %d -> %d remote=%llu listen=%u reason=%d \"%s\" (%s)\n",
+                change->m_hConn, static_cast<int>(change->m_eOldState),
+                static_cast<int>(info.m_eState), static_cast<unsigned long long>(remote),
+                info.m_hListenSocket, info.m_eEndReason, info.m_szEndDebug,
+                info.m_szConnectionDescription);
+        if (change->m_eOldState != k_ESteamNetworkingConnectionState_None ||
+            info.m_eState != k_ESteamNetworkingConnectionState_Connecting ||
+            info.m_hListenSocket == k_HSteamListenSocket_Invalid || !remote)
+            return;
+        const uint32_t head = g_incomingHead.load(std::memory_order_relaxed);
+        if (head - g_incomingTail.load(std::memory_order_acquire) >= 16) return;
+        g_incomingQueue[head % 16] = {change->m_hConn, info.m_hListenSocket, remote, GetTickCount64()};
+        g_incomingHead.store(head + 1, std::memory_order_release);
+    }
+
+    void Run(void* param, bool, SteamAPICall_t) override { Run(param); }
+    int GetCallbackSizeBytes() override { return sizeof(SteamNetConnectionStatusChangedCompat_t); }
+};
+
+ConnectionStatusCallback g_connectionStatusCallback;
 
 static_assert(sizeof(GameLobbyJoinRequestedCallback) == 16);
 static_assert(sizeof(GameRichPresenceJoinRequestedCallback) == 16);
@@ -557,6 +606,57 @@ void RefreshPeerUsername()
              username && username[0] ? username : "Unknown");
 }
 
+// Game thread: requests that arrived on our listen sockets and have not been
+// taken up. One nobody wants is closed after a while.
+void DrainIncomingConnections()
+{
+    const ULONGLONG now = GetTickCount64();
+    uint32_t tail = g_incomingTail.load(std::memory_order_relaxed);
+    while (tail != g_incomingHead.load(std::memory_order_acquire)) {
+        const IncomingConnection incoming = g_incomingQueue[tail % 16];
+        g_incomingTail.store(++tail, std::memory_order_release);
+        for (IncomingConnection& slot : g_incomingPending) {
+            if (slot.connection != k_HSteamNetConnection_Invalid) continue;
+            slot = incoming;
+            break;
+        }
+    }
+    for (IncomingConnection& slot : g_incomingPending) {
+        if (slot.connection == k_HSteamNetConnection_Invalid || now - slot.tick < 20000) continue;
+        if (g_sockets) g_sockets->CloseConnection(slot.connection, 1000, "Timestone unanswered", false);
+        slot = {};
+    }
+}
+
+// A waiting request from `remoteId` on `listenSocket`, accepted; or invalid.
+HSteamNetConnection AcceptIncomingConnection(uint64_t remoteId, HSteamListenSocket listenSocket)
+{
+    DrainIncomingConnections();
+    for (IncomingConnection& slot : g_incomingPending) {
+        if (slot.connection == k_HSteamNetConnection_Invalid || slot.remoteId != remoteId ||
+            slot.listenSocket != listenSocket)
+            continue;
+        const HSteamNetConnection connection = slot.connection;
+        slot = {};
+        const EResult result = g_sockets->AcceptConnection(connection);
+        HookLog("SteamLobby: accepted waiting connection #%u from %llu (result %d)\n", connection,
+                static_cast<unsigned long long>(remoteId), static_cast<int>(result));
+        if (result == k_EResultOK) return connection;
+        g_sockets->CloseConnection(connection, 1000, "Timestone accept failed", false);
+    }
+    return k_HSteamNetConnection_Invalid;
+}
+
+void EnsureMatchListenSocket()
+{
+    if (g_listenSocket != k_HSteamListenSocket_Invalid || !g_sockets) return;
+    SteamNetworkingConfigValue_t options[4];
+    ConnectionOptions(options);
+    HookLog("SteamLobby: routing policy=%s ICE candidates=%d\n",
+            options[1].m_val.m_int32 ? "Automatic" : "Relay Only", options[1].m_val.m_int32);
+    g_listenSocket = g_sockets->CreateListenSocketP2P(733, 4, options);
+}
+
 void StartPeerConnection(uint64_t remoteId)
 {
     if (!remoteId || g_connection != k_HSteamNetConnection_Invalid) return;
@@ -580,16 +680,26 @@ void StartPeerConnection(uint64_t remoteId)
 
     SteamNetworkingConfigValue_t options[4];
     ConnectionOptions(options);
+    EnsureMatchListenSocket();
     if (g_listenSocket == k_HSteamListenSocket_Invalid) {
-        HookLog("SteamLobby: routing policy=%s ICE candidates=%d\n",
-                options[1].m_val.m_int32 ? "Automatic" : "Relay Only",
-                options[1].m_val.m_int32);
-        g_listenSocket = g_sockets->CreateListenSocketP2P(733, 4, options);
-        if (g_listenSocket == k_HSteamListenSocket_Invalid) {
-            SetStatus("Failed to create Steam P2P listen socket");
-            return;
-        }
+        SetStatus("Failed to create Steam P2P listen socket");
+        return;
     }
+    // The other player may have dialled first: take that connection up
+    // instead of starting a second one.
+    g_connection = AcceptIncomingConnection(remoteId, g_listenSocket);
+    if (g_connection != k_HSteamNetConnection_Invalid) {
+        ++g_connectionAttempt;
+        SetStatus("Establishing Steam connection...");
+        return;
+    }
+    // In a room only player 2 calls; player 1 answers. Two attempts meeting
+    // half-way is what Steam's P2P code crashed on (a connection picked for
+    // a ping before its handshake was done). If no call has come after a few
+    // seconds player 1 dials after all, as both always did before.
+    if (g_roomMode && g_isHost &&
+        now + kPeerConnectionTimeoutMs < g_connectionDeadline + kMatchAnswerWaitMs)
+        return;
 
     SteamNetworkingIdentity identity = {};
     identity.m_eType = k_ESteamNetworkingIdentityType_SteamID;
@@ -610,9 +720,16 @@ void StartPeerConnection(uint64_t remoteId)
                                          : "Establishing Steam relay connection...");
 }
 
+void EnsureSpecListenSocket();
+
 void PumpLobbyMembers()
 {
     if (g_roomMode) {
+        if (g_lobbyId) {
+            EnsureMatchListenSocket();
+            EnsureSpecListenSocket();
+            DrainIncomingConnections();
+        }
         // Rooms connect on demand (SteamRoom_ConnectPeer), never on membership.
         if (g_lobbyId && g_roomPeer && !g_bridgeCreated &&
             g_connection == k_HSteamNetConnection_Invalid)
@@ -1514,6 +1631,8 @@ void SteamRoom_SetMode(bool enabled)
     g_roomMode = enabled;
     if (enabled && g_api.RegisterCallback && !g_roomCallbacksRegistered) {
         g_api.RegisterCallback(&g_lobbyChatMsgCallback, k_iCallbackLobbyChatMsg);
+        g_api.RegisterCallback(&g_connectionStatusCallback,
+                               k_iCallbackSteamNetConnectionStatusChanged);
         g_roomCallbacksRegistered = true;
     }
     if (enabled && !g_localSteamId && g_api.GetUserInterface && g_api.GetSteamID &&
@@ -1571,6 +1690,9 @@ void SteamRoom_Leave()
 {
     if (LocalLobby_Enabled()) { LocalLobby_Leave(); return; }
     SteamRoom_DisconnectPeer();
+    if (g_sockets && g_listenSocket != k_HSteamListenSocket_Invalid)
+        g_sockets->CloseListenSocket(g_listenSocket);
+    g_listenSocket = k_HSteamListenSocket_Invalid;
     SteamRoom_SpecCloseAll();
     ClearLobbyRichPresence();
     if (g_matchmaking && g_lobbyId) {
@@ -1738,9 +1860,13 @@ void SteamRoom_DisconnectPeer()
     if (bridgeActive) SteamTransport_Shutdown();
     if (!bridgeActive && g_sockets && g_connection != k_HSteamNetConnection_Invalid)
         g_sockets->CloseConnection(g_connection, 1000, "Timestone match ended", false);
-    if (g_sockets && g_listenSocket != k_HSteamListenSocket_Invalid)
-        g_sockets->CloseListenSocket(g_listenSocket);
-    g_listenSocket = k_HSteamListenSocket_Invalid;
+    // In a room the listen socket stays up between matches, so a player who
+    // dials before we have seen the pairing is still heard.
+    if (!(g_roomMode && g_lobbyId)) {
+        if (g_sockets && g_listenSocket != k_HSteamListenSocket_Invalid)
+            g_sockets->CloseListenSocket(g_listenSocket);
+        g_listenSocket = k_HSteamListenSocket_Invalid;
+    }
     g_connection = k_HSteamNetConnection_Invalid;
     g_gameHost = nullptr;
     g_gamePeer = nullptr;
@@ -1777,9 +1903,14 @@ struct SpecLink {
     int state = 0;
     ULONGLONG nextAttempt = 0;
     ULONGLONG deadline = 0;
+    ULONGLONG opened = 0;
+    bool dial = false;
     unsigned polls = 0;
 };
 SpecLink g_specLinks[kMaxSpecLinks];
+// The answering end dials after all if no call has arrived by then (the
+// caller's request can be lost, or the callback that reports it missing).
+constexpr ULONGLONG kSpecAnswerWaitMs = 4000;
 HSteamListenSocket g_specListen = k_HSteamListenSocket_Invalid;
 
 SpecLink* FindSpecLink(uint64_t id)
@@ -1799,18 +1930,28 @@ void CloseSpecConnection(SpecLink& link, const char* reason)
 
 // Symmetric connect, as for the match: both ends dial and Steam pairs the two
 // attempts into one connection.
+void EnsureSpecListenSocket()
+{
+    if (g_specListen != k_HSteamListenSocket_Invalid || !g_sockets) return;
+    SteamNetworkingConfigValue_t options[4];
+    ConnectionOptions(options);
+    g_specListen = g_sockets->CreateListenSocketP2P(kSpecVirtualPort, 4, options);
+    if (g_specListen == k_HSteamListenSocket_Invalid)
+        HookLog("SteamLobby: could not create the spectator listen socket\n");
+}
+
 void DialSpecLink(SpecLink& link)
 {
     SteamNetworkingConfigValue_t options[4];
     ConnectionOptions(options);
+    EnsureSpecListenSocket();
     if (g_specListen == k_HSteamListenSocket_Invalid) {
-        g_specListen = g_sockets->CreateListenSocketP2P(kSpecVirtualPort, 4, options);
-        if (g_specListen == k_HSteamListenSocket_Invalid) {
-            HookLog("SteamLobby: could not create the spectator listen socket\n");
-            link.nextAttempt = GetTickCount64() + 1000;
-            return;
-        }
+        link.nextAttempt = GetTickCount64() + 1000;
+        return;
     }
+    // The other end may have dialled first.
+    link.connection = AcceptIncomingConnection(link.id, g_specListen);
+    if (link.connection != k_HSteamNetConnection_Invalid) return;
     SteamNetworkingIdentity identity = {};
     identity.m_eType = k_ESteamNetworkingIdentityType_SteamID;
     identity.m_cbSize = sizeof(uint64_t);
@@ -1822,7 +1963,7 @@ void DialSpecLink(SpecLink& link)
 
 } // namespace
 
-void SteamRoom_SpecOpen(uint64_t memberId)
+void SteamRoom_SpecOpen(uint64_t memberId, bool dial)
 {
     if (LocalLobby_Enabled()) { LocalLobby_SpecOpen(memberId); return; }
     if (!g_sockets || !memberId || FindSpecLink(memberId)) return;
@@ -1831,7 +1972,9 @@ void SteamRoom_SpecOpen(uint64_t memberId)
         link = SpecLink{};
         link.id = memberId;
         link.state = 1;
-        link.deadline = GetTickCount64() + kSpecConnectTimeoutMs;
+        link.dial = dial;
+        link.opened = GetTickCount64();
+        link.deadline = link.opened + kSpecConnectTimeoutMs;
         return;
     }
 }
@@ -1909,7 +2052,13 @@ void SteamRoom_SpecPump()
                 link.state = 3;
                 continue;
             }
-            if (now >= link.nextAttempt) DialSpecLink(link);
+            if (!link.dial && now - link.opened < kSpecAnswerWaitMs) {
+                // The answering end: take the call when it comes.
+                EnsureSpecListenSocket();
+                link.connection = AcceptIncomingConnection(link.id, g_specListen);
+            } else if (now >= link.nextAttempt) {
+                DialSpecLink(link);
+            }
             continue;
         }
         // A live link is only checked now and then; a failure also shows up

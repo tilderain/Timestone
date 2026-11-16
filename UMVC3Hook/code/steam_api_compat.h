@@ -241,8 +241,15 @@ struct LobbyChatMsgCompat_t {
     uint8_t m_eChatEntryType;
     uint32_t m_iChatID;
 };
+// Posted for every state change of every connection, incoming ones included.
+struct SteamNetConnectionStatusChangedCompat_t {
+    HSteamNetConnection m_hConn;
+    SteamNetConnectionInfo_t m_info;
+    ESteamNetworkingConnectionState m_eOldState;
+};
 #pragma pack(pop)
 
+static_assert(sizeof(SteamNetConnectionStatusChangedCompat_t) == 712);
 static_assert(sizeof(SteamNetworkingIdentity) == 136);
 static_assert(sizeof(SteamNetworkingConfigValue_t) == 16);
 static_assert(sizeof(SteamNetConnectionInfo_t) == 696);
@@ -257,6 +264,7 @@ static_assert(sizeof(LobbyChatMsgCompat_t) == 24);
 
 constexpr int k_iCallbackLobbyEnter = 504;
 constexpr int k_iCallbackLobbyChatMsg = 507;
+constexpr int k_iCallbackSteamNetConnectionStatusChanged = 1221;
 constexpr int k_iCallbackLobbyMatchList = 510;
 constexpr int k_iCallbackLobbyCreated = 513;
 constexpr int k_iCallbackGameLobbyJoinRequested = 333;

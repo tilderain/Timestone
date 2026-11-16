@@ -325,7 +325,9 @@ Link* FindLink(uint64_t id)
     return nullptr;
 }
 
-Link* WantLink(uint64_t id, ULONGLONG now)
+// `dial`: this end calls the other (a spectator towards a source); the other
+// end answers. Decided once, when the link is first wanted.
+Link* WantLink(uint64_t id, ULONGLONG now, bool dial)
 {
     Link* link = FindLink(id);
     if (!link) {
@@ -338,7 +340,7 @@ Link* WantLink(uint64_t id, ULONGLONG now)
             break;
         }
         if (!link) return nullptr;
-        SteamRoom_SpecOpen(id);
+        SteamRoom_SpecOpen(id, dial);
         HookLog("Spectate: opening a link to %llu\n", static_cast<unsigned long long>(id));
     }
     link->lastWanted = now;
@@ -617,24 +619,35 @@ uint64_t ChooseUpstream(const SpectateRoom& room, const SpectateRoomMember& self
         return candidate.watchSlot == g_slot && Before(candidate, self) &&
                (candidate.upstream != 0 || current);
     };
-    if (g_upstream) {
-        const SpectateRoomMember* current = member(g_upstream);
-        if (current && isSource(*current, true) && !Avoided(g_upstream, now) &&
-            ClaimsAhead(room, g_upstream, self) < CapacityOf(*current))
-            return g_upstream;
-    }
-    // Players first, then spectators in the order they arrived.
+    const auto eligible = [&](const SpectateRoomMember& candidate, bool current) {
+        return isSource(candidate, current) && !Avoided(candidate.id, now) &&
+               ClaimsAhead(room, candidate.id, self) < CapacityOf(candidate);
+    };
+    const auto connected = [](uint64_t id) { return SteamRoom_SpecState(id) == 2; };
+    const SpectateRoomMember* current = g_upstream ? member(g_upstream) : nullptr;
+    if (current && !eligible(*current, true)) current = nullptr;
+    // A source we are already being fed by stays.
+    if (current && connected(current->id)) return current->id;
+    // Otherwise players first, then spectators in the order they arrived;
+    // and among those, one whose link is already up beats one still dialling
+    // (links to both players are opened ahead of time, see Spectate_Pump).
     const SpectateRoomMember* best = nullptr;
-    for (int pass = 0; pass < 2 && !best; ++pass) {
+    const SpectateRoomMember* bestConnected = nullptr;
+    for (int pass = 0; pass < 2; ++pass) {
         for (int i = 0; i < room.count; ++i) {
             const SpectateRoomMember& candidate = room.members[i];
             if ((candidate.watchSlot >= 0) != (pass == 1)) continue;
-            if (!isSource(candidate, false) || Avoided(candidate.id, now)) continue;
-            if (ClaimsAhead(room, candidate.id, self) >= CapacityOf(candidate)) continue;
-            if (!best || (pass == 1 ? Before(candidate, *best) : candidate.id < best->id))
-                best = &candidate;
+            if (!eligible(candidate, false)) continue;
+            const auto earlier = [&](const SpectateRoomMember* other) {
+                return !other || ((other->watchSlot >= 0) == (pass == 1) &&
+                                  (pass == 1 ? Before(candidate, *other) : candidate.id < other->id));
+            };
+            if (earlier(best)) best = &candidate;
+            if (connected(candidate.id) && earlier(bestConnected)) bestConnected = &candidate;
         }
     }
+    if (bestConnected) return bestConnected->id;
+    if (current) return current->id; // still dialling, and nobody else is further along
     return best ? best->id : 0;
 }
 
@@ -868,7 +881,10 @@ SpectateStep Spectate_Next(int32_t frame, int32_t actionStep, int32_t* fastForwa
         static bool catching = false;
         const bool wasCatching = catching;
         catching = false;
-        if (kFastForward && fastForward && available > kFastForwardStart) {
+        // Once started it runs down to the target, not just back under the
+        // starting mark (which left a spectator a second and a half behind).
+        if (kFastForward && fastForward &&
+            available > (wasCatching ? kFastForwardTarget : kFastForwardStart)) {
             int32_t count = available - kFastForwardTarget;
             if (count > kFastForwardPerTick) count = kFastForwardPerTick;
             *fastForward = count;
@@ -990,7 +1006,7 @@ uint64_t Spectate_Pump(const SpectateRoom& room)
         g_subSent = false;
     }
     if (g_upstream) {
-        if (Link* link = WantLink(g_upstream, now)) {
+        if (Link* link = WantLink(g_upstream, now, true)) {
             const int state = SteamRoom_SpecState(g_upstream);
             if (state == 2) {
                 if (!g_subSent ||
@@ -1014,6 +1030,22 @@ uint64_t Spectate_Pump(const SpectateRoom& room)
         g_statFeedLost = g_noFeedSince && now - g_noFeedSince > 2000;
     }
 
+    // Links are opened ahead of need, between a setup's two players and
+    // everyone watching it, as soon as there is someone watching: by the time
+    // the match is running a spectator has both players to choose from, and
+    // a link that will not come up costs it nothing. An idle link carries
+    // only keep-alives; the feed still goes to one spectator per player.
+    if (self) {
+        const int watched = watching && self->watchSlot == g_slot ? g_slot : -1;
+        for (int i = 0; i < room.count; ++i) {
+            const SpectateRoomMember& other = room.members[i];
+            if (other.id == room.localId) continue;
+            const bool theirPlayer = watched >= 0 && other.slot == watched;
+            const bool ourWatcher = self->slot >= 0 && other.watchSlot == self->slot;
+            if (theirPlayer || ourWatcher) WantLink(other.id, now, theirPlayer);
+        }
+    }
+
     // Who we feed: whoever the room says is fed by us, up to our share,
     // earliest first. The rest find someone else by the same rule.
     for (Link& link : g_links) link.child = false;
@@ -1024,7 +1056,7 @@ uint64_t Spectate_Pump(const SpectateRoom& room)
             if (other.id == room.localId || other.watchSlot < 0 || other.upstream != room.localId)
                 continue;
             if (ClaimsAhead(room, room.localId, other) >= capacity) continue;
-            if (Link* link = WantLink(other.id, now)) link->child = true;
+            if (Link* link = WantLink(other.id, now, false)) link->child = true;
         }
     }
     const int budget = watching ? kViewerBudget : kPlayerBudget;
@@ -1034,8 +1066,9 @@ uint64_t Spectate_Pump(const SpectateRoom& room)
             const int state = SteamRoom_SpecState(link.id);
             if (state == 2) PumpChild(link, budget);
             else if (state != 1) DropLink(link); // failed: opened afresh next frame
-        } else if (link.id != g_upstream && now - link.lastWanted > kLinkGraceMs) {
-            DropLink(link);
+        } else if (link.id != g_upstream &&
+                   (now - link.lastWanted > kLinkGraceMs || SteamRoom_SpecState(link.id) == 3)) {
+            DropLink(link); // unwanted, or failed (a wanted one is opened afresh)
         }
     }
     return wanted;

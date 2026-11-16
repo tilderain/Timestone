@@ -175,6 +175,7 @@ bool g_presetsLoaded = false;
 // text the overlay copies).
 bool g_spectating = false;
 ULONGLONG g_watchIdleTick = 0;   // joining: when the slot stopped being in progress
+ULONGLONG g_watchLiveTick = 0;   // joining: when its match was first seen running
 ULONGLONG g_feedLostTick = 0;    // watching: when the feed went away
 // The setup whose match the player chose not to watch (Stop Watching, or
 // cancelling the join) while staying in its queue; -1 when there is none.
@@ -1080,7 +1081,9 @@ void UpdateSpectateJoin(bool cancelPressed)
         const int queued = local && room.inRoom && local->slot < 0 ? local->queueSlot : -1;
         if (g_watchOptOutSlot.load(std::memory_order_relaxed) != queued)
             g_watchOptOutSlot.store(-1, std::memory_order_relaxed);
-        if (wanted < 0 && queued >= 0 && room.slots[queued] == SlotState::InProgress &&
+        // From the moment both players are ready, not only once they fight:
+        // the links to them are then up before the match is.
+        if (wanted < 0 && queued >= 0 && room.slots[queued] >= SlotState::Starting &&
             g_watchOptOutSlot.load(std::memory_order_relaxed) < 0) {
             g_service->Watch(queued);
             wanted = queued;
@@ -1088,6 +1091,7 @@ void UpdateSpectateJoin(bool cancelPressed)
         if (wanted < 0) return;
         Spectate_Start(wanted);
         g_watchIdleTick = 0;
+        g_watchLiveTick = 0;
         g_ui->SetBusy("Joining the match as a spectator...\nCancel to stop.");
         SetPhase(Phase::WatchJoining);
         return;
@@ -1096,17 +1100,27 @@ void UpdateSpectateJoin(bool cancelPressed)
     const ULONGLONG now = GetTickCount64();
     const char* failure = nullptr;
     bool stop = wanted < 0 || cancelPressed; // seated by a queue, left, or changed their mind
+    bool neverStarted = false;
     if (!stop) {
-        if (room.slots[wanted] == SlotState::InProgress) g_watchIdleTick = 0;
+        const SlotState state = room.slots[wanted];
+        if (state == SlotState::InProgress && !g_watchLiveTick) g_watchLiveTick = now;
+        if (state >= SlotState::Starting) g_watchIdleTick = 0;
         else if (!g_watchIdleTick) g_watchIdleTick = now;
-        else if (now - g_watchIdleTick > 4000) failure = "That match has ended.";
-        if (!failure && now - g_phaseStartTick > 25000)
+        else if (now - g_watchIdleTick > 4000) {
+            // The two were ready and then were not: nothing to report.
+            if (g_watchLiveTick) failure = "That match has ended.";
+            else stop = neverStarted = true;
+        }
+        // The clock starts with the match: before that the players are
+        // still loading and there is nothing to receive.
+        if (!failure && g_watchLiveTick && now - g_watchLiveTick > 30000)
             failure = "Could not join the match as a spectator.";
     }
     if (stop || failure) {
         // Not this match again by itself: neither after a cancel nor in a
         // loop after a failure.
-        if (wanted >= 0) g_watchOptOutSlot.store(wanted, std::memory_order_relaxed);
+        if (wanted >= 0 && !neverStarted)
+            g_watchOptOutSlot.store(wanted, std::memory_order_relaxed);
         HookLog("LobbyFlow: stopped joining as a spectator (%s)\n", failure ? failure : "cancelled");
         StopSpectating();
         g_ui->SetBusy(nullptr);
