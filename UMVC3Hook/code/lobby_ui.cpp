@@ -488,6 +488,17 @@ void LobbyUi::Update(const Input& input)
     else
         chatHoverFrames_ = 0;
 
+    // A match becoming ready closes whatever modal is up so the ready prompt
+    // is seen at once; UpdateHandshake then clears the room's own menus. A
+    // half-typed message is dropped. Busy and update progress stay: they are
+    // work in progress, not something the player opened.
+    if (screen_ == Screen::Room && handshake_ != Handshake::Prompt &&
+        HandshakeStep() == Handshake::Prompt) {
+        notice_[0] = '\0';
+        if (confirm_ != Confirm::Update) confirm_ = Confirm::None;
+        if (textTarget_ != TextTarget::None) EndText(false);
+    }
+
     // Modal layers take input in priority order.
     if (updateActive_) {
         if (input.cancel && update_.cancellable) {
