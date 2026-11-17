@@ -235,12 +235,14 @@ struct AutomaticNetplaySettings {
     int32_t rollback;
 };
 
+// Rollback is never below 5 frames here, however low the ping: a short
+// window turns every late packet into a stall.
 static AutomaticNetplaySettings GetAutomaticNetplaySettings(enet_uint32 pingMs)
 {
-    if (pingMs < 24)  return {2, 0};
-    if (pingMs < 36) return {3, 0};
-    if (pingMs < 48)  return {3, 2};
-    if (pingMs < 60)  return {3, 3};
+    if (pingMs < 24)  return {2, 5};
+    if (pingMs < 36) return {3, 5};
+    if (pingMs < 48)  return {3, 5};
+    if (pingMs < 60)  return {3, 5};
     if (pingMs < 100) return {3, 7};
     if (pingMs < 130) return {3, 7};
     if (pingMs < 150) return {4, 7};
