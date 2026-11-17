@@ -252,6 +252,7 @@ void SteamRoomService::Leave()
     local_.queueSlot = -1;
     local_.watchSlot = -1;
     local_.upstream = 0;
+    watchIntent_ = -1;
     local_.status = MemberStatus::Idle;
     local_.wins = 0;
     local_.losses = 0;
@@ -343,6 +344,7 @@ void SteamRoomService::Sit(int slot, int side)
     local_.queueSlot = -1;
     local_.watchSlot = -1; // a seat ends any watching
     local_.upstream = 0;
+    watchIntent_ = -1;
     ClearHandshake();
     local_.status = MemberStatus::Seated;
     PublishLocal();
@@ -387,6 +389,8 @@ void SteamRoomService::JoinQueue(int slot)
 void SteamRoomService::LeaveQueue()
 {
     if (local_.queueSlot < 0) return;
+    // Watching that came with the place in line goes with it.
+    if (watchIntent_ == local_.queueSlot) watchIntent_ = -1;
     local_.queueSlot = -1;
     PublishLocal();
     RefreshRoom();

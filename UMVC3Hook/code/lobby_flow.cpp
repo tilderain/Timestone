@@ -177,10 +177,10 @@ bool g_spectating = false;
 ULONGLONG g_watchIdleTick = 0;   // joining: when the slot stopped being in progress
 ULONGLONG g_watchLiveTick = 0;   // joining: when its match was first seen running
 ULONGLONG g_feedLostTick = 0;    // watching: when the feed went away
-// The setup whose match the player chose not to watch (Stop Watching, or
-// cancelling the join) while staying in its queue; -1 when there is none.
-// Lining up again, there or elsewhere, forgets it.
-std::atomic<int> g_watchOptOutSlot{-1};
+// The player chose to stop watching (Stop Watching in the pause menu, which
+// runs on the render thread): the standing wish to watch is withdrawn on the
+// next lobby frame.
+std::atomic<bool> g_watchOptOutRequested{false};
 char g_watchNames[2][kNameCapacity] = {};
 char g_watchLine[160] = {};
 
@@ -1076,17 +1076,17 @@ void UpdateSpectateJoin(bool cancelPressed)
     const RoomState& room = g_service->Room();
     int wanted = local && room.inRoom ? local->watchSlot : -1;
     if (g_phase == Phase::Lobby) {
-        // Waiting in line for a setup means watching its match meanwhile,
-        // unless the player said no to this one.
-        const int queued = local && room.inRoom && local->slot < 0 ? local->queueSlot : -1;
-        if (g_watchOptOutSlot.load(std::memory_order_relaxed) != queued)
-            g_watchOptOutSlot.store(-1, std::memory_order_relaxed);
-        // From the moment both players are ready, not only once they fight:
-        // the links to them are then up before the match is.
-        if (wanted < 0 && queued >= 0 && room.slots[queued] >= SlotState::Starting &&
-            g_watchOptOutSlot.load(std::memory_order_relaxed) < 0) {
-            g_service->Watch(queued);
-            wanted = queued;
+        if (g_watchOptOutRequested.exchange(false, std::memory_order_acq_rel))
+            g_service->SetWatchIntent(-1);
+        // The player asked to watch a setup's matches (with or without a
+        // place in its queue): each one is joined as it comes up. From the
+        // moment both players are ready, not only once they fight, so the
+        // links to them are up before the match is.
+        const int intent = local && room.inRoom && local->slot < 0 ? g_service->WatchIntent() : -1;
+        if (wanted < 0 && intent >= 0 && intent < room.settings.slotCount &&
+            room.slots[intent] >= SlotState::Starting) {
+            g_service->Watch(intent);
+            wanted = intent;
         }
         if (wanted < 0) return;
         Spectate_Start(wanted);
@@ -1119,8 +1119,7 @@ void UpdateSpectateJoin(bool cancelPressed)
     if (stop || failure) {
         // Not this match again by itself: neither after a cancel nor in a
         // loop after a failure.
-        if (wanted >= 0 && !neverStarted)
-            g_watchOptOutSlot.store(wanted, std::memory_order_relaxed);
+        if (!neverStarted) g_service->SetWatchIntent(-1);
         HookLog("LobbyFlow: stopped joining as a spectator (%s)\n", failure ? failure : "cancelled");
         StopSpectating();
         g_ui->SetBusy(nullptr);
@@ -1871,7 +1870,7 @@ void LobbyFlow_RequestLeaveMatch()
     if (g_spectating) {
         // Only the watching ends; a place in a queue is kept, and the room
         // does not send the player straight back in.
-        g_watchOptOutSlot.store(Spectate_Slot(), std::memory_order_relaxed);
+        g_watchOptOutRequested.store(true, std::memory_order_release);
         LobbyFlow_RequestReturnToLobby("");
         return;
     }

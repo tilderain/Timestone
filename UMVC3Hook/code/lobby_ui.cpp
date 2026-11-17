@@ -100,6 +100,8 @@ const char* const kTopHelp[] = {
 };
 constexpr int kTopCount = 4;
 
+const char* const kSlotMenuItems[] = {"JOIN QUEUE & SPECTATE", "JOIN QUEUE", "SPECTATE ONLY"};
+constexpr int kSlotMenuCount = 3;
 const char* const kRoomMenuItems[] = {"TEAM SETUP", "LOBBY MUSIC", "INVITE FRIENDS", "LEAVE LOBBY"};
 constexpr int kRoomMenuCount = 4;
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
@@ -296,6 +298,7 @@ void LobbyUi::GoTo(Screen screen)
     screen_ = screen;
     screenFrame_ = 0;
     roomMenuOpen_ = false;
+    slotMenuOpen_ = false;
     quickChatOpen_ = false;
     musicOpen_ = false;
     memberFocus_ = false;
@@ -348,6 +351,7 @@ void LobbyUi::ReturnToRoom()
     screen_ = Screen::Room;
     screenFrame_ = kTransitionFrames;
     roomMenuOpen_ = false;
+    slotMenuOpen_ = false;
     quickChatOpen_ = false;
     musicOpen_ = false;
     memberFocus_ = false;
@@ -662,6 +666,10 @@ void LobbyUi::UpdateRoom(const Input& input)
         UpdateRoomMenu(input);
         return;
     }
+    if (slotMenuOpen_) {
+        UpdateSlotMenu(input);
+        return;
+    }
     if (quickChatOpen_) {
         UpdateQuickChat(input);
         return;
@@ -770,9 +778,37 @@ void LobbyUi::UpdateRoom(const Input& input)
         room.slots[seatSlot_] < SlotState::Starting) {
         service_.Sit(seatSlot_, seatSide_);
     } else {
-        service_.JoinQueue(seatSlot_); // moves over from any other queue
+        // Line up, watch, or both.
+        slotMenuOpen_ = true;
+        slotMenuCursor_ = 0;
     }
     Play(SFX_CONFIRM);
+}
+
+void LobbyUi::UpdateSlotMenu(const Input& input)
+{
+    MoveCursor(slotMenuCursor_, kSlotMenuCount, input);
+    if (input.cancel || input.menu) {
+        slotMenuOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
+    }
+    if (!input.confirm) return;
+    slotMenuOpen_ = false;
+    Play(SFX_CONFIRM);
+    switch (slotMenuCursor_) {
+    case 0: // queue and watch
+        service_.JoinQueue(seatSlot_); // moves over from any other queue
+        service_.SetWatchIntent(seatSlot_);
+        break;
+    case 1: // queue only
+        service_.JoinQueue(seatSlot_);
+        service_.SetWatchIntent(-1);
+        break;
+    default: // watch only
+        service_.SetWatchIntent(seatSlot_);
+        break;
+    }
 }
 
 int LobbyUi::SlotWatcherCount(int slot) const
@@ -818,6 +854,7 @@ bool LobbyUi::UpdateHandshake(const Input& input)
             // A match is waiting: whatever was open gives way, and the player
             // is called to the window.
             roomMenuOpen_ = false;
+            slotMenuOpen_ = false;
             quickChatOpen_ = false;
             musicOpen_ = false;
             memberMenuOpen_ = false;
@@ -1410,7 +1447,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     } else if (screen_ == Screen::Team) {
         add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Done");
-    } else if (roomMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
+    } else if (roomMenuOpen_ || slotMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
         add(BTN_CONFIRM, "Select");
         add(BTN_CANCEL, "Back");
     } else if (chatExpanded_) {
@@ -2052,12 +2089,20 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     if (textTarget_ == TextTarget::Chat)
         help = "Type a message, then confirm.";
     else if (local && local->queueSlot >= 0)
-        help = "You are in line: you watch the match until it is your turn.";
+        help = service_.WatchIntent() == local->queueSlot
+            ? "You are in line: you watch the match until it is your turn."
+            : "You are in line. You will be seated when it is your turn.";
+    else if (local && local->slot < 0 && service_.WatchIntent() >= 0)
+        help = "You will watch this setup's matches. Stop Watching in a match ends it.";
     else if (local && local->slot < 0)
         help = "Take a seat, or line up for a setup that is full.";
 
     if (roomMenuOpen_) {
         DrawListMenu(canvas, "LOBBY MENU", kRoomMenuItems, kRoomMenuCount, roomMenuCursor_);
+    } else if (slotMenuOpen_) {
+        char title[16];
+        snprintf(title, sizeof(title), "SETUP %d", seatSlot_ + 1);
+        DrawListMenu(canvas, title, kSlotMenuItems, kSlotMenuCount, slotMenuCursor_);
     } else if (quickChatOpen_)
         DrawListMenu(canvas, "CHAT", kQuickChat, kQuickChatCount, quickChatCursor_);
     else if (musicOpen_)

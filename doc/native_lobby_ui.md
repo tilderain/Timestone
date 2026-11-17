@@ -673,14 +673,14 @@ well. **Unverified in game.**
 
 ### In the room
 
-Lining up for a setup whose match is running also watches it: while the
-local player is queued for a slot that is `InProgress`, `UpdateSpectateJoin`
-calls `Watch` for it. A seat ends the watching (`Sit` clears it, and a
-spectator whose queue reaches the front is taken back to the room). Stop
-Watching in the pause menu, or cancelling while the match is being joined,
-opts out of that setup's match (`g_watchOptOutSlot`) without giving up the
-place in line; leaving the queue or lining up again forgets the opt-out.
-There is no watching without queueing.
+Confirm on a setup that cannot be sat at directly opens a three-item menu:
+JOIN QUEUE & SPECTATE, JOIN QUEUE, SPECTATE ONLY. Watching is a standing wish
+(`RoomService::SetWatchIntent`, local to the client): while it names a setup
+and the player is not seated, `UpdateSpectateJoin` calls `Watch` for each
+match there as it comes up. It is withdrawn by Stop Watching in the pause
+menu, by cancelling while a match is being joined, by a join that fails, by
+taking a seat (`Sit`), and by leaving the queue it came with. A spectator
+whose queue reaches the front is taken back to the room.
 The setup card shows the WATCH tag and a count.
 In the battle the top of the screen names the two players, the set score and
 the state of the feed; the pause menu offers Stop Watching only.

@@ -219,6 +219,9 @@ public:
     {
         if (Member* local = Local()) local->queueSlot = -1;
     }
+    int watchIntent = -1;
+    void SetWatchIntent(int slot) override { watchIntent = slot; }
+    int WatchIntent() const override { return watchIntent; }
     void Watch(int slot) override
     {
         if (Member* local = Local()) {
@@ -482,8 +485,11 @@ int main(int argc, char** argv)
         snprintf(name, sizeof(name), "room_%dslot", slots);
         ok &= Capture(ui, directory, name); // cursor on the open seat
         if (slots == 4) {
-            // Line up for the match in progress (the second slot).
+            // The match in progress (the second slot): line up, watch or both.
             ui.Update(Press(&Input::right));
+            ui.Update(Press(&Input::confirm));
+            Settle(ui, 3);
+            ok &= Capture(ui, directory, "room_slot_menu");
             ui.Update(Press(&Input::confirm));
             Settle(ui, 3);
             ok &= Capture(ui, directory, "room_4slot_queued");

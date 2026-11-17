@@ -52,6 +52,8 @@ public:
     void Stand() override;
     void JoinQueue(int slot) override;
     void LeaveQueue() override;
+    void SetWatchIntent(int slot) override { watchIntent_ = slot; }
+    int WatchIntent() const override { return watchIntent_; }
     void Watch(int slot) override;
     void StopWatching() override;
     void AcceptMatch() override;
@@ -135,6 +137,7 @@ private:
     bool creating_ = false;
     bool publishedOnce_ = false;
     bool liveAdvertised_ = false;
+    int watchIntent_ = -1;      // setup whose matches the player wants to watch
     int32_t pendingMusic_ = -1; // track to publish once the created room exists
     int pendingFirstTo_ = -1;   // likewise the set length
     int pendingRotation_ = -1;  // and the rotation rule

@@ -167,9 +167,15 @@ public:
     // queue is seated by their own client as soon as a seat there opens.
     virtual void JoinQueue(int slot) = 0;
     virtual void LeaveQueue() = 0;
-    // Watch the match running at a slot (possible while queued, not while
-    // seated). The lobby flow takes it from there: it sees the published
-    // watch slot, finds a feed and boots the battle as a spectator.
+    // The setup whose matches the player wants to watch (-1 for none): a
+    // standing wish, kept from match to match until it is withdrawn, the
+    // player takes a seat, or (if they were also queued there) leaves the
+    // queue. The lobby flow acts on it.
+    virtual void SetWatchIntent(int slot) = 0;
+    virtual int WatchIntent() const = 0;
+    // Start / stop watching the match at a slot now (possible while queued,
+    // not while seated). Publishes the watch slot; the flow finds a feed and
+    // boots the battle as a spectator.
     virtual void Watch(int slot) = 0;
     virtual void StopWatching() = 0;
     // Pre-match steps, see Member. They are forgotten whenever the opposite
