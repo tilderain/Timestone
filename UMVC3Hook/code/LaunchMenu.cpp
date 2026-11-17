@@ -15,7 +15,6 @@
 #include "savedata.h"
 #include "steam_lobby.h"
 #include "steam_transport.h"
-#include "updater.h"
 #include "umvc3.h"
 #include <Windows.h>
 #include <commctrl.h>
@@ -669,8 +668,6 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 static volatile LONG g_exitCleanupStarted = 0;
 static volatile LONG g_returnToLaunchMenuArmed = 0;
 static volatile LONG g_returnToLaunchMenuStarted = 0;
-static volatile LONG g_returnToLaunchMenuWatcherStarted = 0;
-static HANDLE g_returnToLaunchMenuCancelEvent = nullptr;
 
 void CleanupNetworkOnExit()
 {
@@ -704,62 +701,12 @@ void EnableReturnToLaunchMenuOnExit()
 {
     if (GetLaunchOption() == LAUNCH_DUAL_TRAINING)
         return;
-
     InterlockedExchange(&g_returnToLaunchMenuArmed, 1);
-
-    wchar_t gamePath[MAX_PATH] = {};
-    const DWORD length = GetModuleFileNameW(nullptr, gamePath, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH)
-        return;
-
-    wchar_t updaterPath[MAX_PATH] = {};
-    wcscpy(updaterPath, gamePath);
-    wchar_t* filename = wcsrchr(updaterPath, L'\\');
-    if (!filename)
-        filename = wcsrchr(updaterPath, L'/');
-    if (!filename)
-        return;
-    wcscpy(filename + 1, L"TimestoneUpdater.exe");
-
-    wchar_t eventName[96] = {};
-    swprintf(eventName, sizeof(eventName) / sizeof(eventName[0]),
-             L"Local\\TimestoneReturnMenu_%lu", GetCurrentProcessId());
-    g_returnToLaunchMenuCancelEvent = CreateEventW(
-        nullptr, TRUE, FALSE, eventName);
-    if (!g_returnToLaunchMenuCancelEvent) {
-        HookLog("UMVC3Hook: Failed to create launch-menu watchdog event (error %lu)\n",
-                GetLastError());
-        return;
-    }
-
-    wchar_t commandLine[MAX_PATH * 2 + 192] = {};
-    swprintf(commandLine, sizeof(commandLine) / sizeof(commandLine[0]),
-             L"\"%ls\" --return-menu-watch --pid %lu --game-exe \"%ls\" "
-             L"--cancel-event \"%ls\"", updaterPath, GetCurrentProcessId(),
-             gamePath, eventName);
-    STARTUPINFOW startup = {sizeof(startup)};
-    PROCESS_INFORMATION process = {};
-    const DWORD creationFlags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-    if (!CreateProcessW(updaterPath, commandLine, nullptr, nullptr, FALSE,
-                        creationFlags, nullptr, nullptr, &startup, &process)) {
-        HookLog("UMVC3Hook: Failed to start launch-menu watchdog (error %lu)\n",
-                GetLastError());
-        CloseHandle(g_returnToLaunchMenuCancelEvent);
-        g_returnToLaunchMenuCancelEvent = nullptr;
-        return;
-    }
-
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    InterlockedExchange(&g_returnToLaunchMenuWatcherStarted, 1);
-    HookLog("UMVC3Hook: Launch-menu watchdog started\n");
 }
 
 void DisableReturnToLaunchMenuOnExit()
 {
     InterlockedExchange(&g_returnToLaunchMenuArmed, 0);
-    if (g_returnToLaunchMenuCancelEvent)
-        SetEvent(g_returnToLaunchMenuCancelEvent);
 }
 
 void PrepareForGameExit()
@@ -767,13 +714,6 @@ void PrepareForGameExit()
     CleanupNetworkOnExit();
     if (InterlockedCompareExchange(&g_returnToLaunchMenuArmed, 0, 1) != 1 ||
         InterlockedExchange(&g_returnToLaunchMenuStarted, 1) != 0) {
-        HookLogFlush();
-        return;
-    }
-
-    // The detached watcher survives forced console termination and relaunches
-    // only after this process has fully exited.
-    if (InterlockedCompareExchange(&g_returnToLaunchMenuWatcherStarted, 0, 0) != 0) {
         HookLogFlush();
         return;
     }
@@ -787,9 +727,12 @@ void PrepareForGameExit()
         return;
     }
 
-    wchar_t commandLine[MAX_PATH + 32] = {};
+    // The new process holds itself back until this one has fully exited
+    // (Updater_OnProcessStart), so the two never run side by side.
+    wchar_t commandLine[MAX_PATH + 64] = {};
     swprintf(commandLine, sizeof(commandLine) / sizeof(commandLine[0]),
-             L"\"%ls\" -timestone-return-menu", exePath);
+             L"\"%ls\" -timestone-return-menu -timestone-wait-pid %lu", exePath,
+             GetCurrentProcessId());
     STARTUPINFOW startup = {sizeof(startup)};
     PROCESS_INFORMATION process = {};
     const DWORD creationFlags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
@@ -1812,8 +1755,6 @@ static MenuResult ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     InitializeLaunchMenuDarkMode();
     HookLog("UMVC3Hook: Launch window setup begin compact=%d battleSetup=%d\n",
             compactMode, battleSetupOnly);
-    Updater_Init();
-    HookLog("UMVC3Hook: Updater startup check complete\n");
     g_isLaunching = false;
     g_battleSetupOnly = battleSetupOnly;
     g_compactMode = compactMode;

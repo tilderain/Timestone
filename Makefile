@@ -201,6 +201,8 @@ LDFLAGS   := -shared -static-libgcc -static-libstdc++ -flto=auto -Werror=odr \
 	-static   # -shared -static: the driver's implicit -lmcfgthread then resolves statically (mingw mcf thread model)
 STRIP_ASI := 1
 LIBS      := \
+	-lwinhttp \
+	-lbcrypt \
 	-ld3d9 \
 	-ld3dcompiler \
 	-lkernel32 \

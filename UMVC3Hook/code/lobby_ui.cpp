@@ -1,6 +1,7 @@
 #include "lobby_ui.h"
 #include "lobby_music.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -345,6 +346,36 @@ void LobbyUi::SetBusy(const char* text)
     snprintf(busy_, sizeof(busy_), "%s", text ? text : "");
 }
 
+void LobbyUi::OfferUpdate(const char* installed, const char* available)
+{
+    snprintf(updateOffer_, sizeof(updateOffer_),
+             "A Timestone update is available.\nInstalled: %s     Latest: %s\n"
+             "Download and install it now?\nThe game restarts once it is ready.",
+             installed ? installed : "?", available ? available : "?");
+    confirm_ = Confirm::Update;
+    confirmCursor_ = 0; // default to "Yes"
+}
+
+bool LobbyUi::TakeUpdateAccepted()
+{
+    const bool accepted = updateAccepted_;
+    updateAccepted_ = false;
+    return accepted;
+}
+
+void LobbyUi::SetUpdateProgress(const UpdateView* view)
+{
+    updateActive_ = view != nullptr;
+    if (view) update_ = *view;
+}
+
+bool LobbyUi::TakeUpdateCancelled()
+{
+    const bool cancelled = updateCancelled_;
+    updateCancelled_ = false;
+    return cancelled;
+}
+
 void LobbyUi::ReturnToRoom()
 {
     if (!service_.Room().inRoom) return;
@@ -441,6 +472,13 @@ void LobbyUi::Update(const Input& input)
     SyncWithService();
 
     // Modal layers take input in priority order.
+    if (updateActive_) {
+        if (input.cancel && update_.cancellable) {
+            updateCancelled_ = true;
+            Play(SFX_CANCEL);
+        }
+        return;
+    }
     if (busy_[0]) return;
     if (notice_[0]) {
         if (input.confirm || input.cancel) {
@@ -472,6 +510,8 @@ void LobbyUi::Update(const Input& input)
                 mainMenuRequested_ = true;
             } else if (action == Confirm::KickMember) {
                 service_.Kick(memberMenuId_);
+            } else if (action == Confirm::Update) {
+                updateAccepted_ = true;
             }
         }
         return;
@@ -1382,7 +1422,11 @@ void LobbyUi::Draw(Canvas& canvas)
     case Screen::Team: help = DrawTeam(canvas); break;
     }
     // The footer is drawn last so it stays readable above modal dimming.
-    const bool modal = DrawModal(canvas);
+    bool modal = DrawModal(canvas);
+    if (updateActive_) {
+        DrawUpdateProgress(canvas);
+        modal = true;
+    }
     DrawFooter(canvas, modal ? nullptr : help);
 }
 
@@ -1412,7 +1456,9 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     };
 
     const bool modal = notice_[0] || confirm_ != Confirm::None;
-    if (busy_[0]) {
+    if (updateActive_) {
+        if (update_.cancellable) add(BTN_CANCEL, "Cancel");
+    } else if (busy_[0]) {
         // No input is accepted while a blocking operation runs.
     } else if (textTarget_ != TextTarget::None) {
         add(BTN_CONFIRM, "OK");
@@ -2352,6 +2398,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
 bool LobbyUi::DrawModal(Canvas& canvas) const
 {
     const Painter p(canvas, 1.0f, 0.0f);
+    if (updateActive_) return false; // DrawUpdateProgress has the screen
     const char* message = nullptr;
     if (busy_[0])
         message = busy_;
@@ -2361,6 +2408,8 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         message = "Leave this lobby?";
     else if (confirm_ == Confirm::MainMenu)
         message = "Return to the main menu?";
+    else if (confirm_ == Confirm::Update)
+        message = updateOffer_;
     char kick[160];
     if (!message && confirm_ == Confirm::KickMember) {
         snprintf(kick, sizeof(kick), "Kick %.40s?\nThey will not be able to rejoin this lobby.",
@@ -2369,8 +2418,16 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
     }
     if (!message) return false;
 
+    int lineCount = 1;
+    for (const char* c = message; *c; ++c)
+        if (*c == '\n') ++lineCount;
+    const bool asking = confirm_ != Confirm::None && !busy_[0] && !notice_[0];
+
     p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.6f});
-    const float w = 720.0f, h = confirm_ != Confirm::None && !busy_[0] && !notice_[0] ? 210.0f : 170.0f;
+    // A question grows by a line height for each line past two, so the
+    // answers stay clear of the text.
+    const float w = 720.0f,
+                h = asking ? 210.0f + (lineCount > 2 ? (lineCount - 2) * 30.0f : 0.0f) : 170.0f;
     const float x = (kScreenW - w) * 0.5f, y = (kScreenH - h) * 0.5f - 12.0f;
     p.Box(TEX_PANEL_DARK, x, y, w, h);
     p.Sprite(TEX_YELLOW_BAR, x + 30.0f, y + 26.0f, w - 60.0f, 3.0f, Uv{0.1f, 0.2f, 0.9f, 0.8f}, A_TL);
@@ -2379,11 +2436,8 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
     char line[160];
     const char* cursor = message;
     int lineIndex = 0;
-    int lineCount = 1;
-    for (const char* c = message; *c; ++c)
-        if (*c == '\n') ++lineCount;
-    const float firstY = y + (busy_[0] || notice_[0] || confirm_ == Confirm::None ? h * 0.5f : 76.0f) -
-                         (lineCount - 1) * 15.0f;
+    const float firstY = asking ? y + 76.0f - (lineCount > 1 ? 15.0f : 0.0f)
+                                : y + h * 0.5f - (lineCount - 1) * 15.0f;
     while (*cursor && lineIndex < 5) {
         size_t length = 0;
         while (cursor[length] && cursor[length] != '\n') ++length;
@@ -2417,6 +2471,39 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         }
     }
     return true;
+}
+
+// The updater's progress: what it is doing, a bar, and the byte counts.
+void LobbyUi::DrawUpdateProgress(Canvas& canvas) const
+{
+    const Painter p(canvas, 1.0f, 0.0f);
+    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.6f});
+    const float w = 760.0f, h = 220.0f;
+    const float x = (kScreenW - w) * 0.5f, y = (kScreenH - h) * 0.5f - 12.0f;
+    p.Box(TEX_PANEL_DARK, x, y, w, h);
+    p.Sprite(TEX_YELLOW_BAR, x + 30.0f, y + 26.0f, w - 60.0f, 3.0f, Uv{0.1f, 0.2f, 0.9f, 0.8f}, A_TL);
+    p.Text("TIMESTONE UPDATE", kScreenW * 0.5f, y + 56.0f, 0.42f, A_MC, kYellow, FONT_HEADING);
+    p.TextFit(update_.stage, kScreenW * 0.5f, y + 96.0f, 0.8f, w - 80.0f, A_MC);
+
+    const float barX = x + 50.0f, barY = y + 124.0f, barW = w - 100.0f, barH = 22.0f;
+    p.Fill(barX - 2.0f, barY - 2.0f, barW + 4.0f, barH + 4.0f, WithAlpha(kFaint, 0.8f));
+    p.Fill(barX, barY, barW, barH, Color{0.0f, 0.0f, 0.0f, 0.85f});
+    if (update_.fraction >= 0.0f) {
+        const float filled = barW * Clamp01(update_.fraction);
+        if (filled > 0.0f) {
+            p.Fill(barX, barY, filled, barH, kYellow);
+            // A highlight sweeping along the filled part keeps it lively.
+            const float sweep = std::fmod(frame_ * 6.0f, barW + 120.0f) - 60.0f;
+            const float from = std::max(0.0f, sweep), to = std::min(filled, sweep + 60.0f);
+            if (to > from) p.Fill(barX + from, barY, to - from, barH, WithAlpha(kWhite, 0.35f));
+        }
+    } else {
+        // Size not known yet: a block travelling back and forth.
+        const float block = barW * 0.2f;
+        const float t = 0.5f + 0.5f * std::sin(frame_ * 0.06f);
+        p.Fill(barX + (barW - block) * t, barY, block, barH, kYellow);
+    }
+    p.TextFit(update_.status, kScreenW * 0.5f, y + 176.0f, 0.62f, w - 80.0f, A_MC, kDim);
 }
 
 } // namespace lobby

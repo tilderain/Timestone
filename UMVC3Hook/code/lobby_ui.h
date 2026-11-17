@@ -17,6 +17,14 @@ enum Sfx : uint32_t {
     SFX_MATCH_FOUND = 1u << 3,
 };
 
+// A Timestone update being downloaded, drawn as a modal with a progress bar.
+struct UpdateView {
+    char stage[160];  // what the updater is doing ("Downloading...")
+    char status[160]; // byte counts and speed, or empty
+    float fraction;   // 0..1, or negative while the size is unknown
+    bool cancellable; // nothing installed yet, cancel stops it
+};
+
 // Preferences the caller loads before constructing the UI and saves whenever
 // TakePrefsDirty() reports a change.
 struct UiPrefs {
@@ -50,6 +58,14 @@ public:
     // Non-dismissable progress overlay (e.g. "Connecting to opponent...").
     // Pass nullptr to clear.
     void SetBusy(const char* text);
+    // Asks whether to download and install a newer Timestone release.
+    void OfferUpdate(const char* installed, const char* available);
+    // True once after the player said yes to OfferUpdate.
+    bool TakeUpdateAccepted();
+    // Shows (or with nullptr, clears) the update progress modal. It takes all
+    // input; cancel is reported by TakeUpdateCancelled when allowed.
+    void SetUpdateProgress(const UpdateView* view);
+    bool TakeUpdateCancelled();
     // Re-enter the room screen after a match without replaying transitions.
     void ReturnToRoom();
     // Replays the current screen's slide-in, holding it back for `delayFrames`
@@ -60,7 +76,7 @@ public:
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
     enum class TextTarget : uint8_t { None, RoomName, Chat };
-    enum class Confirm : uint8_t { None, LeaveRoom, MainMenu, KickMember };
+    enum class Confirm : uint8_t { None, LeaveRoom, MainMenu, KickMember, Update };
     // Pre-match steps shown as a modal once both seats of the local player's
     // match slot are taken. Each is answered by both players in turn.
     enum class Handshake : uint8_t {
@@ -111,6 +127,7 @@ private:
                       int count, int cursor) const;
     void DrawMusicMenu(Canvas& canvas) const;
     bool DrawModal(Canvas& canvas) const; // true when a modal layer was drawn
+    void DrawUpdateProgress(Canvas& canvas) const;
 
     const Member* LocalMember() const;
     const Member* SeatOccupant(int slot, int side) const;
@@ -173,6 +190,11 @@ private:
     Confirm confirm_ = Confirm::None;
     int confirmCursor_ = 1; // default to "No"
     char notice_[256] = {};
+    char updateOffer_[192] = {}; // the Confirm::Update question
+    bool updateAccepted_ = false;
+    bool updateActive_ = false;  // progress modal shown
+    bool updateCancelled_ = false;
+    UpdateView update_ = {};
     char busy_[128] = {};
 
     TextTarget textTarget_ = TextTarget::None;

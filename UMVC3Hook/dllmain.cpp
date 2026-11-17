@@ -11,6 +11,7 @@
 #include "code/eSettingsManager.h"
 #include "code/UMVC3Camera.h"
 #include "code/LaunchMenu.h"
+#include "code/updater.h"
 #include "code/LaunchMenu_settings.h"
 #include "code/launch_music.h"
 #include "code/framestepper.h"
@@ -2346,6 +2347,9 @@ extern "C" __declspec(dllexport) void InitializeASI()
 	InitializeGameAddressBase();
 	if (!CheckGame())
 		return;
+	// Before anything else: a restart from an update or the launch menu
+	// waits here for the previous process to be gone.
+	Updater_OnProcessStart();
 
 
 	// Install CreateFileA/W hooks to log every file open

@@ -19,6 +19,7 @@
 #include "steam_lobby.h"
 #include "steam_transport.h"
 #include "trainingboot.h"
+#include "updater.h"
 #include "../IniSafe.h"
 #include "../imgui/imgui.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -203,6 +204,11 @@ constexpr uint32_t kNativeFailedFrames = 900;  // give up reporting after 15 s
 std::atomic<bool> g_returnRequested{false};
 char g_returnReason[160] = {};
 char g_pendingNotice[160] = {};
+
+// Timestone update offered from the online menu (updater.h does the work).
+enum class UpdateFlow { Idle, Checking, Offered, Downloading, Installing };
+UpdateFlow g_updateFlow = UpdateFlow::Idle;
+bool g_updateOfferPending = false; // a fresh visit owes the offer once known
 
 // ---------------------------------------------------------------------------
 // Roster data for the team screen
@@ -1361,6 +1367,108 @@ void EnsureObjects()
     LocalLobby_SpawnSecondInstance();
 }
 
+// "v0.5.1" for either "0.5.1" or a "v0.5.1" release tag.
+void FormatVersion(char* out, size_t size, const char* version)
+{
+    snprintf(out, size, "%s%s", (version[0] == 'v' || version[0] == 'V') ? "" : "v", version);
+}
+
+void OfferUpdate()
+{
+    char installed[32], latest[72];
+    FormatVersion(installed, sizeof(installed), UMVC3HOOK_VERSION);
+    FormatVersion(latest, sizeof(latest), Updater_LatestVersion());
+    g_ui->OfferUpdate(installed, latest);
+    g_updateFlow = UpdateFlow::Offered;
+}
+
+// Each fresh visit to the online menu: check once per session, quietly in
+// the background, then offer while one is available.
+void PumpUpdate()
+{
+    switch (g_updateFlow) {
+    case UpdateFlow::Idle:
+    case UpdateFlow::Offered:
+        if (g_updateOfferPending && Updater_PollOnlineCheck() == UpdateCheck::Idle) {
+            Updater_BeginOnlineCheck();
+            g_updateFlow = UpdateFlow::Checking;
+        } else if (g_updateOfferPending && Updater_PollOnlineCheck() == UpdateCheck::Available) {
+            g_updateOfferPending = false;
+            OfferUpdate();
+        } else {
+            g_updateOfferPending = false;
+        }
+        if (g_updateFlow == UpdateFlow::Offered && g_ui->TakeUpdateAccepted()) {
+            // Out of any room first: a match must not start under the update.
+            if (g_service->Room().inRoom) g_service->Leave();
+            Updater_BeginDownload();
+            g_updateFlow = UpdateFlow::Downloading;
+        }
+        break;
+    case UpdateFlow::Checking: {
+        const UpdateCheck check = Updater_PollOnlineCheck();
+        if (check == UpdateCheck::Checking) break;
+        g_updateFlow = UpdateFlow::Idle;
+        // Nothing waited on the check, so the player may have moved into a
+        // room by now; the offer is then kept for the next visit instead.
+        if (check == UpdateCheck::Available && !g_service->Room().inRoom) OfferUpdate();
+        g_updateOfferPending = false;
+        break;
+    }
+    case UpdateFlow::Downloading: {
+        if (g_ui->TakeUpdateCancelled()) {
+            Updater_CancelDownload();
+            g_ui->SetUpdateProgress(nullptr);
+            g_ui->ShowNotice("The update was cancelled.");
+            g_updateFlow = UpdateFlow::Idle;
+            break;
+        }
+        const UpdateProgress& progress = Updater_PollDownload();
+        UpdateView view = {};
+        snprintf(view.stage, sizeof(view.stage), "%s", progress.stage);
+        view.fraction = progress.total ? static_cast<float>(progress.downloaded) / progress.total : -1.0f;
+        view.cancellable = true;
+        const double mib = 1024.0 * 1024.0;
+        if (progress.total)
+            snprintf(view.status, sizeof(view.status), "%u%%  |  %.2f / %.2f MiB  |  %.0f KiB/s",
+                     static_cast<unsigned>(progress.downloaded * 100 / progress.total),
+                     progress.downloaded / mib, progress.total / mib, progress.bytesPerSecond / 1024.0);
+        else if (progress.downloaded)
+            snprintf(view.status, sizeof(view.status), "%.2f MiB downloaded  |  %.0f KiB/s",
+                     progress.downloaded / mib, progress.bytesPerSecond / 1024.0);
+
+        if (progress.state == UpdateProgress::Failed) {
+            g_ui->SetUpdateProgress(nullptr);
+            char notice[300];
+            snprintf(notice, sizeof(notice), "The update could not be downloaded.\n%s", progress.error);
+            g_ui->ShowNotice(notice);
+            g_updateFlow = UpdateFlow::Idle;
+        } else if (progress.state == UpdateProgress::Ready) {
+            snprintf(view.stage, sizeof(view.stage), "Restarting the game to install the update...");
+            view.status[0] = '\0';
+            view.fraction = 1.0f;
+            view.cancellable = false;
+            g_ui->SetUpdateProgress(&view);
+            // Shown for one frame first, then the swap and restart.
+            g_updateFlow = UpdateFlow::Installing;
+        } else {
+            g_ui->SetUpdateProgress(&view);
+        }
+        break;
+    }
+    case UpdateFlow::Installing: {
+        // Does not return when it works: the game restarts on the new ASI.
+        char error[256];
+        if (!Updater_InstallAndRestart(error, sizeof(error))) {
+            g_ui->SetUpdateProgress(nullptr);
+            g_ui->ShowNotice(error);
+            g_updateFlow = UpdateFlow::Idle;
+        }
+        break;
+    }
+    }
+}
+
 void RunLobbyFrame(uint64_t titleArea)
 {
     g_service->Pump();
@@ -1370,6 +1478,7 @@ void RunLobbyFrame(uint64_t titleArea)
     // MAIN MENU was picked: the lobby stays up, inert, until black covers it.
     if (g_mainMenuReleaseAt) input = Input{};
     g_ui->Update(input);
+    PumpUpdate();
     if (g_ui->TakePrefsDirty()) SavePrefs(g_ui->Prefs());
     const uint32_t sfx = g_ui->TakeSfx();
     if (sfx & SFX_MATCH_FOUND) Native_FocusGameWindow();
@@ -1613,6 +1722,8 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
             g_ui->ShowNotice(g_pendingNotice);
             g_pendingNotice[0] = '\0';
         }
+        // A fresh visit, not back from a match: check for (or re-offer) an update.
+        if (g_entrancePending) g_updateOfferPending = true;
         HookLog("LobbyFlow: title area ready for the lobby (area=%llx)\n",
                 static_cast<unsigned long long>(titleArea));
     }
