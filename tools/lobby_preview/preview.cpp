@@ -514,8 +514,23 @@ int main(int argc, char** argv)
             // Up off the top of the player list lands on the chat panel.
             ui.Update(Press(&Input::up));
             ui.Update(Press(&Input::up));
-            Settle(ui, 2);
+            Settle(ui, 10); // the shortcut tag has popped up
             ok &= Capture(ui, directory, "room_chat_focus");
+            {
+                Input keyboard = {};
+                keyboard.usingKeyboard = true;
+                for (int i = 0; i < 2; ++i) ui.Update(keyboard);
+                ok &= Capture(ui, directory, "room_chat_focus_keyboard");
+                keyboard.actionY = true; // Y on the keyboard types at once
+                ui.Update(keyboard);
+                keyboard.actionY = false;
+                keyboard.typed = "gg";
+                ui.Update(keyboard);
+                keyboard.typed = nullptr;
+                for (int i = 0; i < 2; ++i) ui.Update(keyboard);
+                ok &= Capture(ui, directory, "room_chat_typing");
+                ui.Update(Press(&Input::cancel));
+            }
             for (int i = 0; i < 30; ++i) {
                 char line[128];
                 snprintf(line, sizeof(line), i % 4 == 1
@@ -540,7 +555,7 @@ int main(int argc, char** argv)
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_music");
             ui.Update(Press(&Input::cancel));
-            ui.Update(Press(&Input::actionY));
+            ui.Update(Press(&Input::quickChat)); // RB / Tab
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_chat");
             ui.Update(Press(&Input::cancel));

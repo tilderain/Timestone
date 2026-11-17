@@ -499,6 +499,7 @@ uint32_t g_lastInputFrame = 0;
 int g_repeatFrames[4] = {};
 bool g_usingKeyboard = false;
 bool g_previousKeys[256] = {};
+bool g_textKeysPrimed = false; // g_previousKeys holds the keys down when typing began
 int g_backspaceFrames = 0;
 char g_typed[64] = {};
 
@@ -656,7 +657,7 @@ namespace {
 // (sPad__accumulateUnitFlagsFromQuery): arrows, Enter/A, Backspace/B, X, Y,
 // Esc as Start.
 struct KeyState {
-    bool up, down, left, right, confirm, cancel, x, y, menu;
+    bool up, down, left, right, confirm, cancel, x, y, menu, quickChat;
 };
 
 KeyState ReadKeyboard(bool textActive)
@@ -676,6 +677,7 @@ KeyState ReadKeyboard(bool textActive)
         keys.cancel = IsKeyHeld(VK_BACK) || IsKeyHeld('B');
         keys.x = IsKeyHeld('X');
         keys.y = IsKeyHeld('Y');
+        keys.quickChat = IsKeyHeld(VK_TAB);
     }
     return keys;
 }
@@ -705,6 +707,15 @@ void CollectTypedText(bool textActive, bool foreground)
 
     if (!textActive || !foreground) {
         memset(g_previousKeys, 0, sizeof(g_previousKeys));
+        g_textKeysPrimed = false;
+        return;
+    }
+    if (!g_textKeysPrimed) {
+        // Keys already down when typing starts are not text: Y opens the
+        // chat on the keyboard and must not also type a "y".
+        g_textKeysPrimed = true;
+        for (int vk = 0; vk < 256; ++vk) g_previousKeys[vk] = IsKeyHeld(vk);
+        g_typed[0] = '\0';
         return;
     }
     if (g_typed[0]) {
@@ -940,7 +951,7 @@ void Native_ReadInput(Input& input, bool textActive)
     // Logical held bits.
     enum : uint32_t {
         H_UP = 1, H_DOWN = 2, H_LEFT = 4, H_RIGHT = 8, H_CONFIRM = 16, H_CANCEL = 32,
-        H_X = 64, H_Y = 128, H_MENU = 256, H_LB = 512, H_RB = 1024,
+        H_X = 64, H_Y = 128, H_MENU = 256, H_LB = 512, H_RB = 1024, H_QUICK_CHAT = 2048,
     };
     uint32_t fromPad = 0, fromKeys = 0;
     if (padHeld & PAD_UP) fromPad |= H_UP;
@@ -953,7 +964,7 @@ void Native_ReadInput(Input& input, bool textActive)
     if (padHeld & PAD_Y) fromPad |= H_Y;
     if (padHeld & PAD_START) fromPad |= H_MENU;
     if (padHeld & PAD_LB) fromPad |= H_LB;
-    if (padHeld & PAD_RB) fromPad |= H_RB;
+    if (padHeld & PAD_RB) fromPad |= H_RB | H_QUICK_CHAT;
     if (keys.up) fromKeys |= H_UP;
     if (keys.down) fromKeys |= H_DOWN;
     if (keys.left) fromKeys |= H_LEFT;
@@ -963,6 +974,7 @@ void Native_ReadInput(Input& input, bool textActive)
     if (keys.x) fromKeys |= H_X;
     if (keys.y) fromKeys |= H_Y;
     if (keys.menu) fromKeys |= H_MENU;
+    if (keys.quickChat) fromKeys |= H_QUICK_CHAT;
 
     const uint32_t held = fromPad | fromKeys;
     // A button already down when the lobby (re)appears is not a press: the
@@ -1001,6 +1013,7 @@ void Native_ReadInput(Input& input, bool textActive)
     input.menu = (pressed & H_MENU) != 0;
     input.pageLeft = (pressed & H_LB) != 0;
     input.pageRight = (pressed & H_RB) != 0;
+    input.quickChat = (pressed & H_QUICK_CHAT) != 0;
     input.usingKeyboard = g_usingKeyboard;
 
     if (textActive && foreground && IsKeyHeld(VK_BACK)) {

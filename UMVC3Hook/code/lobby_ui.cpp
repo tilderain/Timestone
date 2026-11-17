@@ -82,10 +82,13 @@ constexpr uint32_t kTransitionFrames = 9;
 
 // Button glyph cells inside the 4x4 glyph sheets (mai_hlp03 / mai_hlp04).
 struct GlyphCell { uint8_t col, row; };
-enum Button : uint8_t { BTN_CONFIRM, BTN_CANCEL, BTN_X, BTN_Y, BTN_MENU, BTN_DPAD, BTN_COUNT };
-constexpr GlyphCell kPadGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}};
+// BTN_QUICK_CHAT is RB on a pad and Tab on the keyboard.
+enum Button : uint8_t {
+    BTN_CONFIRM, BTN_CANCEL, BTN_X, BTN_Y, BTN_MENU, BTN_DPAD, BTN_QUICK_CHAT, BTN_COUNT
+};
+constexpr GlyphCell kPadGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 2}};
 // The game's fixed keyboard menu mapping: Enter, Backspace, X, Y, Esc (Start).
-constexpr GlyphCell kKeyGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}};
+constexpr GlyphCell kKeyGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {0, 3}};
 
 struct Prompt {
     Button button;
@@ -217,6 +220,16 @@ private:
     float alpha_;
     float dx_;
 };
+
+// A button glyph of `size` px, its right edge at `right`, centred on `y`.
+void DrawGlyph(const Painter& p, Button button, bool keyboard, float right, float y, float size)
+{
+    const Tex sheet = keyboard ? TEX_KEY_GLYPHS : TEX_PAD_GLYPHS;
+    const GlyphCell cell = (keyboard ? kKeyGlyphs : kPadGlyphs)[button];
+    p.Sprite(sheet, right, y, size, size,
+             Uv{cell.col * 0.25f, cell.row * 0.25f, (cell.col + 1) * 0.25f, (cell.row + 1) * 0.25f},
+             A_MR);
+}
 
 // Distance from a value's centre to each arrow. The option menu uses 130; the
 // lobby's values run longer (character and assist names), so a little more,
@@ -470,6 +483,10 @@ void LobbyUi::Update(const Input& input)
     usingKeyboard_ = input.usingKeyboard;
 
     SyncWithService();
+    if (screen_ == Screen::Room && (chatFocus_ || chatExpanded_))
+        chatHoverFrames_ = chatHoverFrames_ < 100000 ? chatHoverFrames_ + 1 : chatHoverFrames_;
+    else
+        chatHoverFrames_ = 0;
 
     // Modal layers take input in priority order.
     if (updateActive_) {
@@ -702,6 +719,26 @@ void LobbyUi::UpdateCreate(const Input& input)
 
 void LobbyUi::UpdateRoom(const Input& input)
 {
+    // Chat shortcuts work over the room's own menus: RB (Tab on the keyboard)
+    // toggles the quick chat, and Y on the keyboard starts typing at once. A
+    // match waiting on the local player keeps the input, bar closing the list.
+    const bool typeKey = input.actionY && input.usingKeyboard;
+    if ((input.quickChat || typeKey) &&
+        (quickChatOpen_ || HandshakeStep() == Handshake::None)) {
+        roomMenuOpen_ = false;
+        slotMenuOpen_ = false;
+        musicOpen_ = false;
+        memberMenuOpen_ = false;
+        if (typeKey) {
+            quickChatOpen_ = false;
+            Play(SFX_CONFIRM);
+            BeginText(TextTarget::Chat, "");
+            return;
+        }
+        quickChatOpen_ = !quickChatOpen_;
+        Play(quickChatOpen_ ? SFX_CONFIRM : SFX_CANCEL);
+        return;
+    }
     if (roomMenuOpen_) {
         UpdateRoomMenu(input);
         return;
@@ -739,7 +776,6 @@ void LobbyUi::UpdateRoom(const Input& input)
     }
     if (input.actionY) {
         quickChatOpen_ = true;
-        quickChatCursor_ = 0;
         Play(SFX_CONFIRM);
         return;
     }
@@ -1454,6 +1490,12 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     const auto add = [&](Button button, const char* label) {
         if (count < 6) prompts[count++] = Prompt{button, label};
     };
+    // In a room, Y types straight into the chat on the keyboard; RB (Tab)
+    // opens the quick chat from anywhere.
+    const auto addChat = [&]() {
+        if (usingKeyboard_) add(BTN_Y, "Type");
+        add(BTN_QUICK_CHAT, "Quick chat");
+    };
 
     const bool modal = notice_[0] || confirm_ != Confirm::None;
     if (updateActive_) {
@@ -1462,7 +1504,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         // No input is accepted while a blocking operation runs.
     } else if (textTarget_ != TextTarget::None) {
         add(BTN_CONFIRM, "OK");
-        add(BTN_CANCEL, "Cancel");
+        add(usingKeyboard_ ? BTN_MENU : BTN_CANCEL, "Cancel"); // Esc: Backspace edits
     } else if (modal) {
         add(BTN_CONFIRM, "OK");
         if (confirm_ != Confirm::None) add(BTN_CANCEL, "Back");
@@ -1498,16 +1540,16 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_CANCEL, "Back");
     } else if (chatExpanded_) {
         add(BTN_DPAD, "Scroll");
-        add(BTN_Y, "Chat");
+        addChat();
         add(BTN_CANCEL, "Close");
     } else if (chatFocus_) {
         add(BTN_CONFIRM, "Expand");
-        add(BTN_Y, "Chat");
+        addChat();
         add(BTN_MENU, "Menu");
         add(BTN_CANCEL, "Back");
     } else if (memberFocus_) {
         add(BTN_CONFIRM, "Player");
-        add(BTN_Y, "Chat");
+        addChat();
         add(BTN_MENU, "Menu");
         add(BTN_CANCEL, "Back");
     } else {
@@ -1525,23 +1567,17 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
             add(BTN_CONFIRM, "Join queue");
         if (seated) add(BTN_X, "Leave seat");
         else if (queued) add(BTN_X, "Leave queue");
-        add(BTN_Y, "Chat");
+        addChat();
         add(BTN_MENU, "Menu");
         add(BTN_CANCEL, seated || queued ? "Back" : "Leave");
     }
 
-    const Tex sheet = usingKeyboard_ ? TEX_KEY_GLYPHS : TEX_PAD_GLYPHS;
-    const GlyphCell* cells = usingKeyboard_ ? kKeyGlyphs : kPadGlyphs;
     float x = kSafeRight;
     for (int i = count - 1; i >= 0; --i) {
         const float labelWidth = TextWidth(prompts[i].label) * 0.72f;
         p.Text(prompts[i].label, x, kFooterY + 22.0f, 0.72f, A_MR, kText);
         x -= labelWidth + 6.0f;
-        const GlyphCell cell = cells[prompts[i].button];
-        p.Sprite(sheet, x, kFooterY + 22.0f, 34.0f, 34.0f,
-                 Uv{cell.col * 0.25f, cell.row * 0.25f, (cell.col + 1) * 0.25f,
-                    (cell.row + 1) * 0.25f},
-                 A_MR);
+        DrawGlyph(p, prompts[i].button, usingKeyboard_, x, kFooterY + 22.0f, 34.0f);
         x -= 34.0f + 18.0f;
     }
     // The help line takes whatever the prompts left free.
@@ -2077,6 +2113,29 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
             while ((static_cast<unsigned char>(*shown) & 0xC0) == 0x80) ++shown;
         }
         p.Text(shown, x + 22.0f, y + h - 22.0f, 0.6f, A_ML, kText);
+    }
+
+    // Cursor on the chat: its shortcuts pop up on the panel's top edge.
+    if (chatHoverFrames_ > 0 && !typing && !quickChatOpen_) {
+        const float t = Clamp01(chatHoverFrames_ / 8.0f), u = t - 1.0f;
+        const float pop = 1.0f + 2.70158f * u * u * u + 1.70158f * u * u; // ease out, overshooting
+        const Prompt prompts[] = {{BTN_Y, "Type"}, {BTN_QUICK_CHAT, "Quick chat"}};
+        const int first = usingKeyboard_ ? 0 : 1; // typing needs a keyboard
+        const float glyph = 30.0f * pop, scale = 0.56f * pop, gap = 16.0f * pop;
+        float tagW = 20.0f - gap;
+        for (int i = first; i < 2; ++i) tagW += glyph + 6.0f + TextWidth(prompts[i].label) * scale + gap;
+        // Centred just above the top edge, clear of the first line of chat.
+        const float right = x + w - 12.0f, cy = y - 6.0f;
+        const Painter tag = p.Faded(Clamp01(chatHoverFrames_ / 4.0f));
+        tag.Fill(right - tagW, cy - 17.0f * pop, tagW, 34.0f * pop, Color{0.0f, 0.0f, 0.0f, 0.9f});
+        tag.Fill(right - tagW, cy + 15.0f * pop, tagW, 2.0f * pop, WithAlpha(kYellow, 0.9f));
+        float at = right - 10.0f;
+        for (int i = 1; i >= first; --i) {
+            tag.Text(prompts[i].label, at, cy, scale, A_MR, kText);
+            at -= TextWidth(prompts[i].label) * scale + 6.0f;
+            DrawGlyph(tag, prompts[i].button, usingKeyboard_, at, cy, glyph);
+            at -= glyph + gap;
+        }
     }
 }
 

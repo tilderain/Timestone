@@ -168,7 +168,7 @@ private:
     bool slotMenuOpen_ = false; // line up, watch or both, for a setup that is taken
     int slotMenuCursor_ = 0;
     bool quickChatOpen_ = false;
-    int quickChatCursor_ = 0;
+    int quickChatCursor_ = 0; // kept between openings, like the last phrase used
     bool memberFocus_ = false;    // cursor is in the player list, not on a seat
     int memberCursor_ = 0;
     bool memberMenuOpen_ = false; // actions for the selected player
@@ -176,6 +176,7 @@ private:
     bool chatExpanded_ = false;   // chat covers the player list and scrolls
     int chatScroll_ = 0;          // display rows scrolled back from the newest
     int chatSeenCount_ = 0;       // messages there were when the scroll was last set
+    uint32_t chatHoverFrames_ = 0; // frames the cursor has been on the chat panel
     int memberMenuCursor_ = 0;
     uint64_t memberMenuId_ = 0;   // who the menu / kick confirmation is about
     char memberMenuName_[kNameCapacity] = {};
