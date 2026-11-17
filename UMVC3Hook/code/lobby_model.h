@@ -228,7 +228,7 @@ struct Input {
     bool actionY; // tertiary action (pad Y)
     bool menu;    // Start
     bool pageLeft, pageRight; // shoulder buttons
-    bool quickChat;           // RB on a pad, Tab on the keyboard
+    bool quickChat;           // RB on a pad, X on the keyboard
     bool usingKeyboard;       // last input source, selects footer glyphs
     // Text typed this frame while a text field is active (UTF-8, may be empty).
     const char* typed;

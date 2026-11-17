@@ -677,7 +677,8 @@ KeyState ReadKeyboard(bool textActive)
         keys.cancel = IsKeyHeld(VK_BACK) || IsKeyHeld('B');
         keys.x = IsKeyHeld('X');
         keys.y = IsKeyHeld('Y');
-        keys.quickChat = IsKeyHeld(VK_TAB);
+        // X is also the quick chat key; in a room that is all it does.
+        keys.quickChat = keys.x;
     }
     return keys;
 }

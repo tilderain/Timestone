@@ -555,7 +555,7 @@ int main(int argc, char** argv)
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_music");
             ui.Update(Press(&Input::cancel));
-            ui.Update(Press(&Input::quickChat)); // RB / Tab
+            ui.Update(Press(&Input::quickChat)); // RB / X
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_chat");
             ui.Update(Press(&Input::cancel));

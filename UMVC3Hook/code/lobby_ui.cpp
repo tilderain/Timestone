@@ -82,13 +82,13 @@ constexpr uint32_t kTransitionFrames = 9;
 
 // Button glyph cells inside the 4x4 glyph sheets (mai_hlp03 / mai_hlp04).
 struct GlyphCell { uint8_t col, row; };
-// BTN_QUICK_CHAT is RB on a pad and Tab on the keyboard.
+// BTN_QUICK_CHAT is RB on a pad and X on the keyboard.
 enum Button : uint8_t {
     BTN_CONFIRM, BTN_CANCEL, BTN_X, BTN_Y, BTN_MENU, BTN_DPAD, BTN_QUICK_CHAT, BTN_COUNT
 };
 constexpr GlyphCell kPadGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 2}};
 // The game's fixed keyboard menu mapping: Enter, Backspace, X, Y, Esc (Start).
-constexpr GlyphCell kKeyGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {0, 3}};
+constexpr GlyphCell kKeyGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 1}};
 
 struct Prompt {
     Button button;
@@ -719,7 +719,7 @@ void LobbyUi::UpdateCreate(const Input& input)
 
 void LobbyUi::UpdateRoom(const Input& input)
 {
-    // Chat shortcuts work over the room's own menus: RB (Tab on the keyboard)
+    // Chat shortcuts work over the room's own menus: RB (X on the keyboard)
     // toggles the quick chat, and Y on the keyboard starts typing at once. A
     // match waiting on the local player keeps the input, bar closing the list.
     const bool typeKey = input.actionY && input.usingKeyboard;
@@ -1490,7 +1490,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     const auto add = [&](Button button, const char* label) {
         if (count < 6) prompts[count++] = Prompt{button, label};
     };
-    // In a room, Y types straight into the chat on the keyboard; RB (Tab)
+    // In a room, Y types straight into the chat on the keyboard; RB (X)
     // opens the quick chat from anywhere.
     const auto addChat = [&]() {
         if (usingKeyboard_) add(BTN_Y, "Type");
@@ -1565,11 +1565,15 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
             add(BTN_CONFIRM, "Sit");
         else if (!seated)
             add(BTN_CONFIRM, "Join queue");
-        if (seated) add(BTN_X, "Leave seat");
-        else if (queued) add(BTN_X, "Leave queue");
+        // On the keyboard X is the quick chat; Backspace leaves the seat.
+        if (!usingKeyboard_ && seated) add(BTN_X, "Leave seat");
+        else if (!usingKeyboard_ && queued) add(BTN_X, "Leave queue");
         addChat();
         add(BTN_MENU, "Menu");
-        add(BTN_CANCEL, seated || queued ? "Back" : "Leave");
+        if (usingKeyboard_ && (seated || queued))
+            add(BTN_CANCEL, seated ? "Leave seat" : "Leave queue");
+        else
+            add(BTN_CANCEL, seated || queued ? "Back" : "Leave");
     }
 
     float x = kSafeRight;
