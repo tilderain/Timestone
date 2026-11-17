@@ -2558,7 +2558,7 @@ void LobbyUi::DrawCharPicker(Canvas& canvas, float centerX, float rowY) const
     if (count <= 0) return;
     const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
     const Painter p(canvas, 1.0f, 0.0f);
-    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.35f});
+    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.55f});
 
     const float rowH = 40.0f;
     const float w = 380.0f;
@@ -2567,6 +2567,8 @@ void LobbyUi::DrawCharPicker(Canvas& canvas, float centerX, float rowY) const
     float y = rowY - h * 0.5f;
     if (y > kScreenH - 70.0f - h) y = kScreenH - 70.0f - h; // clear of the footer
     if (y < 16.0f) y = 16.0f;
+    // The panel texture is translucent; the team rows under it must not show.
+    p.Fill(x + 4.0f, y + 4.0f, w - 8.0f, h - 8.0f, Color{0.02f, 0.03f, 0.05f, 0.92f});
     p.Box(TEX_PANEL_DARK, x, y, w, h);
     p.Text(kTeamSlotNames[member], x + w * 0.5f, y + 36.0f, 0.36f, A_MC, kYellow, FONT_HEADING);
 
