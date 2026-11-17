@@ -471,6 +471,40 @@ static struct {
 } g_bootTimer;
 static SRWLOCK g_bootTimerLock = SRWLOCK_INIT;
 
+// Laptop power behaviour, scoped to this process. SetProcessInformation is
+// Windows 8+, and the build targets Windows 7, so it is resolved at runtime.
+// MinGW headers lack the power-throttling declarations.
+static void ApplyProcessPowerPolicy()
+{
+	struct PowerThrottlingState {
+		ULONG Version;
+		ULONG ControlMask;
+		ULONG StateMask;
+	};
+	constexpr int kProcessPowerThrottling = 4;  // PROCESS_INFORMATION_CLASS
+	constexpr ULONG kExecutionSpeed = 0x1;      // EcoQoS
+	constexpr ULONG kIgnoreTimerResolution = 0x4; // Windows 11
+
+	using SetProcessInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+	auto setInfo = (SetProcessInformationFn)GetProcAddress(
+		GetModuleHandleW(L"kernel32.dll"), "SetProcessInformation");
+	if (!setInfo)
+		return;
+
+	// A control bit with its state bit clear opts out of that throttling.
+	// The timer bit keeps Windows 11 honouring the game's own
+	// timeBeginPeriod(1) in sApp__execute while the window is hidden.
+	// Builds before Windows 11 reject the timer bit, so retry without it.
+	PowerThrottlingState state = { 1, kExecutionSpeed | kIgnoreTimerResolution, 0 };
+	BOOL ok = setInfo(GetCurrentProcess(), kProcessPowerThrottling, &state, sizeof(state));
+	if (!ok) {
+		state.ControlMask = kExecutionSpeed;
+		ok = setInfo(GetCurrentProcess(), kProcessPowerThrottling, &state, sizeof(state));
+	}
+	HookLog("Power: throttling opt-out %s (mask 0x%lx, err %lu)\n",
+			ok ? "applied" : "failed", state.ControlMask, ok ? 0ul : GetLastError());
+}
+
 static void BootTimer_Init()
 {
 	AcquireSRWLockExclusive(&g_bootTimerLock);
@@ -2368,6 +2402,7 @@ extern "C" __declspec(dllexport) void InitializeASI()
 	BootTimer_Init();
 	BootTimer_Stamp("InitializeASI entry");
 	SettingsMgr->Init();
+	ApplyProcessPowerPolicy();
 
 	if (enet_initialize() != 0) {
 		HookLog("UMVC3Hook: Failed to initialize enet!\n");
