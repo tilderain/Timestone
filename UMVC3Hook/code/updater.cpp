@@ -346,14 +346,14 @@ std::wstring Widen(const std::string& text)
 }
 
 // ---------------------------------------------------------------------------
-// Wine. Its file server names every open file by realpath(), so a rename
-// through Windows APIs follows a symlinked Timestone.asi and moves the file
-// it points to (EXDEV across mounts, or the build output itself otherwise).
-// There the swap is done on the Unix side instead: one rename(2) onto the
-// ASI's own path replaces the file or link there, and Linux lets the running
-// game keep its mapping of the old one.
+// Wine. Its file server names every open file by realpath(), so Windows
+// APIs always act on the file behind a symlinked Timestone.asi, and they
+// refuse to replace a file the game has mapped. The install is done on the
+// Unix side instead, on that file: the update is copied next to it (same
+// filesystem) and renamed over it. A rename never touches the old file's
+// contents, so the running game keeps its mapping, and a symlink in the game
+// folder stays as it is, now pointing at the new build.
 // ---------------------------------------------------------------------------
-using WineGetVersion = const char*(__cdecl*)();
 using WineGetUnixFileName = char*(__cdecl*)(const wchar_t*);
 using WineUnixSpawnvp = LONG(WINAPI*)(char* const* argv, int wait);
 
@@ -363,41 +363,43 @@ bool RunningUnderWine()
     return ntdll && GetProcAddress(ntdll, "wine_get_version");
 }
 
-// The Unix path of `path` without resolving its last component: the folder
-// is resolved (wine_get_unix_file_name follows links) and the name appended.
-bool WineUnixPathOf(const std::string& path, std::string& unixPath)
+// The Unix path of an existing file, with every link resolved.
+bool WineRealPath(const std::string& path, std::string& unixPath)
 {
     const auto getUnixName = reinterpret_cast<WineGetUnixFileName>(
         GetProcAddress(GetModuleHandleA("kernel32.dll"), "wine_get_unix_file_name"));
-    const size_t slash = path.find_last_of("\\/");
-    if (!getUnixName || slash == std::string::npos) return false;
-    char* folder = getUnixName(Widen(path.substr(0, slash)).c_str());
-    if (!folder) return false;
-    unixPath = folder;
-    HeapFree(GetProcessHeap(), 0, folder);
-    if (unixPath.empty() || unixPath.back() != '/') unixPath += '/';
-    unixPath += path.substr(slash + 1);
-    return true;
+    if (!getUnixName) return false;
+    char* name = getUnixName(Widen(path).c_str());
+    if (!name) return false;
+    unixPath = name;
+    HeapFree(GetProcessHeap(), 0, name);
+    return !unixPath.empty();
 }
 
-// Moves `from` onto `to` with the host's mv. Returns false (and leaves both
-// alone) if Wine cannot run it.
-bool WineMoveOnto(const std::string& from, const std::string& to, char* error, size_t capacity)
+// Puts `update` in place of the file `installed` is or links to, with the
+// host's sh, cp and mv. Leaves everything as it was on failure.
+bool WineInstall(const std::string& update, const std::string& installed, char* error,
+                 size_t capacity)
 {
     const auto spawn = reinterpret_cast<WineUnixSpawnvp>(
         GetProcAddress(GetModuleHandleA("ntdll.dll"), "__wine_unix_spawnvp"));
-    std::string unixFrom, unixTo;
-    if (!spawn || !WineUnixPathOf(from, unixFrom) || !WineUnixPathOf(to, unixTo)) {
+    std::string unixUpdate, target;
+    if (!spawn || !WineRealPath(update, unixUpdate) || !WineRealPath(installed, target)) {
         snprintf(error, capacity, "This version of Wine cannot run the update's install step.");
         return false;
     }
-    char mv[] = "mv", force[] = "-f", endOfOptions[] = "--";
-    char* const argv[] = {mv, force, endOfOptions, unixFrom.data(), unixTo.data(), nullptr};
+    // Paths go in as arguments, never into the script text.
+    char sh[] = "sh", dashC[] = "-c", name[] = "timestone-update";
+    char script[] =
+        "staged=\"$2.timestone-update\"; "
+        "if cp -f -- \"$1\" \"$staged\" && mv -f -- \"$staged\" \"$2\"; then exit 0; fi; "
+        "rm -f -- \"$staged\"; exit 1";
+    char* const argv[] = {sh, dashC, script, name, unixUpdate.data(), target.data(), nullptr};
     const LONG status = spawn(argv, 1);
-    HookLog("Updater: Wine install mv \"%s\" -> \"%s\" status=%ld\n", unixFrom.c_str(),
-            unixTo.c_str(), status);
+    HookLog("Updater: Wine install \"%s\" -> \"%s\" status=%ld\n", unixUpdate.c_str(),
+            target.c_str(), status);
     if (status != 0) {
-        snprintf(error, capacity, "The new Timestone.asi could not be put in place (mv status %ld).",
+        snprintf(error, capacity, "The new Timestone.asi could not be put in place (status %ld).",
                  status);
         return false;
     }
@@ -713,10 +715,11 @@ bool Updater_InstallAndRestart(char* error, size_t capacity)
         return fail("Timestone could not find the game's files.");
 
     if (RunningUnderWine()) {
-        // See WineMoveOnto: one rename on the Unix side, link or not.
+        // See WineInstall: the file behind the ASI is replaced, any link kept.
         char wineError[160];
-        if (!WineMoveOnto(paths.staged, paths.asi, wineError, sizeof(wineError)))
+        if (!WineInstall(paths.staged, paths.asi, wineError, sizeof(wineError)))
             return fail(wineError);
+        DeleteFileA(paths.staged.c_str());
     } else {
         // A loaded DLL cannot be overwritten or deleted, but it can be
         // renamed: this process keeps running the old image from the renamed
