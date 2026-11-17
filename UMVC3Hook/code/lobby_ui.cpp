@@ -109,6 +109,7 @@ constexpr int kSlotMenuCount = 3;
 const char* const kRoomMenuItems[] = {"TEAM SETUP", "LOBBY MUSIC", "INVITE FRIENDS", "LEAVE LOBBY"};
 constexpr int kRoomMenuCount = 4;
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
+constexpr int kCharPickerRows = 9; // characters visible at once in the team dropdown
 
 const char* const kQuickChat[] = {
     "Type a message...", "Good fight!", "One more?", "Nice!", "Hello!",
@@ -315,6 +316,7 @@ void LobbyUi::GoTo(Screen screen)
     slotMenuOpen_ = false;
     quickChatOpen_ = false;
     musicOpen_ = false;
+    charPickerOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
     chatFocus_ = false;
@@ -398,6 +400,7 @@ void LobbyUi::ReturnToRoom()
     slotMenuOpen_ = false;
     quickChatOpen_ = false;
     musicOpen_ = false;
+    charPickerOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
     chatFocus_ = false;
@@ -1394,9 +1397,7 @@ void LobbyUi::StepTeamField(int delta)
             for (int i = 0; i < count; ++i)
                 if (roster_.characterId(i) == team.chars[member]) index = i;
             index = ((index + delta) % count + count) % count;
-            team.chars[member] = roster_.characterId(index);
-            const int colors = roster_.colorCount ? roster_.colorCount(team.chars[member]) : 1;
-            if (team.colors[member] >= colors) team.colors[member] = 0;
+            SetTeamCharacter(member, roster_.characterId(index));
         } else if (field == 1) {
             team.assists[member] = ((team.assists[member] + delta) % 3 + 3) % 3;
         } else {
@@ -1409,6 +1410,47 @@ void LobbyUi::StepTeamField(int delta)
         return;
     }
     Play(SFX_MOVE);
+    CommitTeam();
+}
+
+// Puts a character in a team member's slot, keeping the color in range.
+void LobbyUi::SetTeamCharacter(int member, int32_t id)
+{
+    Team& team = prefs_.team;
+    team.chars[member] = id;
+    const int colors = roster_.colorCount ? roster_.colorCount(id) : 1;
+    if (team.colors[member] >= colors) team.colors[member] = 0;
+}
+
+// The character dropdown under a team member row. Up/down walks the roster,
+// left/right turns a page, confirm puts the character in the slot.
+void LobbyUi::UpdateCharPicker(const Input& input)
+{
+    const int count = roster_.characterCount ? roster_.characterCount() : 0;
+    if (count <= 0 || input.cancel || input.menu) {
+        charPickerOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
+    }
+    if (!MoveCursor(charPickerCursor_, count, input)) {
+        int next = charPickerCursor_;
+        if (input.right || input.pageRight) next += kCharPickerRows;
+        else if (input.left || input.pageLeft) next -= kCharPickerRows;
+        if (next < 0) next = 0;
+        if (next >= count) next = count - 1;
+        if (next != charPickerCursor_) {
+            charPickerCursor_ = next;
+            Play(SFX_MOVE);
+        }
+    }
+    if (!input.confirm) return;
+    charPickerOpen_ = false;
+    Play(SFX_CONFIRM);
+    const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
+    const int32_t id = roster_.characterId(charPickerCursor_);
+    if (id == prefs_.team.chars[member]) return; // same character: the team stays as it was
+    SetTeamCharacter(member, id);
+    prefs_.presetIndex = -1; // edited by hand: no longer the saved preset
     CommitTeam();
 }
 
@@ -1426,6 +1468,13 @@ void LobbyUi::UpdateTeam(const Input& input)
             return;
         }
         timedOut = ++handshakeFrames_ >= kTeamTimeout;
+    }
+    if (charPickerOpen_) {
+        if (!timedOut) {
+            UpdateCharPicker(input);
+            return;
+        }
+        charPickerOpen_ = false; // out of time: go with the team as it stands
     }
     MoveCursor(teamCursor_, kTeamRows, input);
     const int delta = (input.right ? 1 : 0) - (input.left ? 1 : 0);
@@ -1451,7 +1500,20 @@ void LobbyUi::UpdateTeam(const Input& input)
         }
         return;
     }
-    if (input.confirm) StepTeamField(1);
+    if (!input.confirm) return;
+    const bool characterRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowDone &&
+                              (teamCursor_ - kTeamRowFirstSlot) % 3 == 0;
+    const int count = roster_.characterCount ? roster_.characterCount() : 0;
+    if (characterRow && count > 0) {
+        const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
+        charPickerCursor_ = 0;
+        for (int i = 0; i < count; ++i)
+            if (roster_.characterId(i) == prefs_.team.chars[member]) charPickerCursor_ = i;
+        charPickerOpen_ = true;
+        Play(SFX_CONFIRM);
+        return;
+    }
+    StepTeamField(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1543,7 +1605,14 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_CONFIRM, "Select");
         if (createCursor_ != CREATE_MUSIC) add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Back");
+    } else if (screen_ == Screen::Team && charPickerOpen_) {
+        add(BTN_CONFIRM, "Select");
+        add(BTN_DPAD, "Scroll");
+        add(BTN_CANCEL, "Close");
     } else if (screen_ == Screen::Team) {
+        const bool characterRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowDone &&
+                                  (teamCursor_ - kTeamRowFirstSlot) % 3 == 0;
+        if (characterRow) add(BTN_CONFIRM, "Characters");
         add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Done");
     } else if (roomMenuOpen_ || slotMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
@@ -2469,11 +2538,59 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         p.Label(clock, 764.0f, 476.0f, 0.56f, A_ML, kDim);
     }
 
+    if (charPickerOpen_) {
+        DrawCharPicker(canvas, panelX + 430.0f, panelY + 40.0f + teamCursor_ * 39.0f);
+        return "Choose a character.";
+    }
+
     const char* help = teamForMatch_ ? "Choose your team, then select START."
                                      : "Edit your team.";
     if (teamCursor_ == kTeamRowPreset)
         help = "Use one of your reserve units, or build a custom team.";
     return help;
+}
+
+// The character dropdown, over the value column of the row it belongs to.
+// It is centred on that row where the screen allows.
+void LobbyUi::DrawCharPicker(Canvas& canvas, float centerX, float rowY) const
+{
+    const int count = roster_.characterCount ? roster_.characterCount() : 0;
+    if (count <= 0) return;
+    const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
+    const Painter p(canvas, 1.0f, 0.0f);
+    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.35f});
+
+    const float rowH = 40.0f;
+    const float w = 380.0f;
+    const float h = 112.0f + kCharPickerRows * rowH;
+    const float x = centerX - w * 0.5f;
+    float y = rowY - h * 0.5f;
+    if (y > kScreenH - 70.0f - h) y = kScreenH - 70.0f - h; // clear of the footer
+    if (y < 16.0f) y = 16.0f;
+    p.Box(TEX_PANEL_DARK, x, y, w, h);
+    p.Text(kTeamSlotNames[member], x + w * 0.5f, y + 36.0f, 0.36f, A_MC, kYellow, FONT_HEADING);
+
+    // Keep the cursor in the middle of the window where the list allows it.
+    int first = charPickerCursor_ - kCharPickerRows / 2;
+    if (first > count - kCharPickerRows) first = count - kCharPickerRows;
+    if (first < 0) first = 0;
+    for (int row = 0; row < kCharPickerRows && first + row < count; ++row) {
+        const int index = first + row;
+        const float itemY = y + 78.0f + row * rowH;
+        const bool selected = index == charPickerCursor_;
+        if (selected) {
+            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            p.Box(TEX_ROW_SEL, x + 18.0f, itemY - 22.0f, w - 36.0f, 44.0f, WithAlpha(kWhite, pulse));
+        }
+        const int32_t id = roster_.characterId(index);
+        const bool current = id == prefs_.team.chars[member];
+        const char* name = roster_.characterName ? roster_.characterName(id) : "";
+        p.TextFit(name ? name : "", x + w * 0.5f, itemY, 0.76f, w - 80.0f, A_MC,
+                  current ? kCyan : selected ? kText : kDim);
+    }
+    char position[24];
+    snprintf(position, sizeof(position), "%d / %d", charPickerCursor_ + 1, count);
+    p.Text(position, x + w - 40.0f, y + h - 24.0f, 0.56f, A_MR, kDim);
 }
 
 bool LobbyUi::DrawModal(Canvas& canvas) const

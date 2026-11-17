@@ -108,6 +108,7 @@ private:
     void UpdateMemberMenu(const Input& input);
     void UpdateChatFocus(const Input& input);
     void UpdateTeam(const Input& input);
+    void UpdateCharPicker(const Input& input);
     void UpdateText(const Input& input);
     void SyncWithService();
 
@@ -123,6 +124,7 @@ private:
     int ChatRowsFrom(int firstMessage) const; // display rows of messages [first, count)
     const char* DrawTeam(Canvas& canvas) const; // returns footer help
     void DrawTeamCard(Canvas& canvas, float x, float y, float w) const;
+    void DrawCharPicker(Canvas& canvas, float centerX, float rowY) const;
     void DrawListMenu(Canvas& canvas, const char* title, const char* const* items,
                       int count, int cursor) const;
     void DrawMusicMenu(Canvas& canvas) const;
@@ -136,6 +138,7 @@ private:
     void ApplyPreset(int index);
     void CommitTeam();
     void StepTeamField(int delta);
+    void SetTeamCharacter(int member, int32_t id);
     void BeginText(TextTarget target, const char* initial);
     void EndText(bool accept);
 
@@ -162,6 +165,8 @@ private:
     int seatSlot_ = 0;
     int seatSide_ = 0;
     int teamCursor_ = 0;
+    bool charPickerOpen_ = false; // character dropdown on a team member row
+    int charPickerCursor_ = 0;    // roster index highlighted in it
 
     bool roomMenuOpen_ = false;
     int roomMenuCursor_ = 0;

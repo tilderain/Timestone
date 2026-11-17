@@ -608,6 +608,15 @@ int main(int argc, char** argv)
         ui.Update(Press(&Input::down));
         Settle(ui, 2);
         ok &= Capture(ui, directory, "team");
+        ui.Update(Press(&Input::confirm)); // POINT character dropdown
+        ui.Update(Press(&Input::down));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_characters");
+        ui.Update(Press(&Input::cancel));
+        for (int i = 0; i < 6; ++i) ui.Update(Press(&Input::down)); // ANCHOR character
+        ui.Update(Press(&Input::confirm));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_characters_anchor");
     }
     {   // Notice modal.
         FakeService service;
