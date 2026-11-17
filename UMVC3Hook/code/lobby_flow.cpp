@@ -858,7 +858,9 @@ void DropMatchConnection()
     SteamRoom_DisconnectPeer();
 }
 
-void AbortMatchStart(const char* notice)
+// `notice` is the reason, shown to the player unless `quiet` (it is still
+// logged, and a failure still gives the seat up).
+void AbortMatchStart(const char* notice, bool quiet = false)
 {
     HookLog("LobbyFlow: match start aborted: %s\n", notice ? notice : "(cancelled)");
     DropMatchConnection();
@@ -870,7 +872,7 @@ void AbortMatchStart(const char* notice)
     }
     if (g_ui) {
         g_ui->SetBusy(nullptr);
-        if (notice) g_ui->ShowNotice(notice);
+        if (notice && !quiet) g_ui->ShowNotice(notice);
     }
     SetPhase(Phase::Lobby);
 }
@@ -1187,7 +1189,7 @@ bool PumpHandshake(bool bothReady)
                 if (event.type == ENET_EVENT_TYPE_RECEIVE) {
                     enet_packet_destroy(event.packet);
                 } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
-                    AbortMatchStart("Connection to opponent has been lost.");
+                    AbortMatchStart("Connection to opponent has been lost.", true);
                     return false;
                 }
             }
@@ -1203,7 +1205,7 @@ bool PumpHandshake(bool bothReady)
     ENetEvent event;
     while (enet_host_service(g_matchHost, &event, 0) > 0) {
         if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
-            AbortMatchStart("Connection to opponent has been lost.");
+            AbortMatchStart("Connection to opponent has been lost.", true);
             return false;
         }
         if (event.type != ENET_EVENT_TYPE_RECEIVE) continue;
@@ -1669,7 +1671,6 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
             if (g_spectating) StopSpectating();
             else g_service->FinishMatch(false, false);
             g_ui->SetBusy(nullptr);
-            g_ui->ShowNotice("Connection to opponent has been lost.");
             SetPhase(Phase::Lobby);
             return false;
         }
