@@ -467,6 +467,13 @@ int main(int argc, char** argv)
         ui.Update(Press(&Input::down));
         Settle(ui, 2);
         ok &= Capture(ui, directory, "create");
+        ui.Update(Press(&Input::up)); // name row: edit it, caret on and off
+        ui.Update(Press(&Input::confirm));
+        ok &= Capture(ui, directory, "create_name_caret_a");
+        Settle(ui, 20);
+        ok &= Capture(ui, directory, "create_name_caret_b");
+        ui.Update(Press(&Input::cancel));
+        ui.Update(Press(&Input::down));
         for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down)); // LOBBY MUSIC
         ui.Update(Press(&Input::right));
         Settle(ui, 2);

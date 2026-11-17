@@ -1779,10 +1779,8 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         p.Text(labels[row], panelX + 64.0f, y, 0.86f, A_ML, selected ? kText : kDim);
         switch (row) {
         case CREATE_NAME:
-            if (textTarget_ == TextTarget::RoomName)
-                snprintf(value, sizeof(value), "%s%s", text_, (frame_ / 20) % 2 ? "_" : " ");
-            else
-                snprintf(value, sizeof(value), "%s", draft.name);
+            snprintf(value, sizeof(value), "%s",
+                     textTarget_ == TextTarget::RoomName ? text_ : draft.name);
             break;
         case CREATE_SIZE: snprintf(value, sizeof(value), "%d PLAYERS", draft.maxMembers); break;
         case CREATE_SLOTS: snprintf(value, sizeof(value), "%d", draft.slotCount); break;
@@ -1804,9 +1802,18 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
             break;
         }
         const float valueX = panelX + 660.0f;
+        if (row == CREATE_NAME && textTarget_ == TextTarget::RoomName) {
+            // The caret blinks just past the name, outside its centring, so
+            // the name itself holds still.
+            char fitted[sizeof(value)];
+            FitText(fitted, sizeof(fitted), value, 440.0f, 0.86f);
+            p.Text(fitted, valueX, y, 0.86f, A_MC, kCyan);
+            if ((frame_ / 20) % 2)
+                p.Text("_", valueX + TextWidth(fitted) * 0.86f * 0.5f + 2.0f, y, 0.86f, A_ML, kCyan);
+            continue;
+        }
         p.TextFit(value, valueX, y, 0.86f, row == CREATE_NAME ? 440.0f : kValueTextWidth, A_MC,
-                  row == CREATE_NAME && textTarget_ == TextTarget::RoomName ? kCyan
-                  : kText);
+                  kText);
         if (selected && row != CREATE_NAME && row != CREATE_MUSIC &&
             !(row == CREATE_ROTATION && draft.firstTo == kFirstToEndless)) {
             DrawValueArrows(p, frame_, valueX, y, kValueArrowSpan);
