@@ -53,6 +53,13 @@ inline float SelectionArrowInset(uint32_t frame)
 // -1..1 form of SelectionLevel for the highlight alpha expressions.
 inline float SelectionWave(uint32_t frame) { return SelectionLevel(frame) * 2.0f - 1.0f; }
 
+// Highlight bar opacity, from `dimmest` up to the native peak colour 0xBF.
+constexpr float kSelectPeak = 0xBF / 255.0f;
+inline float SelectionPulse(uint32_t frame, float dimmest = 0.44f)
+{
+    return dimmest + (kSelectPeak - dimmest) * SelectionLevel(frame);
+}
+
 // Opacity of the top menu's white selection bar: 1.0 down to kMenuBarFadeMin
 // and back, once every kMenuBarFadeFrames frames.
 constexpr float kMenuBarFadeMin = 0.82f;
@@ -1837,7 +1844,7 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         const float y = panelY + 104.0f + row * 46.0f;
         const bool selected = row == createCursor_;
         if (selected) {
-            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            const float pulse = SelectionPulse(frame_);
             p.Box(TEX_ROW_SEL, panelX + 26.0f, y - 23.0f, panelW - 52.0f, 46.0f,
                   WithAlpha(kWhite, pulse));
         }
@@ -1926,7 +1933,7 @@ void LobbyUi::DrawRoomMembers(Canvas& canvas) const
         const Member& member = room.members[i];
         const float cy = y + 22.0f;
         if (memberFocus_ && i == memberCursor_) {
-            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            const float pulse = SelectionPulse(frame_);
             p.Box(TEX_ROW_SEL, x - 4.0f, y - 3.0f, width + 8.0f, 50.0f, WithAlpha(kWhite, pulse));
         }
         // Small HOST / GUEST tag: rows 6 and 7 of the tag sheet.
@@ -2063,7 +2070,7 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
 
             // The focus frame goes under the seat so it never veils the text.
             if (focused) {
-                const float pulse = 0.7f + 0.3f * SelectionWave(frame_);
+                const float pulse = SelectionPulse(frame_, 0.4f);
                 p.Box(TEX_ROW_SEL, x + 10.0f, sy - 5.0f, cardW - 20.0f, seatH + 10.0f,
                       WithAlpha(kWhite, pulse));
             }
@@ -2136,7 +2143,7 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
     const float y = chatExpanded_ ? 110.0f : 516.0f;
     const float h = chatExpanded_ ? 536.0f : 130.0f;
     if (chatFocus_ && !chatExpanded_) {
-        const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+        const float pulse = SelectionPulse(frame_);
         p.Box(TEX_ROW_SEL, x - 4.0f, y - 4.0f, w + 8.0f, h + 8.0f, WithAlpha(kWhite, pulse));
     }
     p.Box(TEX_PANEL_DARK, x, y, w, h);
@@ -2245,7 +2252,7 @@ void LobbyUi::DrawListMenu(Canvas& canvas, const char* title, const char* const*
     for (int i = 0; i < count; ++i) {
         const float rowY = y + 88.0f + i * 44.0f;
         if (i == cursor) {
-            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            const float pulse = SelectionPulse(frame_);
             p.Box(TEX_ROW_SEL, x + 22.0f, rowY - 24.0f, w - 44.0f, 48.0f, WithAlpha(kWhite, pulse));
         }
         p.Text(items[i], x + w * 0.5f, rowY, 0.8f, A_MC, i == cursor ? kText : kDim);
@@ -2344,7 +2351,7 @@ void LobbyUi::DrawMusicMenu(Canvas& canvas) const
         const float rowY = y + 88.0f + row * 44.0f;
         const bool selected = index == musicCursor_;
         if (selected) {
-            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            const float pulse = SelectionPulse(frame_);
             p.Box(TEX_ROW_SEL, x + 22.0f, rowY - 24.0f, w - 44.0f, 48.0f, WithAlpha(kWhite, pulse));
         }
         const bool current = track.id == playing;
@@ -2388,7 +2395,7 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
 
     const auto option = [&](const char* label, float ox, float oy, float ow, bool selected) {
         if (selected) {
-            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            const float pulse = SelectionPulse(frame_);
             p.Box(TEX_ROW_SEL, ox - ow * 0.5f, oy - 24.0f, ow, 48.0f, WithAlpha(kWhite, pulse));
         }
         p.Text(label, ox, oy, 0.4f, A_MC, selected ? kText : kDim, FONT_HEADING);
@@ -2477,7 +2484,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         const float y = panelY + 40.0f + row * 39.0f;
         const bool selected = row == teamCursor_;
         if (selected) {
-            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            const float pulse = SelectionPulse(frame_);
             p.Box(TEX_ROW_SEL, panelX + 20.0f, y - 23.0f, panelW - 40.0f, 46.0f,
                   WithAlpha(kWhite, pulse));
         }
@@ -2582,7 +2589,7 @@ void LobbyUi::DrawCharPicker(Canvas& canvas, float centerX, float rowY) const
         const float itemY = y + 78.0f + row * rowH;
         const bool selected = index == charPickerCursor_;
         if (selected) {
-            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            const float pulse = SelectionPulse(frame_);
             p.Box(TEX_ROW_SEL, x + 18.0f, itemY - 22.0f, w - 36.0f, 44.0f, WithAlpha(kWhite, pulse));
         }
         const int32_t id = roster_.characterId(index);
@@ -2663,7 +2670,7 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         for (int i = 0; i < 2; ++i) {
             const float optionX = kScreenW * 0.5f + (i == 0 ? -110.0f : 110.0f);
             if (i == confirmCursor_) {
-                const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+                const float pulse = SelectionPulse(frame_);
                 p.Box(TEX_ROW_SEL, optionX - 90.0f, y + h - 82.0f, 180.0f, 50.0f,
                       WithAlpha(kWhite, pulse));
             }
