@@ -106,6 +106,26 @@ constexpr uint32_t kCueMenuThemeA = 13;
 constexpr uint32_t kCueMenuThemeB = 14;
 constexpr int32_t kBgmSwitchFadeMs = 600;
 constexpr uintptr_t SGAMECONFIG_GET_INSTANCE = 0x140001AB0;
+// Press Start's savedata step (uMenuTitle__move -> 0x140253380). It spawns
+// the uUiPreMenu at sGameConfig+0x4ADF0, which loads savedata.bin, applies it
+// and sets the "savedata loaded" byte, or puts up the native missing/corrupt
+// save prompts. Until that byte is set, every aTitle::init resets the
+// presets and settings to defaults, and any later save writes those defaults.
+constexpr uintptr_t SGAMECONFIG_SPAWN_BOOT_PREMENU = 0x140253380;  // (config, 0)
+constexpr uintptr_t SGAMECONFIG_PREMENU_ALIVE = 0x1402532F0;       // (config) -> bool
+constexpr uintptr_t SGAMECONFIG_IS_STORAGE_ENABLED = 0x140253360;  // (config) -> bool
+constexpr uintptr_t SGAMECONFIG_SET_STORAGE_ENABLED = 0x14032CE00; // (config, bool)
+constexpr uintptr_t SGAMECONFIG_IS_SAVEDATA_LOADED = 0x140216F30;  // (config) -> bool
+constexpr size_t SGAMECONFIG_PREMENU = 0x4ADF0;                    // uUiPreMenu*
+constexpr size_t PREMENU_STATE = 0x60;
+constexpr uintptr_t PREMENU_CANCEL_MESSAGE = 0x14032C760;          // (premenu)
+// After a good load the pre-menu checks native matchmaking (0x14032B5A0) and,
+// with it unavailable, posts message 2900 (state 0x37, then 0x38 waits for a
+// button). Timestone does not use native online, so the boot load ends where
+// a ready network would have sent it: 0x39, terminate.
+constexpr int32_t kPreMenuNetworkNotice = 0x37;
+constexpr int32_t kPreMenuNetworkNoticeWait = 0x38;
+constexpr int32_t kPreMenuTerminate = 0x39;
 constexpr ULONGLONG kOnlineFadeOutMs = 200;
 constexpr ULONGLONG kOnlineFadeInMs = 250;
 constexpr ULONGLONG kOnlineFadeLimitMs = 6000; // never leave the screen black
@@ -163,6 +183,9 @@ bool g_onlineChosen = false;        // main menu: Online picked, fading out
 bool g_releaseNeedsInput = false;   // main menu: input state owed after the reload
 ULONGLONG g_mainMenuReleaseAt = 0;  // lobby: MAIN MENU picked, fading out
 bool g_entrancePending = true;      // lobby: slide-in owed once it can draw
+// The boot savedata load, run once per process before the lobby first shows.
+enum class SaveLoad { NotStarted, Running, Done };
+SaveLoad g_saveLoad = SaveLoad::NotStarted;
 constexpr uint32_t kEntranceFadeDelay = 8; // frames of the 250 ms fade to sit out
 
 std::unique_ptr<SteamRoomService> g_service;
@@ -808,6 +831,69 @@ void ApplyPressStartState()
         *reinterpret_cast<uint8_t*>(gameUi + SGAMEUI_TITLE_BYTE_1) = 0;
         *reinterpret_cast<uint8_t*>(gameUi + SGAMEUI_TITLE_BYTE_2) = 0;
     }
+}
+
+// Runs the savedata load Press Start would have run. Returns true while it is
+// in progress: the lobby stays off screen so the native prompts can show and
+// take input, and no match can boot on unloaded settings.
+bool PumpBootSavedataLoad()
+{
+    if (g_saveLoad == SaveLoad::Done) return false;
+    using GetInstance = void*(__fastcall*)();
+    using ConfigQuery = bool(__fastcall*)(void*);
+    void* config = reinterpret_cast<GetInstance>(_addr(SGAMECONFIG_GET_INSTANCE))();
+    if (!config) return true;
+    const auto query = [config](uintptr_t function) {
+        return reinterpret_cast<ConfigQuery>(_addr(function))(config);
+    };
+
+    if (g_saveLoad == SaveLoad::NotStarted) {
+        if (query(SGAMECONFIG_IS_SAVEDATA_LOADED)) {
+            g_saveLoad = SaveLoad::Done;
+            TrainingBoot_MarkNativeConfigLoaded();
+            return false;
+        }
+        // uMenuTitle::setup enables storage; the lobby retires that menu
+        // before it runs. sGameConfig starts enabled, so this is a backstop.
+        if (!query(SGAMECONFIG_IS_STORAGE_ENABLED)) {
+            using SetEnabled = void(__fastcall*)(void*, bool);
+            reinterpret_cast<SetEnabled>(_addr(SGAMECONFIG_SET_STORAGE_ENABLED))(config, true);
+            HookLog("LobbyFlow: enabled savedata storage before the boot load\n");
+        }
+        using Spawn = void(__fastcall*)(void*, int32_t);
+        reinterpret_cast<Spawn>(_addr(SGAMECONFIG_SPAWN_BOOT_PREMENU))(config, 0);
+        if (!query(SGAMECONFIG_PREMENU_ALIVE)) {
+            HookLog("LobbyFlow: WARNING - the savedata load could not be started\n");
+            g_saveLoad = SaveLoad::Done;
+            return false;
+        }
+        g_saveLoad = SaveLoad::Running;
+        HookLog("LobbyFlow: loading savedata through the title pre-menu\n");
+        return true;
+    }
+
+    if (query(SGAMECONFIG_PREMENU_ALIVE)) {
+        uint8_t* preMenu = *reinterpret_cast<uint8_t**>(
+            static_cast<uint8_t*>(config) + SGAMECONFIG_PREMENU);
+        int32_t* state = preMenu ? reinterpret_cast<int32_t*>(preMenu + PREMENU_STATE) : nullptr;
+        if (state && (*state == kPreMenuNetworkNotice || *state == kPreMenuNetworkNoticeWait)) {
+            if (*state == kPreMenuNetworkNoticeWait) {
+                using Cancel = void(__fastcall*)(void*);
+                reinterpret_cast<Cancel>(_addr(PREMENU_CANCEL_MESSAGE))(preMenu);
+            }
+            *state = kPreMenuTerminate;
+            HookLog("LobbyFlow: skipped the native online-unavailable notice\n");
+        }
+        return true;
+    }
+    g_saveLoad = SaveLoad::Done;
+    // Whatever the outcome, the game has made its decision about this save
+    // (applied, recreated, or play without saving); a battle boot must not
+    // read savedata.bin again behind it.
+    TrainingBoot_MarkNativeConfigLoaded();
+    HookLog("LobbyFlow: savedata load finished (%s)\n",
+            query(SGAMECONFIG_IS_SAVEDATA_LOADED) ? "applied" : "not applied");
+    return false;
 }
 
 // Hands the title area back to the game with its main menu open.
@@ -1665,6 +1751,7 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
         if (TrainingBoot_HasNetworkFailed()) {
             // The opponent vanished between the handshake and the battle boot.
             HookLog("LobbyFlow: battle boot failed; staying in the lobby\n");
+            TrainingBoot_RestoreLocalBindings();
             FrameStepper_EndNetplaySession();
             SetNetworkHandles(nullptr, nullptr);
             TrainingBoot_PrepareNextBoot(false);
@@ -1693,6 +1780,8 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
         // Everything from a previous visit died with the area change.
         g_titleNeedsSetup = false;
         g_entrancePending = true;
+        // Back from a netplay match: P2 gets the player's own bindings again.
+        TrainingBoot_RestoreLocalBindings();
         Native_Invalidate();
         RetireNativeTitleUnits(titleArea);
         ApplyPressStartState();
@@ -1731,6 +1820,8 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
     // The area can respawn its menu units on a later frame of the same visit.
     RetireNativeTitleUnits(titleArea);
     HideNativeMenuChrome();
+
+    if (PumpBootSavedataLoad()) return false;
 
     RunLobbyFrame(titleArea);
     return g_phase == Phase::Launching;

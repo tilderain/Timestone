@@ -612,6 +612,8 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                         (const LaunchTrainingPacket*)event.packet->data;
                                     if (packet->autoJump[0] <= 1 &&
                                         packet->autoJump[1] <= 1 &&
+                                        packet->simpleMode[0] <= 1 &&
+                                        packet->simpleMode[1] <= 1 &&
                                         packet->autoJumpValidMask <= 3 &&
                                         packet->voiceValidMask <= 3)
                                     {

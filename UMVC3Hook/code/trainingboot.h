@@ -159,5 +159,11 @@ void TrainingBoot_InitHooks();
 // In-game lobby: arm another boot from the title area. Clears the one-shot
 // boot latch and the per-match network/settings handshake state.
 void TrainingBoot_PrepareNextBoot(bool networkRequired);
+// savedata.bin has been loaded by the title pre-menu: battle boots skip their
+// own reload.
+void TrainingBoot_MarkNativeConfigLoaded();
+// Puts back the P2 button bindings a netplay client's match boot replaced
+// with its P1 bindings. No-op when nothing was replaced.
+void TrainingBoot_RestoreLocalBindings();
 bool TrainingBoot_HasBooted();
 bool TrainingBoot_HasNetworkFailed();

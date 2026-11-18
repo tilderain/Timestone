@@ -84,6 +84,30 @@ static constexpr uintptr_t SGAMECONFIG_SELECT_BINDING_TABLE   = 0x140254C40;
 static constexpr uintptr_t SGAMECONFIG_GET_CHARACTER_VOICE    = 0x140251BD0;
 static constexpr uintptr_t SGAMECONFIG_STORAGE_BUSY_OFFSET    = 0x4D350;
 static constexpr uint32_t GAMEPLAY_BINDING_COUNT              = 11;
+// Set by the title pre-menu once savedata.bin has been applied.
+static constexpr uintptr_t SGAMECONFIG_IS_SAVEDATA_LOADED     = 0x140216F30;
+// Packs the live settings into the payload written to savedata.bin; its only
+// caller is sGameConfig__startSavedataSave (0x1402536E0).
+static constexpr uintptr_t SGAMECONFIG_PACK_SAVE_PAYLOAD      = 0x14024F210;
+static constexpr uintptr_t CSYSTEM_ENTER_CS                   = 0x140006D00;
+static constexpr uintptr_t CSYSTEM_LEAVE_CS                   = 0x14000B860;
+// Per-player binding state (player p: 0 = P1, 1 = P2), as read by
+// sGameConfig__getButtonMappingValue (0x1402522A0).
+static constexpr uintptr_t SGAMECONFIG_BINDINGS_MAIN          = 0xC0;   // + p * 0x2C, 11 x u32
+static constexpr uintptr_t SGAMECONFIG_BINDINGS_ALTERNATE     = 0x118;  // + p * 0x2C, 11 x u32
+static constexpr uintptr_t SGAMECONFIG_BINDING_LAYOUT         = 0x178;  // + p * 4
+static constexpr uintptr_t SGAMECONFIG_BINDING_TABLE_CACHE    = 0x320;  // + p * 8
+static constexpr uintptr_t BINDING_PLAYER_STRIDE              = GAMEPLAY_BINDING_COUNT * 4;
+// Controller settings page (uMenuOptionFantastic__processOptionInput): a
+// fixed control type (+0x191, with +0x190 set once the row has been used)
+// makes character select apply CtrlType (+0x188: 0 Normal, 1 Simple) instead
+// of asking (uMenuChrSel__slotState1_loadTeam). AutoJump is +0x192.
+static constexpr uintptr_t SGAMECONFIG_CTRL_TYPE              = 0x188;
+static constexpr uintptr_t SGAMECONFIG_CTRL_TYPE_SET          = 0x190;
+static constexpr uintptr_t SGAMECONFIG_CTRL_TYPE_FIXED        = 0x191;
+static constexpr uintptr_t SGAMECONFIG_AUTO_JUMP              = 0x192;
+// sBattleSetting__restoreBackupAndInit copies this into sGameConfig CtrlType.
+static constexpr uintptr_t BS_BACKUP_CTRL_MODE_OFFSET         = 0x58C;
 
 static constexpr uintptr_t SUNIT_GET_INSTANCE                 = 0x140003160;
 static constexpr uintptr_t SUNIT_ADD_UNIT                      = 0x14051A6B0;
@@ -426,6 +450,88 @@ static void NormalizeBootColors()
     }
 }
 
+// ---------------------------------------------------------------------------
+// The netplay client drives P2 with its own P1 bindings, so the match boot
+// overwrites the P2 binding state in sGameConfig. That state is part of
+// savedata.bin: the player's real P2 bindings are kept aside, swapped in for
+// every save while the override is live, and put back after the match.
+// ---------------------------------------------------------------------------
+struct PlayerBindingState {
+    uint32_t main[GAMEPLAY_BINDING_COUNT];
+    uint32_t alternate[GAMEPLAY_BINDING_COUNT];
+    int32_t layout;
+    uint64_t tableCache;
+};
+static PlayerBindingState g_localP2Bindings = {};
+static bool g_localP2BindingsSaved = false;
+typedef void(__fastcall* PackSavePayload_t)(uint64_t);
+static PackSavePayload_t oPackSavePayload = nullptr;
+
+static void ReadPlayerTwoBindings(uint64_t config, PlayerBindingState& state)
+{
+    memcpy(state.main, (void*)(config + SGAMECONFIG_BINDINGS_MAIN + BINDING_PLAYER_STRIDE),
+           sizeof(state.main));
+    memcpy(state.alternate,
+           (void*)(config + SGAMECONFIG_BINDINGS_ALTERNATE + BINDING_PLAYER_STRIDE),
+           sizeof(state.alternate));
+    state.layout = *(int32_t*)(config + SGAMECONFIG_BINDING_LAYOUT + 4);
+    state.tableCache = *(uint64_t*)(config + SGAMECONFIG_BINDING_TABLE_CACHE + 8);
+}
+
+static void WritePlayerTwoBindings(uint64_t config, const PlayerBindingState& state)
+{
+    memcpy((void*)(config + SGAMECONFIG_BINDINGS_MAIN + BINDING_PLAYER_STRIDE), state.main,
+           sizeof(state.main));
+    memcpy((void*)(config + SGAMECONFIG_BINDINGS_ALTERNATE + BINDING_PLAYER_STRIDE),
+           state.alternate, sizeof(state.alternate));
+    *(int32_t*)(config + SGAMECONFIG_BINDING_LAYOUT + 4) = state.layout;
+    *(uint64_t*)(config + SGAMECONFIG_BINDING_TABLE_CACHE + 8) = state.tableCache;
+}
+
+static void __fastcall Hook_packSavePayload(uint64_t config)
+{
+    if (!g_localP2BindingsSaved) {
+        oPackSavePayload(config);
+        return;
+    }
+    // Callers hold the config lock (sGameConfig__startSavedataSave).
+    PlayerBindingState matchBindings;
+    ReadPlayerTwoBindings(config, matchBindings);
+    WritePlayerTwoBindings(config, g_localP2Bindings);
+    oPackSavePayload(config);
+    WritePlayerTwoBindings(config, matchBindings);
+    HookLog("TrainingBoot: saved the player's own P2 bindings, not the netplay copy\n");
+}
+
+void TrainingBoot_RestoreLocalBindings()
+{
+    if (!g_localP2BindingsSaved)
+        return;
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    typedef void(__fastcall* Lock_t)(uint64_t);
+    const uint64_t config = ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))();
+    if (!config)
+        return;
+    ((Lock_t)_addr(CSYSTEM_ENTER_CS))(config);
+    WritePlayerTwoBindings(config, g_localP2Bindings);
+    g_localP2BindingsSaved = false;
+    ((Lock_t)_addr(CSYSTEM_LEAVE_CS))(config);
+    HookLog("TrainingBoot: restored the local P2 button bindings after netplay\n");
+}
+
+static bool IsNativeSavedataLoaded()
+{
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    typedef bool(__fastcall* IsLoaded_t)(uint64_t);
+    const uint64_t config = ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))();
+    return config && ((IsLoaded_t)_addr(SGAMECONFIG_IS_SAVEDATA_LOADED))(config);
+}
+
+void TrainingBoot_MarkNativeConfigLoaded()
+{
+    g_nativeGameConfigLoaded = true;
+}
+
 static void ApplyPlayerOneBindingsToPlayerTwo()
 {
     if (!Netplay_IsActive() || Netplay_IsHost() || g_spectatorBoot)
@@ -440,6 +546,16 @@ static void ApplyPlayerOneBindingsToPlayerTwo()
     if (!config) {
         HookLog("TrainingBoot: WARNING - sGameConfig unavailable for netplay bindings\n");
         return;
+    }
+
+    // Keep the first snapshot across rematches and restarts: later boots see
+    // the copy already in place, not the player's bindings.
+    if (!g_localP2BindingsSaved) {
+        typedef void(__fastcall* Lock_t)(uint64_t);
+        ((Lock_t)_addr(CSYSTEM_ENTER_CS))(config);
+        ReadPlayerTwoBindings(config, g_localP2Bindings);
+        g_localP2BindingsSaved = true;
+        ((Lock_t)_addr(CSYSTEM_LEAVE_CS))(config);
     }
 
     GetBinding_t getBinding = (GetBinding_t)_addr(SGAMECONFIG_GET_BUTTON_MAPPING);
@@ -469,6 +585,16 @@ static uint8_t GetCharacterVoiceLanguage(uint64_t gameConfig, int32_t character)
         gameConfig, static_cast<uint32_t>(character)) ? 1u : 0u;
 }
 
+// The player's saved control type, or `fallback` when the game would ask at
+// character select (no fixed control type set).
+static bool GetConfiguredSimpleMode(uint64_t gameConfig, bool fallback)
+{
+    if (*(uint8_t*)(gameConfig + SGAMECONFIG_CTRL_TYPE_FIXED) != 1 ||
+        *(uint8_t*)(gameConfig + SGAMECONFIG_CTRL_TYPE_SET) != 1)
+        return fallback;
+    return *(int32_t*)(gameConfig + SGAMECONFIG_CTRL_TYPE) == 1;
+}
+
 static bool SynchronizeInitialPlayerSettings()
 {
     if (!IsBootNetworkReady())
@@ -489,11 +615,15 @@ static bool SynchronizeInitialPlayerSettings()
         if (!gameConfig)
             return false;
 
-        const bool localEnabled = *(uint8_t*)(gameConfig + 0x192) != 0;
+        const bool localEnabled = *(uint8_t*)(gameConfig + SGAMECONFIG_AUTO_JUMP) != 0;
         const int firstTeam = g_networkRequired ? localTeam : 0;
         const int lastTeam = g_networkRequired ? localTeam : 1;
         for (int team = firstTeam; team <= lastTeam; ++team) {
             g_bootConfig.autoJump[team] = localEnabled;
+            // A fixed control type in the options wins, as at character
+            // select; otherwise the roster's own choice stands.
+            g_bootConfig.simpleMode[team] =
+                GetConfiguredSimpleMode(gameConfig, g_bootConfig.simpleMode[team]);
             for (int member = 0; member < 3; ++member) {
                 const int32_t character = team == 0
                     ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
@@ -515,11 +645,13 @@ static bool SynchronizeInitialPlayerSettings()
                 g_bootConfig.voiceLanguage[localTeam][member];
         }
         packet.voiceValidMask = 1u << localTeam;
+        packet.simpleMode[localTeam] = g_bootConfig.simpleMode[localTeam] ? 1u : 0u;
+        packet.flags = LAUNCH_TRAINING_SIMPLE_MODE_VALID;
         Netplay_SendLaunchTrainingSettings(packet);
         g_initialSettingsSent = true;
         g_initialSettingsStartTick = GetTickCount64();
-        HookLog("TrainingBoot: Sent initial settings team=%d AutoJump=%d voice=%u/%u/%u\n",
-                localTeam, localEnabled,
+        HookLog("TrainingBoot: Sent initial settings team=%d AutoJump=%d Simple=%u voice=%u/%u/%u\n",
+                localTeam, localEnabled, packet.simpleMode[localTeam],
                 packet.voiceLanguage[localTeam][0],
                 packet.voiceLanguage[localTeam][1],
                 packet.voiceLanguage[localTeam][2]);
@@ -539,6 +671,8 @@ static bool SynchronizeInitialPlayerSettings()
             (packet.voiceValidMask & remoteMask) != 0) {
             g_bootConfig.autoJump[remoteTeam] =
                 packet.autoJump[remoteTeam] != 0;
+            if ((packet.flags & LAUNCH_TRAINING_SIMPLE_MODE_VALID) != 0)
+                g_bootConfig.simpleMode[remoteTeam] = packet.simpleMode[remoteTeam] != 0;
             for (int member = 0; member < 3; ++member) {
                 const int32_t character = remoteTeam == 0
                     ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
@@ -546,8 +680,9 @@ static bool SynchronizeInitialPlayerSettings()
                     ? 1u : packet.voiceLanguage[remoteTeam][member];
             }
             g_initialSettingsReceived = true;
-            HookLog("TrainingBoot: Received initial settings team=%d AutoJump=%u voice=%u/%u/%u\n",
+            HookLog("TrainingBoot: Received initial settings team=%d AutoJump=%u Simple=%d voice=%u/%u/%u\n",
                     remoteTeam, packet.autoJump[remoteTeam],
+                    g_bootConfig.simpleMode[remoteTeam] ? 1 : 0,
                     g_bootConfig.voiceLanguage[remoteTeam][0],
                     g_bootConfig.voiceLanguage[remoteTeam][1],
                     g_bootConfig.voiceLanguage[remoteTeam][2]);
@@ -604,6 +739,12 @@ void BootIntoTraining(bool queueAreaTransition)
         return;
 
     // Wait for native config loading to finish; terminal errors also allow boot.
+    // Once the title pre-menu has applied savedata.bin (the in-game lobby runs
+    // it at startup), reloading would only discard settings not yet saved.
+    if (!g_nativeGameConfigLoaded && IsNativeSavedataLoaded()) {
+        g_nativeGameConfigLoaded = true;
+        HookLog("TrainingBoot: savedata already loaded natively; no reload\n");
+    }
     if (!g_skipNativeConfigLoad && !g_nativeGameConfigLoaded) {
         if (!LoadNativeGameConfig())
             return;
@@ -694,6 +835,13 @@ void BootIntoTraining(bool queueAreaTransition)
     typedef void(__fastcall* AgentMethod_t)(uint64_t, uint32_t);
     ((AgentMethod_t)_addr(UUIBASE_METHOD_5560))(agent, 0);
     HookLog("TrainingBoot: Agent session reset\n");
+
+    // The restore writes its backup control type into sGameConfig CtrlType,
+    // which is saved. Back up the player's own value so it stays as it is;
+    // ApplySimpleModes then sets each team's mode for this match.
+    if (const uint64_t gameConfig = ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))())
+        *(int32_t*)(bs + BS_BACKUP_CTRL_MODE_OFFSET) =
+            *(int32_t*)(gameConfig + SGAMECONFIG_CTRL_TYPE);
 
     // Restore backup roster/settings, then apply team control preferences.
     typedef void(__fastcall* RestoreBackup_t)(uint64_t);
@@ -955,6 +1103,18 @@ void TrainingBoot_InitHooks()
     }
     else {
         HookLog("TrainingBoot: FAILED to hook sAction__executeMatchPhase\n");
+    }
+
+    if (MH_CreateHook(
+        (LPVOID)_addr(SGAMECONFIG_PACK_SAVE_PAYLOAD),
+        (LPVOID)Hook_packSavePayload,
+        (LPVOID*)&oPackSavePayload
+    ) == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(SGAMECONFIG_PACK_SAVE_PAYLOAD));
+        HookLog("TrainingBoot: Hooked savedata payload packing\n");
+    }
+    else {
+        HookLog("TrainingBoot: FAILED to hook savedata payload packing\n");
     }
 
     g_hooksInitialized = true;

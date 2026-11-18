@@ -112,6 +112,8 @@ enum LaunchTrainingFlags : uint32_t {
     LAUNCH_TRAINING_BOTH_CPUS = 1 << 0,
     LAUNCH_TRAINING_P2_CPU = 1 << 1,
     LAUNCH_TRAINING_FIVE_BARS = 1 << 2,
+    // Initial player settings exchange: simpleMode[sender's team] is set.
+    LAUNCH_TRAINING_SIMPLE_MODE_VALID = 1 << 3,
 };
 
 enum DesyncAction : uint32_t {

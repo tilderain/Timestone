@@ -802,6 +802,47 @@ What a per-slot copy needs (static analysis; **unverified in game**):
   ranges. Room members carry no native license data, so face, title, rank,
   flag and radar would be the plugin's own choice (or hidden).
 
+## Savedata (settings, controls, reserve teams)
+
+The game loads `savedata.bin` on Press Start, not at boot. The lobby skips
+Press Start, so it runs that step itself (`PumpBootSavedataLoad`).
+
+- `uMenuTitle__move` (`0x1403F7DB0`) on Press Start calls
+  `sGameConfig__spawnBootSavedataPreMenu` (`0x140253380`, mode 0). It spawns a
+  `uUiPreMenu` at `sGameConfig+0x4ADF0` (alive test `0x1402532F0`, state at
+  `+0x60`, dispatch `0x14032C8A0`). State 10 starts `startSavedataLoad`
+  (`0x140253620`); its callback applies the payload (`0x14024F080`). On a good
+  load the pre-menu sets `+0x4ADEC` (savedata loaded); otherwise it posts the
+  native corrupt/missing/create-new prompts.
+- `aTitle__init` (`0x140216940`): with `+0x4ADEC` clear, every title-area
+  entry resets the character presets and the settings block at `+0x260`.
+- Saves: option setters set `+0x4D351` (save reserved). Menus then call
+  `0x140253B80`, which needs that flag and `+0x4D353` (storage enabled;
+  `sGameConfig` starts with it set, `uMenuTitle__setup` sets it again). The
+  pre-menu's save states call `startSavedataSave` (`0x1402536E0`), whose only
+  payload writer is `packLiveStateIntoSavePayload` (`0x14024F210`).
+- Without the load, settings were reset to defaults and later saves wrote
+  those defaults over the player's save.
+- The lobby retires `uMenuTitle` in state 1, before its setup runs, so the
+  setup's `resetProfileAndMissionState` never runs in lobby mode.
+- After a good load the pre-menu shows message 2900 when native matchmaking
+  is unavailable (states `0x37`/`0x38`). The lobby ends the pre-menu at `0x39`
+  there instead.
+- Netplay clients copy their P1 bindings into P2 (`ApplyPlayerOneBindingsToPlayerTwo`).
+  P2 binding state is `+0xEC` and `+0x144` (11 x u32 each), layout `+0x17C`
+  and table cache `+0x328`. The player's own copy is swapped in around
+  `packLiveStateIntoSavePayload` and written back when the lobby title area is
+  set up after the match.
+- Control type (`uMenuOptionFantastic`): `+0x191` fixed control type, `+0x190`
+  set once that row has been used, `+0x188` `CtrlType` (0 Normal, 1 Simple),
+  `+0x192` AutoJump. Character select applies `CtrlType` only when
+  `+0x191` and `+0x190` are both 1; otherwise it asks. Battle boots send the
+  resolved simple mode in the settings exchange
+  (`LAUNCH_TRAINING_SIMPLE_MODE_VALID`).
+- `sBattleSetting__restoreBackupAndInit` (`0x14024DE40`) writes
+  `sBattleSetting+0x58C` into `CtrlType`. The battle boot puts the player's
+  own `CtrlType` there first, so the save keeps it.
+
 ## Not done yet
 
 - **Native character select.** "Character select" entry currently opens the
