@@ -436,6 +436,28 @@ static void NormalizeBootColors()
             color = 0;
         }
     }
+
+    // A mirror pick in the same color: player 1 keeps theirs and player 2's
+    // copy takes the game's own substitute (color 1, or color 2 when the
+    // clash is on color 1). Every peer and spectator boots from the same
+    // packet, so they all see the same two colors.
+    for (int slot = 0; slot < 3; ++slot) {
+        const int32_t character = g_bootConfig.p2Chars[slot];
+        int32_t& color = g_bootConfig.p2Colors[slot];
+        if (character < 1) continue;
+        for (int other = 0; other < 3; ++other) {
+            if (g_bootConfig.p1Chars[other] != character ||
+                g_bootConfig.p1Colors[other] != color)
+                continue;
+            const int32_t substitute = color == 0 ? 1 : 0;
+            if (!ChrColors_Available(character, substitute))
+                break; // a single-variant character (Galactus) cannot differ
+            HookLog("TrainingBoot: chr %d color %d is on both teams; player 2 uses color %d\n",
+                    character, color, substitute);
+            color = substitute;
+            break;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
