@@ -34,6 +34,17 @@ static CRITICAL_SECTION         g_outboundCS;
 
 static constexpr size_t         MAX_INBOUND_PACKETS = 256;
 static InputPacket              g_inboundQueue[MAX_INBOUND_PACKETS] = {};
+static int64_t                  g_inboundArrival[MAX_INBOUND_PACKETS] = {};
+// Input repair mailboxes (under g_outboundCS; see netplay.h).
+static InputPacket              g_repairPacket = {};
+static bool                     g_repairNew = false;
+static InputRequestPacket       g_outboundInputRequest = {};
+static bool                     g_outboundInputRequestNew = false;
+static InputRequestPacket       g_inboundInputRequest = {};
+static bool                     g_inboundInputRequestNew = false;
+// Frame clock for stamping outgoing input packets (under g_outboundCS).
+static int32_t                  g_frameClockFrame = -1;
+static int64_t                  g_frameClockStart = 0;
 static size_t                   g_inboundHead = 0;
 static size_t                   g_inboundCount = 0;
 static CRITICAL_SECTION         g_inboundCS;
@@ -258,8 +269,21 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         // Resend the exact latest history independently of simulation progress.
         bool hasNewOutbound = false;
         InputPacket outPkt = {};
+        bool hasRepair = false, hasInputRequest = false;
+        InputPacket repairPkt = {};
+        InputRequestPacket inputRequestPkt = {};
         {
             ScopedCS lock(g_outboundCS);
+            if (g_repairNew) {
+                repairPkt = g_repairPacket;
+                hasRepair = true;
+                g_repairNew = false;
+            }
+            if (g_outboundInputRequestNew) {
+                inputRequestPkt = g_outboundInputRequest;
+                hasInputRequest = true;
+                g_outboundInputRequestNew = false;
+            }
             if (g_outboundValid &&
                 (g_outboundNew ||
                  now - g_outboundLastSendTick >= INPUT_RESEND_INTERVAL_MS))
@@ -268,11 +292,39 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 hasNewOutbound = true;
                 g_outboundNew = false;
                 g_outboundLastSendTick = now;
+                // Where the game's frame clock stands as this copy leaves. A
+                // game held up waiting for input stays at the end of its frame.
+                if ((outPkt.flags & INPUT_FLAG_REAL) && g_frameClockFrame >= 0) {
+                    LARGE_INTEGER qpc, frequency;
+                    QueryPerformanceCounter(&qpc);
+                    QueryPerformanceFrequency(&frequency);
+                    int64_t phase = (qpc.QuadPart - g_frameClockStart) * 60 *
+                                    INPUT_CLOCK_PHASE_ONE / frequency.QuadPart;
+                    if (phase < 0) phase = 0;
+                    if (phase > INPUT_CLOCK_PHASE_ONE) phase = INPUT_CLOCK_PHASE_ONE;
+                    outPkt.flags = INPUT_FLAG_REAL | INPUT_FLAG_CLOCK |
+                        (static_cast<uint32_t>(phase) << INPUT_CLOCK_PHASE_SHIFT) |
+                        (static_cast<uint32_t>(g_frameClockFrame) << INPUT_CLOCK_FRAME_SHIFT);
+                }
             }
         }
 
         // Update RTT history for average calculation
         Netplay_UpdateRTTHistory(now);
+
+        // Input repair: older input first, so the newest packet lands on it.
+        if (hasRepair && g_peer) {
+            ENetPacket* packet = enet_packet_create(
+                &repairPkt, sizeof(InputPacket), ENET_PACKET_FLAG_UNSEQUENCED);
+            if (enet_peer_send(g_peer, 0, packet) != 0) enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+        if (hasInputRequest && g_peer) {
+            ENetPacket* packet = enet_packet_create(
+                &inputRequestPkt, sizeof(InputRequestPacket), ENET_PACKET_FLAG_UNSEQUENCED);
+            if (enet_peer_send(g_peer, 0, packet) != 0) enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
 
         if (hasNewOutbound && g_peer)
         {
@@ -645,6 +697,9 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                         }
                                         size_t tail = (g_inboundHead + g_inboundCount) % MAX_INBOUND_PACKETS;
                                         g_inboundQueue[tail] = *inPkt;
+                                        LARGE_INTEGER arrival;
+                                        QueryPerformanceCounter(&arrival);
+                                        g_inboundArrival[tail] = arrival.QuadPart;
                                         ++g_inboundCount;
                                     }
                                 }
@@ -717,6 +772,16 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     ScopedCS lock(g_restartCS);
                                     g_inboundRestart = *rp;
                                     g_inboundRestartNew = true;
+                                }
+                                break;
+
+                            case PACKET_INPUT_REQUEST:
+                                if (event.packet->dataLength >= sizeof(InputRequestPacket))
+                                {
+                                    ScopedCS lock(g_outboundCS);
+                                    g_inboundInputRequest =
+                                        *(const InputRequestPacket*)event.packet->data;
+                                    g_inboundInputRequestNew = true;
                                 }
                                 break;
 
@@ -852,6 +917,17 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+void Netplay_DisablePacketThrottle(ENetPeer* peer)
+{
+    if (!peer)
+        return;
+    // With no deceleration the throttle stays at its limit, so nothing is
+    // dropped before the socket. ENet forwards the setting to the remote peer.
+    enet_peer_throttle_configure(peer, ENET_PEER_PACKET_THROTTLE_INTERVAL,
+                                 ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0);
+    peer->packetThrottle = peer->packetThrottleLimit;
+}
+
 void Netplay_ConfigureHostLimits(ENetHost* host)
 {
     if (!host)
@@ -946,6 +1022,10 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_outboundNew = false;
         g_outboundValid = false;
         g_outboundLastSendTick = 0;
+        g_frameClockFrame = -1;
+        g_repairNew = false;
+        g_outboundInputRequestNew = false;
+        g_inboundInputRequestNew = false;
     }
 
     g_recvCount = 0;
@@ -968,6 +1048,9 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     g_rtt = 0;
     g_averageRtt = 0;
     g_packetLoss = -1.0f;
+
+    // The service thread has not started yet, so this thread still owns the peer.
+    Netplay_DisablePacketThrottle(g_peer);
 
     // Reset internal player pad ring buffers
     Controller_ResetBuffers();
@@ -1024,6 +1107,10 @@ void Netplay_InitSpectator()
         g_outboundNew = false;
         g_outboundValid = false;
         g_outboundLastSendTick = 0;
+        g_frameClockFrame = -1;
+        g_repairNew = false;
+        g_outboundInputRequestNew = false;
+        g_inboundInputRequestNew = false;
     }
     g_peerDisconnected = false;
     g_playerDisconnectRequested = false;
@@ -1069,12 +1156,52 @@ void Netplay_SendPacket(const InputPacket& pkt)
         SetEvent(g_outboundWake);
 }
 
-bool Netplay_GetInboundPacket(InputPacket& outPkt)
+void Netplay_SendInputRequest(uint32_t generation, int32_t firstFrame)
+{
+    {
+        ScopedCS lock(g_outboundCS);
+        g_outboundInputRequest.type = PACKET_INPUT_REQUEST;
+        g_outboundInputRequest.battle_generation = generation;
+        g_outboundInputRequest.first_frame = firstFrame;
+        g_outboundInputRequestNew = true;
+    }
+    if (g_outboundWake) SetEvent(g_outboundWake);
+}
+
+bool Netplay_TakeInputRequest(uint32_t* generation, int32_t* firstFrame)
+{
+    ScopedCS lock(g_outboundCS);
+    if (!g_inboundInputRequestNew) return false;
+    g_inboundInputRequestNew = false;
+    *generation = g_inboundInputRequest.battle_generation;
+    *firstFrame = g_inboundInputRequest.first_frame;
+    return true;
+}
+
+void Netplay_SendRepairPacket(const InputPacket& pkt)
+{
+    {
+        ScopedCS lock(g_outboundCS);
+        g_repairPacket = pkt;
+        g_repairNew = true;
+    }
+    if (g_outboundWake) SetEvent(g_outboundWake);
+}
+
+void Netplay_SetFrameClock(int32_t frame, int64_t startQpc)
+{
+    ScopedCS lock(g_outboundCS);
+    g_frameClockFrame = frame;
+    g_frameClockStart = startQpc;
+}
+
+bool Netplay_GetInboundPacket(InputPacket& outPkt, int64_t* arrivalQpc)
 {
     ScopedCS lock(g_inboundCS);
     if (g_inboundCount != 0)
     {
         outPkt = g_inboundQueue[g_inboundHead];
+        if (arrivalQpc) *arrivalQpc = g_inboundArrival[g_inboundHead];
         g_inboundHead = (g_inboundHead + 1) % MAX_INBOUND_PACKETS;
         --g_inboundCount;
         return true;
@@ -1453,6 +1580,10 @@ void Netplay_ClearInputQueues()
         g_outboundNew = false;
         g_outboundValid = false;
         g_outboundLastSendTick = 0;
+        g_frameClockFrame = -1;
+        g_repairNew = false;
+        g_outboundInputRequestNew = false;
+        g_inboundInputRequestNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(g_outboundPacket));
     }
     {

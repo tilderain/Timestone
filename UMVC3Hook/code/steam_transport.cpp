@@ -190,6 +190,9 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
                       kLoopbackHandoffTimeoutMs);
     enet_peer_timeout(serverPeer, 0, kLoopbackHandoffTimeoutMs,
                       kLoopbackHandoffTimeoutMs);
+    // Neither loopback hop may discard forwarded input packets.
+    Netplay_DisablePacketThrottle(clientPeer);
+    Netplay_DisablePacketThrottle(serverPeer);
 
     if (isHost) {
         *outGameHost = server;

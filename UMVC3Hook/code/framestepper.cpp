@@ -69,7 +69,6 @@ extern void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
 extern "C" void Controller_SetDelayFrames(int32_t delay);
 extern "C" void Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame);
 extern "C" void Controller_SetRollbackFrames(int32_t n);
-extern "C" void Controller_ScheduleRollbackFrames(int32_t n, int32_t effectiveFrame);
 extern "C" void Controller_SetMultiResimEnabled(bool enabled);
 extern "C" void Controller_ResetBuffers();
 extern "C" void Controller_ResetFrameEpoch();
@@ -277,22 +276,6 @@ static void AdjustNetplayDelay(int32_t delta)
     if (Controller_IsDelayChangePending())
         return;
     ScheduleNetplayDelay(Controller_GetDelayFrames() + delta);
-}
-
-static void ScheduleNetplayRollback(int32_t rollbackFrames)
-{
-    if (Controller_IsRollbackChangePending())
-        return;
-    if (rollbackFrames < 0) rollbackFrames = 0;
-    if (rollbackFrames > 16) rollbackFrames = 16;
-    if (rollbackFrames == 0 &&
-        (Controller_GetDelayFrames() == 0 ||
-         Controller_IsDelayChangePending()))
-        return;
-
-    int32_t effectiveFrame = GetNetplaySettingsEffectiveFrame();
-    Controller_ScheduleRollbackFrames(rollbackFrames, effectiveFrame);
-    Netplay_SendRollback(rollbackFrames, effectiveFrame);
 }
 
 // ---------------------------------------------------------------------------
@@ -886,13 +869,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
         int32_t remoteRollbackFrame = -1;
         while (Netplay_GetInboundRollback(remoteRollback, remoteRollbackFrame))
         {
-            if (remoteRollback >= 0 && remoteRollback <= 16)
-            {
-                if (remoteRollbackFrame < Controller_GetNetFrameCount())
-                    remoteRollbackFrame = Controller_GetNetFrameCount();
-                Controller_ScheduleRollbackFrames(remoteRollback,
-                                                   remoteRollbackFrame);
-            }
+            // The rollback window is fixed; a peer cannot change it.
         }
         bool remoteMultiResim = false;
         while (Netplay_GetInboundMultiResim(remoteMultiResim))
@@ -1808,14 +1785,6 @@ void FrameStepper_Process()
         {
             AdjustNetplayDelay(1);
         }
-        if (KeyPressed(VK_OEM_1) && settingsHotkeysEnabled)  // ; = decrease rollback
-        {
-            ScheduleNetplayRollback(Controller_GetRollbackFrames() - 1);
-        }
-        if (KeyPressed(VK_OEM_7) && settingsHotkeysEnabled)  // ' = increase rollback
-        {
-            ScheduleNetplayRollback(Controller_GetRollbackFrames() + 1);
-        }
     }
     // Apply remote desync-screen actions on the game thread. These actions do
     // not send a response, preventing trigger/unpause packets from bouncing.
@@ -2137,12 +2106,14 @@ void FrameStepper_Draw()
                 ? ImVec4(1.0f, 0.9f, 0.1f, 1.0f)   // yellow for host
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
             int32_t curDelay = Controller_GetDelayFrames();
-            int32_t curRollback = Controller_GetRollbackFrames();
+            // Not the window (fixed): how deep the rollbacks of the last
+            // second were on average.
+            const float curRollback = Controller_GetAverageRollbackFrames();
             const int32_t jitterMs = Netplay_GetJitter();
             if (statusHudMode == 1) {
                 ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
                 ImGui::TextColored(color, "FPS %.0f", GetGameUpdatesPerSecond(currentFrame));
-                ImGui::TextColored(color, "%dD %dR", curDelay, curRollback);
+                ImGui::TextColored(color, "%dD %.1fR", curDelay, curRollback);
                 const ImVec2 pos = ImGui::GetWindowPos();
                 warningPos = ImVec2(pos.x, pos.y + ImGui::GetWindowSize().y + 4.0f);
             } else {
@@ -2166,13 +2137,12 @@ void FrameStepper_Draw()
                     ImGui::TextColored(color, "Jitter: N/A");
                 if(GetLaunchOption() == LAUNCH_DUAL_TRAINING)
                     ImGui::TextColored(color, "Frame: %d", currentFrame);
-                ImGui::TextColored(color, "Delay: %d  Rollback: %d", curDelay, curRollback);
+                ImGui::TextColored(color, "Delay: %d  Rollback: %.1f", curDelay, curRollback);
 
                 const ImGuiStyle& style = ImGui::GetStyle();
                 const float controlsWidth = ImGui::CalcTextSize("D-").x +
-                    ImGui::CalcTextSize("D+").x + ImGui::CalcTextSize("R-").x +
-                    ImGui::CalcTextSize("R+").x + style.FramePadding.x * 8.0f +
-                    style.ItemSpacing.x * 3.0f;
+                    ImGui::CalcTextSize("D+").x + style.FramePadding.x * 4.0f +
+                    style.ItemSpacing.x;
                 const float controlsOffset = (ImGui::GetContentRegionAvail().x - controlsWidth) * 0.5f;
                 if (controlsOffset > 0.0f)
                     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + controlsOffset);
@@ -2194,23 +2164,6 @@ void FrameStepper_Draw()
                 }
                 if (delayPending) ImGui::EndDisabled();
 
-                ImGui::SameLine();
-                const bool rollbackPending = Controller_IsRollbackChangePending();
-                if (rollbackPending) ImGui::BeginDisabled();
-                if (ImGui::SmallButton("R-"))
-                {
-                    curRollback = Controller_GetRollbackFrames() - 1;
-                    if (curRollback < 0) curRollback = 0;
-                    ScheduleNetplayRollback(curRollback);
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("R+"))
-                {
-                    curRollback = Controller_GetRollbackFrames() + 1;
-                    if (curRollback > 16) curRollback = 16;
-                    ScheduleNetplayRollback(curRollback);
-                }
-                if (rollbackPending) ImGui::EndDisabled();
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(4);
             }

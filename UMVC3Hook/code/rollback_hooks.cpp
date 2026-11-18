@@ -1007,6 +1007,24 @@ static void __fastcall hkMainMove(uint64_t main)
         *(float*)(main + 0x80) = 1.0f;
         return;
     }
+    // Time sync (controller.cpp): while this game runs ahead of the
+    // opponent's, each frame is asked to start a little later. In fixed frame
+    // timing sMain::move waits until its real counter reaches the ideal one
+    // (+0x68), and one frame is one second's worth of counter ticks on both;
+    // moving the ideal counter on by a fraction of that lengthens this frame
+    // by the same fraction, with no frame held or dropped.
+    if (*(uint8_t*)(main + 0x58)) {
+        const float stretch = Controller_GetFrameStretch();
+        if (stretch > 0.0f) {
+            static int64_t ticksPerFrame = 0;
+            if (!ticksPerFrame) {
+                LARGE_INTEGER frequency;
+                QueryPerformanceFrequency(&frequency);
+                ticksPerFrame = frequency.QuadPart;
+            }
+            *(int64_t*)(main + 0x68) += (int64_t)((double)stretch * (double)ticksPerFrame);
+        }
+    }
     const uint64_t benchmarkStart = LiveBenchmark_Now();
     {
         LagDiagnosticScope diagnostic(LagMetric::Pacing);

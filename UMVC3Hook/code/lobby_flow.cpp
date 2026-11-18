@@ -1020,18 +1020,11 @@ bool SendLaunchAsHost()
     LaunchMenu_GetAutomaticNetplaySettings(rtt / 2, &delay, &rollback);
     // The players' own delay picks. Both run the same delay, so the higher
     // pick is used (a player who asked for more must not get less); "Auto"
-    // stands for the value measured from the ping. Moving away from the
-    // automatic delay keeps the same total budget by adjusting rollback.
+    // stands for the value measured from the ping. The rollback window is
+    // the same in every match.
     const auto wanted = [&](int pick) { return pick > kDelayPickAuto ? pick - 1 : delay; };
-    const int32_t chosen = std::max(wanted(g_pairing.localDelayPick),
-                                    wanted(g_pairing.opponentDelayPick));
-    if (chosen != delay) {
-        const int32_t budget = delay + rollback;
-        delay = chosen;
-        rollback = std::max(rollback, budget - delay);
-        if (rollback > 16) rollback = 16;
-    }
-    if (delay == 0 && rollback == 0) rollback = 1;
+    delay = std::max(wanted(g_pairing.localDelayPick), wanted(g_pairing.opponentDelayPick));
+    rollback = kNetplayRollbackFrames;
     HookLog("LobbyFlow: delay picks local=%d opponent=%d measured ping=%u ms -> %dD/%dR\n",
             g_pairing.localDelayPick, g_pairing.opponentDelayPick, rtt / 2, delay, rollback);
     ApplyNetplaySettings(delay, rollback);

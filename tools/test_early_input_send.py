@@ -34,7 +34,9 @@ constexpr bool INPUT_PROVENANCE_TRACE=false;
 ''' + packet + r'''
 bool active=true, synced=true, restart=false, checksums=true, g_isResimulating=false;
 bool g_preRenderInputReady=false;
-int32_t g_netFrameCount=100, g_delayFrames=3, g_rollbackFrames=7, g_localFrameAdvantage=-2;
+int32_t g_netFrameCount=100, g_delayFrames=3, g_rollbackFrames=7;
+float g_localLead=-2.0f;
+constexpr uint32_t INPUT_FLAG_REAL=1u;
 uint32_t generation=1, g_localPending=0x1234;
 uint32_t g_scheduledLocalInput[RING_SIZE]{}, g_recordedLocalInput[RING_SIZE]{};
 uint32_t g_usedRemoteInput[RING_SIZE]{}, g_oldInputs[MAX_HISTORY]{};

@@ -15,6 +15,7 @@
 #include "framestepper.h"
 #include "gameplay_hooks.h"
 #include "spectate.h"
+#include <atomic>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -257,7 +258,7 @@ static uint32_t  g_recordedGameInput[2][RING_SIZE];
 static int32_t   g_delayFrames     = 3;
 static int32_t   g_pendingDelayFrames = -1;
 static int32_t   g_pendingDelayEffectiveFrame = -1;
-static int32_t   g_rollbackFrames  = 7;
+static int32_t   g_rollbackFrames  = kNetplayRollbackFrames;
 static int32_t   g_pendingRollbackFrames = -1;
 static int32_t   g_pendingRollbackEffectiveFrame = -1;
 
@@ -347,19 +348,135 @@ static void ResetDesyncDetection()
 }
 
 // ---------------------------------------------------------------------------
-// RTT-based frame-advantage estimates.
+// Time sync: keeps the two games at the same frame at the same moment.
+//
+// A game that runs ahead of the other receives every remote input late and
+// rolls back for it, while the game behind receives input early and never
+// rolls back: the one-sided rollback. Nothing brings the two back together by
+// itself; every hitch one side has stays as an offset.
+//
+// Each input packet carries the sender's frame clock at the instant it left
+// (frame + fraction, netplay.cpp). On arrival the receiver compares it with
+// its own clock at that instant; smoothed, that is its "lead": by how much
+// its clock is past the frames it is being sent. The lead also holds the
+// network delay, which neither side can tell from a clock offset, but both
+// sides see that same delay. So each side sends its lead to the other, and
+// half the difference of the two is the frame advantage: the clock offset,
+// with the network delay (and any error in measuring it) cancelled out. It
+// is zero exactly when remote input reaches both games equally late, which
+// is when both roll back equally.
+//
+// The side that is ahead then lengthens its frames by a few percent at most
+// (rollback_hooks.cpp, hkMainMove) until the advantage is gone. No frame is
+// dropped or held, so there is nothing to see or feel.
 // ---------------------------------------------------------------------------
-int32_t      g_localFrameAdvantage  = 0;  // negative = we're ahead of remote
-int32_t      g_remoteFrameAdvantage = 0;  // received from peer via packet
+extern "C" bool FrameStepper_IsBattleSynchronized();
+extern "C" bool FrameStepper_IsMatchRestartPending();
 
-// Averaging window and wait-recommendation limits; sleeping is currently disabled.
-static constexpr int TIMESYNC_WINDOW_SIZE       = 40;
-static constexpr int TIMESYNC_MIN_FRAME_ADVANTAGE = 3;
-static constexpr int TIMESYNC_MAX_FRAME_ADVANTAGE = 14;
+static constexpr float TIMESYNC_SMOOTHING   = 1.0f / 32.0f; // per packet (two a frame)
+static constexpr float TIMESYNC_MAX_STEP    = 1.5f;   // frames one late packet may count for
+static constexpr int   TIMESYNC_MIN_SAMPLES = 30;
+static constexpr float TIMESYNC_DEADBAND    = 0.25f;  // frames of advantage left alone
+static constexpr float TIMESYNC_GAIN        = 0.012f; // stretch per frame of advantage
+static constexpr float TIMESYNC_MAX_STRETCH = 0.05f;  // 5%: 0.8 ms on a frame
+static constexpr uint64_t TIMESYNC_STALE_MS = 500;    // no packets: no correction
 
-static int32_t g_localAdvHistory[TIMESYNC_WINDOW_SIZE] = {};
-static int32_t g_remoteAdvHistory[TIMESYNC_WINDOW_SIZE] = {};
-static int32_t g_timesyncFrameCount = 0;
+static int64_t  g_frameStartQpc = 0;     // when g_netFrameCount began
+static int64_t  g_qpcFrequency = 0;
+static float    g_localLead = 0.0f;      // smoothed, frames
+static int      g_localLeadSamples = 0;
+static float    g_remoteLead = 0.0f;     // the peer's own, from its packets
+static bool     g_remoteLeadKnown = false;
+static uint64_t g_lastLeadTick = 0;
+// Read by the render thread (performance window) and by pacing.
+static std::atomic<float> g_frameAdvantage{0.0f};
+static std::atomic<bool>  g_frameAdvantageKnown{false};
+static std::atomic<float> g_frameStretch{0.0f};
+
+static void ResetTimeSync()
+{
+    g_localLead = 0.0f;
+    g_localLeadSamples = 0;
+    g_remoteLead = 0.0f;
+    g_remoteLeadKnown = false;
+    g_lastLeadTick = 0;
+    g_frameAdvantage.store(0.0f, std::memory_order_relaxed);
+    g_frameAdvantageKnown.store(false, std::memory_order_relaxed);
+    g_frameStretch.store(0.0f, std::memory_order_relaxed);
+}
+
+// One arriving input packet: the sender's clock against ours.
+static void SampleTimeSync(const InputPacket& packet, int64_t arrivalQpc)
+{
+    if (!(packet.flags & INPUT_FLAG_CLOCK) || g_netFrameCount < 0 || !g_qpcFrequency ||
+        !g_frameStartQpc)
+        return;
+    // The sender's frame, from its low bits, as the one nearest to ours.
+    const uint32_t frameMask = (1u << INPUT_CLOCK_FRAME_BITS) - 1;
+    int32_t frameDelta = static_cast<int32_t>(
+        ((packet.flags >> INPUT_CLOCK_FRAME_SHIFT) - static_cast<uint32_t>(g_netFrameCount)) &
+        frameMask);
+    if (frameDelta & (1 << (INPUT_CLOCK_FRAME_BITS - 1))) frameDelta -= 1 << INPUT_CLOCK_FRAME_BITS;
+    const float remotePhase =
+        static_cast<float>((packet.flags >> INPUT_CLOCK_PHASE_SHIFT) & 0x7F) /
+        static_cast<float>(INPUT_CLOCK_PHASE_ONE);
+    // Our clock when it arrived. It may have waited since before this frame
+    // began; and a game held up for input is no further than its frame's end.
+    float localPhase = static_cast<float>(
+        static_cast<double>(arrivalQpc - g_frameStartQpc) * 60.0 /
+        static_cast<double>(g_qpcFrequency));
+    if (localPhase < -4.0f) localPhase = -4.0f;
+    if (localPhase > 1.0f) localPhase = 1.0f;
+
+    const float sample = localPhase - static_cast<float>(frameDelta) - remotePhase;
+    if (g_localLeadSamples < TIMESYNC_MIN_SAMPLES) {
+        // Plain average until there is enough to smooth.
+        g_localLead += (sample - g_localLead) / static_cast<float>(g_localLeadSamples + 1);
+    } else {
+        // A packet the network held back says "ahead" by as much as it was
+        // held: let no single one move the estimate far.
+        float step = sample - g_localLead;
+        if (step > TIMESYNC_MAX_STEP) step = TIMESYNC_MAX_STEP;
+        if (step < -TIMESYNC_MAX_STEP) step = -TIMESYNC_MAX_STEP;
+        g_localLead += step * TIMESYNC_SMOOTHING;
+    }
+    if (g_localLeadSamples < TIMESYNC_MIN_SAMPLES) ++g_localLeadSamples;
+    g_remoteLead = static_cast<float>(packet.frame_advantage) / 256.0f;
+    g_remoteLeadKnown = true;
+    g_lastLeadTick = GetTickCount64();
+}
+
+// Once a frame: the advantage, and the stretch that answers it.
+static void UpdateTimeSync()
+{
+    const bool fresh = g_lastLeadTick && GetTickCount64() - g_lastLeadTick < TIMESYNC_STALE_MS;
+    if (!fresh || !g_remoteLeadKnown || g_localLeadSamples < TIMESYNC_MIN_SAMPLES ||
+        !FrameStepper_IsBattleSynchronized() || FrameStepper_IsMatchRestartPending()) {
+        g_frameStretch.store(0.0f, std::memory_order_relaxed);
+        if (!fresh) g_frameAdvantageKnown.store(false, std::memory_order_relaxed);
+        return;
+    }
+    const float advantage = (g_localLead - g_remoteLead) * 0.5f;
+    float stretch = (advantage - TIMESYNC_DEADBAND) * TIMESYNC_GAIN;
+    if (stretch < 0.0f) stretch = 0.0f;
+    if (stretch > TIMESYNC_MAX_STRETCH) stretch = TIMESYNC_MAX_STRETCH;
+    g_frameAdvantage.store(advantage, std::memory_order_relaxed);
+    g_frameAdvantageKnown.store(true, std::memory_order_relaxed);
+    g_frameStretch.store(stretch, std::memory_order_relaxed);
+}
+
+extern "C" bool Controller_GetFrameAdvantage(float* frames)
+{
+    if (!Netplay_IsActive() || !g_frameAdvantageKnown.load(std::memory_order_relaxed))
+        return false;
+    if (frames) *frames = g_frameAdvantage.load(std::memory_order_relaxed);
+    return true;
+}
+
+extern "C" float Controller_GetFrameStretch()
+{
+    return Netplay_IsActive() ? g_frameStretch.load(std::memory_order_relaxed) : 0.0f;
+}
 
 // Log the contents of a received input packet: which frames got which inputs.
 static void LogReceivedPacket(const InputPacket& pkt)
@@ -447,11 +564,7 @@ extern "C" void Controller_ResetBuffers()
     g_lastRemoteInput = 0;
     g_lastNonMultiCheckedFrame = -1;
     ResetDesyncDetection();
-    g_localFrameAdvantage  = 0;
-    g_remoteFrameAdvantage = 0;
-    g_timesyncFrameCount   = 0;
-    std::memset(g_localAdvHistory,  0, sizeof(g_localAdvHistory));
-    std::memset(g_remoteAdvHistory, 0, sizeof(g_remoteAdvHistory));
+    ResetTimeSync();
 }
 
 // ---------------------------------------------------------------------------
@@ -490,8 +603,6 @@ extern "C" uint32_t Controller_GetReceivedRemoteInput(int32_t frame)
     if (frame < 0) return 0;
     return g_receivedInput[(uint32_t)frame % RING_SIZE];
 }
-extern "C" int32_t  Controller_GetLocalFrameAdvantage()  { return g_localFrameAdvantage; }
-extern "C" int32_t  Controller_GetRemoteFrameAdvantage() { return g_remoteFrameAdvantage; }
 extern "C" bool    Controller_IsRollbackEnabled()   { return g_rollbackFrames > 0; }
 
 extern "C" void Controller_SetMultiResimEnabled(bool enabled)
@@ -510,12 +621,45 @@ extern "C" void Controller_SetMultiResimEnabled(bool enabled)
             enabled ? "enabled" : "disabled", transitionFrame);
 }
 
+// Rollbacks of the last second, for the status display: when each happened
+// and how many frames it replayed.
+static constexpr int ROLLBACK_STAT_SIZE = 64;
+static uint64_t g_rollbackStatTick[ROLLBACK_STAT_SIZE] = {};
+static int32_t  g_rollbackStatDepth[ROLLBACK_STAT_SIZE] = {};
+static uint32_t g_rollbackStatHead = 0;
+static std::atomic<float> g_averageRollbackFrames{0.0f};
+
+static void RecordRollbackDepth(int32_t depth)
+{
+    g_rollbackStatTick[g_rollbackStatHead % ROLLBACK_STAT_SIZE] = GetTickCount64();
+    g_rollbackStatDepth[g_rollbackStatHead % ROLLBACK_STAT_SIZE] = depth;
+    ++g_rollbackStatHead;
+}
+
+// Game thread, once a frame.
+static void UpdateAverageRollbackFrames()
+{
+    const uint64_t now = GetTickCount64();
+    int32_t total = 0, count = 0;
+    for (int i = 0; i < ROLLBACK_STAT_SIZE; ++i) {
+        if (!g_rollbackStatTick[i] || now - g_rollbackStatTick[i] >= 1000) continue;
+        total += g_rollbackStatDepth[i];
+        ++count;
+    }
+    g_averageRollbackFrames.store(count ? static_cast<float>(total) / count : 0.0f,
+                                  std::memory_order_relaxed);
+}
+
+extern "C" float Controller_GetAverageRollbackFrames()
+{
+    return g_averageRollbackFrames.load(std::memory_order_relaxed);
+}
+
+// The window is fixed (kNetplayRollbackFrames); the argument only says
+// whether there is one. Only a spectator runs without.
 extern "C" void Controller_SetRollbackFrames(int32_t n)
 {
-    if (n < 0)                  n = 0;
-    if (n > ROLLBACK_WINDOW)    n = ROLLBACK_WINDOW;
-    if (n == 0 && (g_delayFrames == 0 || g_pendingDelayFrames == 0))
-        n = 1;
+    n = n <= 0 && Netplay_IsSpectator() ? 0 : kNetplayRollbackFrames;
     if (n == g_rollbackFrames)
         return;
 
@@ -529,18 +673,6 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
 
     // Discard checksums produced under the previous rollback setting.
     Controller_ClearDesyncDetection();
-}
-
-extern "C" void Controller_ScheduleRollbackFrames(int32_t n, int32_t effectiveFrame)
-{
-    if (n < 0) n = 0;
-    if (n > ROLLBACK_WINDOW) n = ROLLBACK_WINDOW;
-    if (n == 0 && (g_delayFrames == 0 || g_pendingDelayFrames == 0))
-        n = 1;
-    g_pendingRollbackFrames = n;
-    g_pendingRollbackEffectiveFrame = effectiveFrame;
-    HookLog("Netplay: rollback change to %d scheduled for frame %d\n",
-            n, effectiveFrame);
 }
 
 // ---------------------------------------------------------------------------
@@ -1318,10 +1450,12 @@ static void __fastcall hkStepResult9_10_11(uint64_t sAction)
 static void DrainAndProcessPackets()
 {
     InputPacket inPkt;
-    while (Netplay_GetInboundPacket(inPkt))
+    int64_t arrivalQpc = 0;
+    while (Netplay_GetInboundPacket(inPkt, &arrivalQpc))
     {
         if (inPkt.battle_generation != FrameStepper_GetBattleGeneration())
             continue;
+        SampleTimeSync(inPkt, arrivalQpc);
 
         QueueInboundChecksum(inPkt);
 
@@ -1359,11 +1493,82 @@ static void DrainAndProcessPackets()
             }
         }
 
-        g_remoteFrameAdvantage = inPkt.frame_advantage;
         LogReceivedPacket(inPkt);
         TraceInputPacket("IPRX", "frame-start", g_netFrameCount, inPkt, 0,
                          acceptedMask, changedMask, priorConfirmedMask);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Input repair. An input packet carries the sender's newest NET_HISTORY_SIZE
+// frames. A game held up for a while (a hitch, a dragged window) can come back
+// to find the peer's packets have moved on past frames it never saw: the peer
+// ran on to the end of its rollback budget, and only the newest packets were
+// kept while nobody was reading them. Those frames were never sent again, so
+// this game could not go on, the peer was waiting for this game, and both sat
+// in "waiting for opponent" until one left.
+//
+// Now the game that finds such a hole asks for it, and the peer answers with
+// the frames from there on.
+// ---------------------------------------------------------------------------
+static constexpr uint64_t INPUT_REQUEST_INTERVAL_MS = 50;
+
+// `frame` is unconfirmed and holding the game up. A hole only if the peer has
+// already sent input for a later frame; otherwise it just has not got there.
+static void RequestMissingInput(int32_t frame)
+{
+    static uint64_t lastRequest = 0;
+    if (frame < 0 || g_lastRemoteFrame <= frame) return;
+    const uint64_t now = GetTickCount64();
+    if (now - lastRequest < INPUT_REQUEST_INTERVAL_MS) return;
+    lastRequest = now;
+    static int32_t lastLogged = -1;
+    if (lastLogged != frame) {
+        lastLogged = frame;
+        HookLog("Netplay: asking the peer to resend input from frame %d (newest seen %d, local %d)\n",
+                frame, g_lastRemoteFrame, g_netFrameCount);
+    }
+    Netplay_SendInputRequest(FrameStepper_GetBattleGeneration(), frame);
+}
+
+// The peer asked for our input from a frame on: send that span once.
+static void AnswerInputRequest()
+{
+    uint32_t generation = 0;
+    int32_t first = -1;
+    if (!Netplay_TakeInputRequest(&generation, &first)) return;
+    if (generation != FrameStepper_GetBattleGeneration() || first < 0 || g_netFrameCount < 0)
+        return;
+    // Every frame of a packet is taken as real input by the receiver, so the
+    // span must hold only frames that have been scheduled. If it would run
+    // past the newest one, the ordinary packets already cover the request.
+    int32_t newest = -1;
+    for (int32_t frame = g_netFrameCount + MAX_HISTORY - 1; frame >= first; --frame) {
+        if (g_scheduledLocalFrame[(uint32_t)frame % RING_SIZE] == frame) {
+            newest = frame;
+            break;
+        }
+    }
+    if (newest < 0 || first + MAX_HISTORY - 1 > newest) return;
+
+    InputPacket packet = {};
+    packet.battle_generation = generation;
+    packet.checksum_frame = 0xFFFFFFFFu;
+    packet.start_frame = (uint32_t)first;
+    packet.flags = INPUT_FLAG_REAL;
+    for (int i = 0; i < MAX_HISTORY; ++i) {
+        const int32_t frame = first + i;
+        const uint32_t idx = (uint32_t)frame % RING_SIZE;
+        if (g_scheduledLocalFrame[idx] != frame) return; // older than we still hold
+        packet.inputs[i] = g_scheduledLocalInput[idx];
+    }
+    static int32_t lastLogged = -1;
+    if (lastLogged != first) {
+        lastLogged = first;
+        HookLog("Netplay: resending input frames [%d-%d] at the peer's request (local %d)\n",
+                first, first + MAX_HISTORY - 1, g_netFrameCount);
+    }
+    Netplay_SendRepairPacket(packet);
 }
 
 static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
@@ -1381,6 +1586,8 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
     {
         SwitchToThread();
         DrainAndProcessPackets();
+        AnswerInputRequest();
+        RequestMissingInput(frame);
     }
     LagDiagnostics_RecordWait(LagMetric::InputWait, frame, remoteBefore, g_lastRemoteFrame,
                               g_delayFrames, g_rollbackFrames);
@@ -1404,12 +1611,17 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
     SetPredictionBudgetExhausted();
     Rollback_FreezeWatchdogHeartbeat("prediction budget exhausted",
                                      g_netFrameCount);
+    // Asked for before the loop as well: once the popup is up the loop is not
+    // entered any more, and this is then called once a frame.
+    RequestMissingInput(frame);
     while (!IsFrameConfirmed(frame) && Netplay_IsActive() &&
            !Netplay_HasInboundRestartMatch() &&
            !Controller_ShouldShowPredictionBudgetExhausted())
     {
         SwitchToThread();
         DrainAndProcessPackets();
+        AnswerInputRequest();
+        RequestMissingInput(frame);
     }
 
     LagDiagnostics_RecordWait(LagMetric::PredictionWait, frame, remoteBefore, g_lastRemoteFrame,
@@ -1446,6 +1658,20 @@ extern "C" void Controller_OnFrameStart()
         g_gameFrameBase = 0;
     }
 
+    // The frame clock: this frame begins now. Outgoing packets are stamped
+    // from it and arriving ones are measured against it (time sync).
+    {
+        LARGE_INTEGER qpc;
+        if (!g_qpcFrequency) {
+            QueryPerformanceFrequency(&qpc);
+            g_qpcFrequency = qpc.QuadPart;
+        }
+        QueryPerformanceCounter(&qpc);
+        g_frameStartQpc = qpc.QuadPart;
+        Netplay_SetFrameClock(FrameStepper_IsBattleSynchronized() ? g_netFrameCount : -1,
+                              g_frameStartQpc);
+    }
+
     ApplyScheduledDelayIfReady();
 
     g_localPending = 0;
@@ -1454,6 +1680,7 @@ extern "C" void Controller_OnFrameStart()
     {
         LagDiagnosticScope packetDiagnostic(LagMetric::PacketDrain);
         DrainAndProcessPackets();
+        AnswerInputRequest();
     }
 
     // Confirm completed frames before changing the rollback window.
@@ -1561,6 +1788,7 @@ extern "C" void Controller_OnFrameStart()
                     Rollback_UpdateSnapshotInputs(f, trueLocal, trueRemote);
                 }
 
+                RecordRollbackDepth(g_netFrameCount - earliestConflict);
                 Rollback_RequestReSimulate(earliestConflict, g_netFrameCount);
             }
             else
@@ -1629,46 +1857,8 @@ extern "C" void Controller_OnFrameStart()
             g_netFrameCount, localInput, g_usedRemoteInput[idx]);
     }
 
-    // Estimate remote frame from received input and RTT; negative advantage means ahead.
-    if (g_netFrameCount >= 0 && g_lastRemoteFrame >= 0)
-    {
-        int32_t rttMs = (int32_t)Netplay_GetAverageRTT();
-        int32_t remoteFrameEst = g_lastRemoteFrame + (static_cast<float>(rttMs) * 60 / 1000 + 0.5);
-        g_localFrameAdvantage = remoteFrameEst - g_netFrameCount;
-
-        // Advance timesync window
-        uint32_t tidx = (uint32_t)g_timesyncFrameCount % TIMESYNC_WINDOW_SIZE;
-        g_localAdvHistory[tidx]  = g_localFrameAdvantage;
-        g_remoteAdvHistory[tidx] = g_remoteFrameAdvantage;
-        g_timesyncFrameCount++;
-
-        // Compute a wait recommendation from both peers' averaged estimates.
-        int count = g_timesyncFrameCount < TIMESYNC_WINDOW_SIZE
-                    ? g_timesyncFrameCount : TIMESYNC_WINDOW_SIZE;
-        if (count > 0)
-        {
-            float avgLocal = 0, avgRemote = 0;
-            for (int i = 0; i < count; i++)
-            {
-                avgLocal  += (float)g_localAdvHistory[i];
-                avgRemote += (float)g_remoteAdvHistory[i];
-            }
-            avgLocal  /= count;
-            avgRemote /= count;
-
-            // Sleeping is disabled; retain the recommendation calculation.
-            if (avgLocal < avgRemote)
-            {
-                int sleepFrames = (int)(((avgRemote - avgLocal) / 2.0f) + 0.5f);
-                if (sleepFrames >= TIMESYNC_MIN_FRAME_ADVANTAGE)
-                {
-                    if (sleepFrames > TIMESYNC_MAX_FRAME_ADVANTAGE)
-                        sleepFrames = TIMESYNC_MAX_FRAME_ADVANTAGE;
-                    //Sleep(sleepFrames);
-                }
-            }
-        }
-    }
+    UpdateTimeSync();
+    UpdateAverageRollbackFrames();
     g_preRenderInputReady = true;
 }
 
@@ -1996,9 +2186,9 @@ static void PublishFrameInput(bool frameComplete)
         }
     }
 
-    // Include our frame-advantage estimate for the peer.
-    outPkt.frame_advantage = g_localFrameAdvantage;
-    outPkt.flags           = 1;  // non-zero = real packet (seed packet has flags=0)
+    // Our lead, for the peer's time sync. The frame clock is added to the flags as the packet leaves (netplay.cpp).
+    outPkt.frame_advantage = static_cast<int32_t>(g_localLead * 256.0f);
+    outPkt.flags           = INPUT_FLAG_REAL; // seed packets have flags = 0
 
     if (INPUT_PROVENANCE_TRACE) {
         uint32_t executedIdx = (uint32_t)g_netFrameCount % RING_SIZE;

@@ -149,6 +149,11 @@ extern "C" int32_t  Controller_GetNetFrameCount();
 extern "C" int32_t  Controller_GetExecutingFrame();
 extern "C" int32_t  Controller_GetLastRemoteFrame();
 extern "C" int32_t  Controller_GetRollbackFrames();
+// The rollback window is not a setting: every match is played with this many
+// frames. (0 only for a spectator, who never predicts.)
+constexpr int32_t   kNetplayRollbackFrames = 8;
+// Mean depth, in frames, of the rollbacks of the last second; 0 with none.
+extern "C" float    Controller_GetAverageRollbackFrames();
 extern "C" bool     Controller_IsRollbackChangePending();
 extern "C" bool     Controller_IsRollbackEnabled();
 extern "C" bool     Controller_IsPredictionBudgetExhausted();
@@ -167,15 +172,17 @@ extern "C" uint32_t Controller_GetReceivedRemoteInput(int32_t frame);
 // accounting for host/client and local/remote role.
 extern "C" uint32_t Controller_GetExpectedInput(uint32_t teamIdx, int32_t frame);
 
-// Frame advantage info for overlay display (GGPO-style)
-extern "C" int32_t  Controller_GetLocalFrameAdvantage();
-extern "C" int32_t  Controller_GetRemoteFrameAdvantage();
+// Time sync (controller.cpp). Frame advantage: how many frames the local game
+// runs ahead of the opponent's (negative = behind); false while unknown.
+// Stretch: the fraction by which each local frame is lengthened right now to
+// let the opponent catch up (0 when not ahead).
+extern "C" bool     Controller_GetFrameAdvantage(float* frames);
+extern "C" float    Controller_GetFrameStretch();
 
 // Runtime delay adjustment — called from framestepper UI or netplay inbound
 extern "C" void     Controller_SetDelayFrames(int32_t delay);
 extern "C" void     Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame);
 extern "C" void     Controller_SetRollbackFrames(int32_t n);
-extern "C" void     Controller_ScheduleRollbackFrames(int32_t n, int32_t effectiveFrame);
 extern "C" void     Controller_ResetFightTimer(uint64_t sAction);
 
 // Desync detection flags — set by controller when checksums diverge.
@@ -185,10 +192,6 @@ extern int32_t      g_desyncFrame;
 extern uint32_t     g_desyncLocalCS;
 extern uint32_t     g_desyncRemoteCS;
 extern "C" void     Controller_ClearDesyncDetection();
-
-// Frame advantage (GGPO-style) — frame-count-based timesync
-extern int32_t      g_localFrameAdvantage;    // negative = we're ahead of remote
-extern int32_t      g_remoteFrameAdvantage;   // received from peer (their local advantage)
 
 // Spectators (spectate.h): frame boundaries of a match played from the log.
 extern "C" int32_t  Controller_SpectatorFrameStart();

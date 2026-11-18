@@ -658,6 +658,22 @@ void LiveBenchmark_Draw()
         ImGui::EndTable();
     }
     if (expanded) {
+        // Time sync (controller.cpp): which game is ahead, and by how much.
+        float advantage = 0.0f;
+        if (Controller_GetFrameAdvantage(&advantage)) {
+            ImGui::Separator();
+            const float stretch = Controller_GetFrameStretch();
+            ImGui::Text("Frame advantage  %+.2f f", advantage);
+            ImGui::SameLine();
+            if (stretch > 0.0f)
+                ImGui::TextDisabled("ahead, slowing %.1f%%", stretch * 100.0f);
+            else
+                ImGui::TextDisabled(advantage > 0.25f ? "ahead" :
+                                    advantage < -0.25f ? "behind, opp. slows" : "in sync");
+        } else if (snapshot.connected) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Frame advantage  N/A");
+        }
         ImGui::Separator();
         ImGui::TextDisabled("Samples %u / %u  |  0: show both for 8s",
             Cost(local, LiveBenchmarkMetric::Live).count, Cost(peer, LiveBenchmarkMetric::Live).count);

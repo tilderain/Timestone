@@ -28,6 +28,7 @@ enum PacketType : uint32_t {
     PACKET_PLAYER_DISCONNECT = 17, // PlayerDisconnectPacket
     PACKET_LAUNCH_CHAT = 18, // LaunchChatPacket
     PACKET_BENCHMARK = 19, // Benchmark payload on the extension channel
+    PACKET_INPUT_REQUEST = 20, // InputRequestPacket
 };
 
 #pragma pack(push, 1)
@@ -42,8 +43,27 @@ struct InputPacket {
     uint32_t checksum_frame;     // confirmed frame, UINT32_MAX if absent
     uint32_t checksum;           // character checksum for checksum_frame
     uint32_t inputs[NET_HISTORY_SIZE];
-    int32_t  frame_advantage;    // sender's estimate; negative means ahead
-    uint32_t flags;              // 0 = seed packet, non-zero = real packet
+    int32_t  frame_advantage;    // sender's frame-clock lead, 1/256 frames (see controller.cpp, time sync)
+    uint32_t flags;              // 0 = seed packet; INPUT_FLAG_* otherwise
+};
+
+// InputPacket::flags. With INPUT_FLAG_CLOCK the packet carries the sender's
+// frame clock as it was when the packet left: the frame being played and how
+// far into it the sender was. Stamped at every send, resends included.
+constexpr uint32_t INPUT_FLAG_REAL        = 1u << 0;
+constexpr uint32_t INPUT_FLAG_CLOCK       = 1u << 1;
+constexpr uint32_t INPUT_CLOCK_PHASE_SHIFT = 2;   // 7 bits: 0..64, in 1/64 frame
+constexpr uint32_t INPUT_CLOCK_PHASE_ONE   = 64;
+constexpr uint32_t INPUT_CLOCK_FRAME_SHIFT = 9;   // 23 bits: frame number, low bits
+constexpr uint32_t INPUT_CLOCK_FRAME_BITS  = 23;
+
+// "Send me your input again from this frame on." An input packet holds the
+// newest NET_HISTORY_SIZE frames only; a peer that was held up for longer than
+// that span covers has no other way to get the frames it missed.
+struct InputRequestPacket {
+    uint32_t type;               // PACKET_INPUT_REQUEST
+    uint32_t battle_generation;
+    int32_t  first_frame;
 };
 
 struct DelayPacket {
@@ -219,6 +239,11 @@ static_assert(sizeof(AutoTestStartPacket) <= NET_MAX_PACKET_SIZE,
 // Cap ENet packet size and queued receive data for this protocol.
 void Netplay_ConfigureHostLimits(ENetHost* host);
 
+// Stop ENet from discarding non-reliable packets when it judges the link
+// congested. Input packets are unsequenced and must never be dropped locally.
+// Call on the thread that owns the peer's host; the setting reaches both ends.
+void Netplay_DisablePacketThrottle(ENetPeer* peer);
+
 // Take ownership of the ENet host/peer and start the service thread.
 void Netplay_Init(ENetHost* host, ENetPeer* peer);
 
@@ -234,7 +259,18 @@ void Netplay_SendInput(uint32_t rawInput);
 void Netplay_SendPacket(const InputPacket& pkt);
 
 // Consume the oldest queued input packet; return false if the queue is empty.
-bool Netplay_GetInboundPacket(InputPacket& outPkt);
+// arrivalQpc: QueryPerformanceCounter value when the packet came off the wire.
+bool Netplay_GetInboundPacket(InputPacket& outPkt, int64_t* arrivalQpc = nullptr);
+// Input repair. SendInputRequest asks the peer for its input from `firstFrame`
+// on; TakeInputRequest returns the peer's latest such request, once.
+// SendRepairPacket sends one extra input packet (the answer) without
+// replacing the newest one, which keeps being resent.
+void Netplay_SendInputRequest(uint32_t generation, int32_t firstFrame);
+bool Netplay_TakeInputRequest(uint32_t* generation, int32_t* firstFrame);
+void Netplay_SendRepairPacket(const InputPacket& pkt);
+// The game thread's frame clock: `frame` began at `startQpc`. Outgoing input
+// packets are stamped from it. A negative frame stops the stamping.
+void Netplay_SetFrameClock(int32_t frame, int64_t startQpc);
 
 // Whether the netplay service loop is running.
 bool Netplay_IsActive();
