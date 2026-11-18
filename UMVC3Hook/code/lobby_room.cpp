@@ -501,7 +501,8 @@ void SteamRoomService::AcceptMatch()
 
 void SteamRoomService::HoverDelay(int pick)
 {
-    if (local_.slot < 0 || !local_.accepted || local_.delayHover == pick) return;
+    // Published before the pick too: choosing a delay is how a player readies up.
+    if (local_.slot < 0 || local_.delayHover == pick) return;
     local_.delayHover = pick < kDelayPickAuto ? kDelayPickAuto : pick > kMaxDelayPick ? kMaxDelayPick : pick;
     PublishLocal();
 }

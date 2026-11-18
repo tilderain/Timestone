@@ -81,10 +81,8 @@ private:
     // match slot are taken. Each is answered by both players in turn.
     enum class Handshake : uint8_t {
         None,
-        Prompt,     // "ready up?" not answered yet
-        WaitAccept, // answered, the other player has not
-        Delay,      // choosing an input delay
-        WaitDelay,
+        Delay,      // choosing an input delay, which also readies up
+        WaitDelay,  // picked, the other player has not
         Entry,      // character select or start immediately
         WaitStart,  // done, waiting for the other player's team
     };

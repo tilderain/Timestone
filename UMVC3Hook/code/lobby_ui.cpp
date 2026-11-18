@@ -145,8 +145,8 @@ constexpr int kTeamRowDone = 10;
 constexpr int kTeamRows = 11;
 
 // Pre-match prompts: how long each waits for an answer (frames at 60 fps).
-constexpr uint32_t kPromptTimeout = 15 * 60;  // no answer: the seat is given up
-constexpr uint32_t kDelayTimeout = 20 * 60;   // no answer: the highlighted delay
+// Picking a delay is the ready-up: with no pick, the seat is given up.
+constexpr uint32_t kDelayTimeout = 20 * 60;
 constexpr uint32_t kEntryTimeout = 30 * 60;   // no answer: start immediately
 constexpr uint32_t kTeamTimeout = 90 * 60;    // team screen before a match
 
@@ -498,12 +498,12 @@ void LobbyUi::Update(const Input& input)
     else
         chatHoverFrames_ = 0;
 
-    // A match becoming ready closes whatever modal is up so the ready prompt
-    // is seen at once; UpdateHandshake then clears the room's own menus. A
-    // half-typed message is dropped. Busy and update progress stay: they are
-    // work in progress, not something the player opened.
-    if (screen_ == Screen::Room && handshake_ != Handshake::Prompt &&
-        HandshakeStep() == Handshake::Prompt) {
+    // A match becoming ready closes whatever modal is up so the delay pick
+    // (the ready-up) is seen at once; UpdateHandshake then clears the room's
+    // own menus. A half-typed message is dropped. Busy and update progress
+    // stay: they are work in progress, not something the player opened.
+    if (screen_ == Screen::Room && handshake_ != Handshake::Delay &&
+        HandshakeStep() == Handshake::Delay) {
         notice_[0] = '\0';
         if (confirm_ != Confirm::Update) confirm_ = Confirm::None;
         if (textTarget_ != TextTarget::None) EndText(false);
@@ -934,10 +934,9 @@ LobbyUi::Handshake LobbyUi::HandshakeStep() const
         return Handshake::None;
     const Member* other = SeatOccupant(local->slot, 1 - local->side);
     if (!other || other->status == MemberStatus::Fighting) return Handshake::None;
-    if (!local->accepted) return Handshake::Prompt;
-    if (!other->accepted) return Handshake::WaitAccept;
-    if (local->delayPick == kDelayPickNone) return Handshake::Delay;
-    if (other->delayPick == kDelayPickNone) return Handshake::WaitDelay;
+    // The delay pick is the ready-up: confirming one also accepts the match.
+    if (!local->accepted || local->delayPick == kDelayPickNone) return Handshake::Delay;
+    if (!other->accepted || other->delayPick == kDelayPickNone) return Handshake::WaitDelay;
     if (!local->ready) return Handshake::Entry;
     if (!other->ready) return Handshake::WaitStart;
     return Handshake::None; // both ready: the match is being started
@@ -947,7 +946,7 @@ bool LobbyUi::UpdateHandshake(const Input& input)
 {
     const Handshake step = HandshakeStep();
     if (step != handshake_) {
-        if (step == Handshake::Prompt) {
+        if (step == Handshake::Delay) {
             // A match is waiting: whatever was open gives way, and the player
             // is called to the window.
             roomMenuOpen_ = false;
@@ -977,34 +976,20 @@ bool LobbyUi::UpdateHandshake(const Input& input)
         return true;
     }
     switch (step) {
-    case Handshake::Prompt:
-        if (handshakeFrames_ >= kPromptTimeout) {
+    case Handshake::Delay: {
+        if (handshakeFrames_ >= kDelayTimeout) {
             service_.Stand();
             ShowNotice("You did not ready up in time\nand were removed from the seat.");
             break;
         }
-        if (input.left || input.right || input.up || input.down) {
-            handshakeCursor_ ^= 1;
-            Play(SFX_MOVE);
-        }
-        if (input.confirm) {
-            if (handshakeCursor_ == 0) {
-                service_.AcceptMatch();
-                Play(SFX_CONFIRM);
-            } else {
-                service_.Stand();
-                Play(SFX_CANCEL);
-            }
-        }
-        break;
-    case Handshake::Delay: {
         const int delta = (input.right ? 1 : 0) - (input.left ? 1 : 0);
         if (delta != 0) {
             const int count = kMaxDelayPick + 1;
             delayCursor_ = ((delayCursor_ + delta) % count + count) % count;
             Play(SFX_MOVE);
         }
-        if (input.confirm || handshakeFrames_ >= kDelayTimeout) {
+        if (input.confirm) {
+            service_.AcceptMatch();
             service_.PickDelay(delayCursor_);
             Play(SFX_CONFIRM);
         }
@@ -1590,9 +1575,9 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         if (confirm_ != Confirm::None) add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Room && HandshakeStep() != Handshake::None) {
         const Handshake step = HandshakeStep();
-        if (step == Handshake::Prompt || step == Handshake::Entry) add(BTN_CONFIRM, "Select");
+        if (step == Handshake::Entry) add(BTN_CONFIRM, "Select");
         if (step == Handshake::Delay) {
-            add(BTN_CONFIRM, "OK");
+            add(BTN_CONFIRM, "Ready");
             add(BTN_DPAD, "Change");
         }
         add(BTN_CANCEL, "Leave seat");
@@ -2409,25 +2394,13 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
     const auto delayValue = [autoDelay](int pick) { return pick > kDelayPickAuto ? pick - 1 : autoDelay; };
     uint32_t limit = 0;
     switch (step) {
-    case Handshake::Prompt:
-        p.Text("Your match is ready.", cx, y + 116.0f, 0.9f, A_MC);
-        p.Text(other->accepted ? "Your opponent is ready." : "Waiting for your opponent.", cx,
-               y + 150.0f, 0.66f, A_MC, other->accepted ? kGreen : kDim);
-        option("READY", cx - 150.0f, y + 214.0f, 240.0f, handshakeCursor_ == 0);
-        option("LEAVE SEAT", cx + 150.0f, y + 214.0f, 240.0f, handshakeCursor_ == 1);
-        limit = kPromptTimeout;
-        break;
-    case Handshake::WaitAccept:
-        p.Text("You are ready.", cx, y + 130.0f, 0.9f, A_MC, kGreen);
-        p.Text("Waiting for your opponent to ready up.", cx, y + 172.0f, 0.74f, A_MC, kDim);
-        break;
     case Handshake::Delay:
     case Handshake::WaitDelay: {
         p.Text("INPUT DELAY", cx, y + 108.0f, 0.36f, A_MC, kText, FONT_HEADING);
         char mine[24], theirs[24];
         delayName(step == Handshake::Delay ? delayCursor_ : local->delayPick, mine, sizeof(mine));
         // Their locked pick, or until then whatever they have highlighted.
-        const bool theirsLocked = other->delayPick != kDelayPickNone;
+        const bool theirsLocked = other->accepted && other->delayPick != kDelayPickNone;
         delayName(theirsLocked ? other->delayPick : other->delayHover, theirs, sizeof(theirs));
         p.Text("YOU", cx - 180.0f, y + 150.0f, 0.6f, A_MC, kDim);
         p.Text(mine, cx - 180.0f, y + 188.0f, 1.0f, A_MC, step == Handshake::Delay ? kText : kGreen);
@@ -2457,8 +2430,8 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
         limit = kEntryTimeout;
         break;
     default:
-        p.Text("You are set.", cx, y + 130.0f, 0.9f, A_MC, kGreen);
-        p.Text("Waiting for your opponent to choose a team.", cx, y + 172.0f, 0.74f, A_MC, kDim);
+        p.Text("Ready", cx, y + 130.0f, 0.9f, A_MC, kGreen);
+        p.Text("Waiting for opponent.", cx, y + 172.0f, 0.74f, A_MC, kDim);
         break;
     }
     if (limit) {

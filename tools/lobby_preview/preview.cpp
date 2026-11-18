@@ -567,12 +567,10 @@ int main(int argc, char** argv)
             ok &= Capture(ui, directory, "room_chat");
             ui.Update(Press(&Input::cancel));
 
-            // Sit opposite Vevota: the pre-match prompts, step by step.
+            // Sit opposite Vevota: the pre-match prompts, step by step. The
+            // delay pick comes first and is the ready-up.
             ui.Update(Press(&Input::confirm));
             Settle(ui, 90);
-            ok &= Capture(ui, directory, "match_prompt");
-            ui.Update(Press(&Input::confirm)); // READY
-            Settle(ui, 3);
             ok &= Capture(ui, directory, "match_delay");
             ui.Update(Press(&Input::right));
             ui.Update(Press(&Input::right));
