@@ -2,6 +2,8 @@ Timestone (MVC3 Rollback) :steamhappy:
 
 # About
 
+<a href="doc/screenshot.jpg"><img src="doc/screenshot.jpg" alt="hi" width="480"></a>
+
 This is a work in progress rollback mod for UMVC3. 
 
 Timestone currently has semi functional rollback/netplay but is not considered finished or tournament-ready.
@@ -12,7 +14,7 @@ The db was brought to you in part by [Mario Party Challenge World](https://www.y
 
 [Thanks to Aeyth8 for dumping the arcade cabinet.](https://www.reddit.com/r/lostmedia/comments/1jvlauo/found_mario_party_mystery_challenge/)
 
-AI has been used extensively throughout this project for reverse engineering, code generation, debugging, investigation, and repetitive work. Generated output is tested, modified, or discarded as needed.
+AI has been used extensively throughout this project for reverse engineering, code generation, debugging, investigation, and repetitive work. The generated output is tested, modified, or discarded as needed.
 
 # Compilation
 
@@ -29,13 +31,11 @@ Windows:  in an MSYS2 MINGW64 shell, first `pacman -S mingw-w64-x86_64-toolchain
 Use `-five-bars` with a training launch to start both teams with five hyper bars
 (and every Frank at level 3).
 
-The game boots into the in-game lobby by default: multi-player rooms with
-match slots, drawn with the game's own UI. Use `-launcher` (or
-`[Launch] NativeLobby=0` in `Timestone.ini`) for the external launcher
-instead. See [doc/native_lobby_ui.md](doc/native_lobby_ui.md); the in-game
-lobby has not been validated in play yet.
+The game boots into the in-game online menu by default. 
+Use `-launcher` (or `[Launch] NativeLobby=0` in `Timestone.ini`) for the dev launcher
+instead. 
 
-For AI-assisted desync investigation, there is a semi reliable autotester for moves from the attack command matcher. It supports move names, and move numbers (from the command matcher)
+For AI-assisted desync investigation, there is a semi reliable autotester for moves from the attack command matcher. It supports move names, and move numbers (from the command matcher), 
 
 ```text
 umvc3.exe -autotest=Ryu -autotest-moves="12,Hadoken" -autotest-repeat=5
@@ -48,6 +48,8 @@ python tools/autotest_ai.py --character Hawkeye \
   --failed-tsv "../ULTIMATE MARVEL VS. CAPCOM 3/autotest/failed.tsv" \
   --repeat 5 --launch
 ```
+
+Though this method is deprecated in favor of move specific desync dumps.
 
 # Credits
 
