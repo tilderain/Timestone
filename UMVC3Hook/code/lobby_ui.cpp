@@ -1702,8 +1702,9 @@ const char* LobbyUi::DrawTop(Canvas& canvas) const
     p.Label("Timestone v" UMVC3HOOK_VERSION, 204.0f, 76.0f, 0.62f, A_ML, kYellow);
 
     DrawTeamCard(canvas, 72.0f, 168.0f, 470.0f);
-    p.TextFit(service_.StatusText(), 84.0f, 494.0f, 0.62f, 450.0f, A_ML,
-              service_.Available() ? kDim : kRed);
+    // Only the reason Steam is unusable; routine status ("Left Steam lobby") is noise here.
+    if (!service_.Available())
+        p.TextFit(service_.StatusText(), 84.0f, 494.0f, 0.62f, 450.0f, A_ML, kRed);
 
     for (int i = 0; i < kTopCount; ++i) {
         const float y = 214.0f + i * 82.0f;
