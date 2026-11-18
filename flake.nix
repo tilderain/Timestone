@@ -35,6 +35,7 @@
           installPhase = ''
             mkdir -p "$out"
             cp Timestone.asi TimestoneUpdater.exe dinput8.dll "$out/"
+            cp THIRDPARTYNOTICES "$out/Timestone-THIRDPARTYNOTICES"
           '';
         };
       });

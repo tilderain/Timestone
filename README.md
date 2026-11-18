@@ -35,7 +35,7 @@ The game boots into the in-game online menu by default.
 Use `-launcher` (or `[Launch] NativeLobby=0` in `Timestone.ini`) for the dev launcher
 instead. 
 
-For AI-assisted desync investigation, there is a semi reliable autotester for moves from the attack command matcher. It supports move names, and move numbers (from the command matcher), 
+For AI-assisted desync investigation, there is a semi reliable autotester for moves from the attack command matcher. It supports move names, and move numbers (from the command matcher), though this method is deprecated in favor of match desync dumps.
 
 ```text
 umvc3.exe -autotest=Ryu -autotest-moves="12,Hadoken" -autotest-repeat=5
@@ -49,7 +49,6 @@ python tools/autotest_ai.py --character Hawkeye \
   --repeat 5 --launch
 ```
 
-Though this method is deprecated in favor of move specific desync dumps.
 
 # Credits
 
@@ -108,6 +107,3 @@ These licenses cover only their projects, not all of Timestone. Timestone licens
 | [MCF Gthread](https://github.com/lhmouse/mcfgthread), if linked by the release toolchain | LGPL-3.0-or-later with additional permissions including GCC Runtime Library Exception 3.1; conditional notice included |
 
 No license was found for [rdbo's ImGui/DirectX 9/kiero hook example](https://github.com/rdbo/ImGui-DirectX-9-Kiero-Hook).
-
-`THIRDPARTYNOTICES` should be included in the release zip, but is not yet
-

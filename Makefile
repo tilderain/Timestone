@@ -42,6 +42,7 @@ OUTPUT    := Timestone.asi
 UNSTRIPPED_OUTPUT := Timestone-unstripped.asi
 UPDATER_OUTPUT := TimestoneUpdater.exe
 PACKAGE_OUTPUT := Timestone.zip
+PACKAGE_NOTICES := $(BUILDDIR)/Timestone-THIRDPARTYNOTICES
 LOADER_DLL := dinput8.dll
 MAP_FILE  := Timestone.map
 
@@ -289,7 +290,13 @@ $(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
 		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion -lole32 -loleaut32 -luuid
 	@echo "=== Built: $(UPDATER_OUTPUT) ==="
 
-$(PACKAGE_OUTPUT): $(LOADER_DLL) $(OUTPUT) $(UPDATER_OUTPUT)
+# The notices ship under a Timestone- name so they are identifiable once
+# extracted into the game folder.
+$(PACKAGE_NOTICES): THIRDPARTYNOTICES
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+$(PACKAGE_OUTPUT): $(LOADER_DLL) $(OUTPUT) $(UPDATER_OUTPUT) $(PACKAGE_NOTICES)
 	rm -f $@
 	$(ZIP) -j -0 $@ $^
 	@echo "=== Built: $(PACKAGE_OUTPUT) ==="
