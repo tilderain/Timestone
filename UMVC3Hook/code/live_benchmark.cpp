@@ -585,7 +585,9 @@ void LiveBenchmark_Draw()
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 4));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    // Never takes focus or controller/keyboard navigation from the pause menu.
     ImGui::Begin("Performance##LiveBenchmark", nullptr,
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
     const float width = std::min(420.0f, std::max(240.0f, display.x - 56.0f));

@@ -1,5 +1,6 @@
 #include "../pch.h"
 #include "../imgui/imgui.h"
+#include "../imgui/imgui_internal.h"
 #include "escmenu_imgui.h"
 #include "framestepper.h"
 #include "LaunchMenu.h"
@@ -12,7 +13,9 @@
 #include "lag_diagnostics.h"
 #include <Windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 extern bool ChrSelImGui_IsOpen();
@@ -20,7 +23,35 @@ extern bool ChrSelImGui_Open();
 
 namespace {
 
-bool g_open = false;
+bool g_open = false;   // overlay thread
+bool g_justOpened = false;
+
+// sPad slots (sPad__perFrameUpdate 0x140514570, sPad__cnvX360Pad 0x1405111B0):
+// four at sPad+0x58, 0x2E0 apart. Held buttons at +0x164. +0x164..+0x18F
+// (masks, sticks, triggers) is what sPad__Pad__readPad clears while
+// sPad::mActive is off.
+constexpr size_t kPadSlotBase = 0x58;
+constexpr size_t kPadSlotStride = 0x2E0;
+constexpr size_t kPadSlotActive = 0x08;
+constexpr size_t kPadSlotHeld = 0x164;
+constexpr size_t kPadSlotInputBytes = 0x2C;
+
+// Decoded mask bits (controller.h IN_*).
+constexpr uint32_t kPadStart = 0x0008;
+constexpr uint32_t kPadUp = 0x0010, kPadRight = 0x0020, kPadDown = 0x0040, kPadLeft = 0x0080;
+constexpr uint32_t kPadB = 0x2000, kPadA = 0x4000;
+constexpr uint32_t kStickUp = 0x10000, kStickRight = 0x20000, kStickDown = 0x40000,
+                   kStickLeft = 0x80000;
+
+// Shared between the game thread (pad poll) and the overlay thread.
+std::atomic<bool> g_available{false};
+std::atomic<bool> g_openShared{false};
+std::atomic<bool> g_toggleRequested{false};
+std::atomic<uint32_t> g_padHeld{0};
+bool g_blockingPad = false;  // game thread
+uint32_t g_pollPrevHeld = 0; // game thread: held buttons of the previous poll
+uint32_t g_navPrevHeld = 0;  // overlay thread
+bool g_closeRequested = false;
 
 void ExitGame()
 {
@@ -33,28 +64,107 @@ void ExitGame()
 
 } // namespace
 
+void EscMenuImGui_OnPadPoll(uint64_t sPad)
+{
+    if (!sPad || !g_available.load(std::memory_order_relaxed)) {
+        g_padHeld.store(0, std::memory_order_relaxed);
+        g_blockingPad = false;
+        g_pollPrevHeld = 0;
+        return;
+    }
+    uint32_t held = 0;
+    for (size_t slot = 0; slot < 4; ++slot) {
+        const uint8_t* pad = reinterpret_cast<const uint8_t*>(
+            sPad + kPadSlotBase + slot * kPadSlotStride);
+        if (pad[kPadSlotActive]) held |= *reinterpret_cast<const uint32_t*>(pad + kPadSlotHeld);
+    }
+    // Presses from our own previous poll, not the slot's: clearing the slot
+    // below also clears its previous-frame mask, which would make a held
+    // Start read as a new press every frame.
+    const uint32_t pressed = held & ~g_pollPrevHeld;
+    g_pollPrevHeld = held;
+    g_padHeld.store(held, std::memory_order_relaxed);
+
+    bool open = g_openShared.load(std::memory_order_acquire);
+    if (pressed & kPadStart) {
+        g_toggleRequested.store(true, std::memory_order_release);
+        open = !open; // what the overlay is about to do; this frame's Start stays ours
+    }
+    // Keep the pad from the game while the menu is open, and after it closes
+    // until everything is let go: the B or Start that closed it must not
+    // arrive in the match as a fresh press.
+    g_blockingPad = open || (g_blockingPad && held != 0);
+    if (!g_blockingPad) return;
+    for (size_t slot = 0; slot < 4; ++slot) {
+        uint8_t* pad = reinterpret_cast<uint8_t*>(sPad + kPadSlotBase + slot * kPadSlotStride);
+        if (pad[kPadSlotActive]) memset(pad + kPadSlotHeld, 0, kPadSlotInputBytes);
+    }
+}
+
+void EscMenuImGui_FeedGamepad()
+{
+    ImGuiIO& io = ImGui::GetIO();
+    if (!g_open) {
+        g_navPrevHeld = g_padHeld.load(std::memory_order_relaxed);
+        return;
+    }
+    // Set only across ImGui::NewFrame (EscMenuImGui_Update clears them): the
+    // Win32 backend polls XInput itself whenever it sees them at its own
+    // NewFrame, and this menu already has the game's poll.
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+
+    const uint32_t held = g_padHeld.load(std::memory_order_relaxed);
+    const auto nav = [&](ImGuiNavInput input, uint32_t mask) {
+        if (held & mask) io.NavInputs[input] = 1.0f;
+    };
+    nav(ImGuiNavInput_Activate, kPadA);
+    nav(ImGuiNavInput_Cancel, kPadB);
+    // ImGui moves between items only on the d-pad inputs (its stick inputs
+    // scroll), so the stick, and sticks that report as one, count as d-pad.
+    nav(ImGuiNavInput_DpadUp, kPadUp | kStickUp);
+    nav(ImGuiNavInput_DpadDown, kPadDown | kStickDown);
+    nav(ImGuiNavInput_DpadLeft, kPadLeft | kStickLeft);
+    nav(ImGuiNavInput_DpadRight, kPadRight | kStickRight);
+
+    // B backs out of an open combo first (ImGui's own Cancel); with nothing
+    // open it closes the menu. Checked before NewFrame closes any popup.
+    const bool bPressed = (held & kPadB) && !(g_navPrevHeld & kPadB);
+    if (bPressed && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+        g_closeRequested = true;
+    g_navPrevHeld = held;
+}
+
 void EscMenuImGui_Update()
 {
-    // This menu belongs to a running netplay match and to the training boots:
-    // dual training (its host counts before the second instance has
-    // connected) and solo training from the launcher. The in-game lobby also
-    // runs under the training launch option, so that alone does not count.
-    // Everywhere else the game's own menus are in charge: the lobby, the main
-    // menu, offline modes. It also closes by itself when the match ends.
-    const bool soloTraining = GetLaunchOption() == LAUNCH_TRAINING && !LobbyFlow_IsEnabled();
-    const bool available = Netplay_IsActive() || soloTraining ||
-                           GetLaunchOption() == LAUNCH_DUAL_TRAINING;
-    if (!available || LobbyFlow_IsLobbyVisible()) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+    io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+
+    // This menu belongs to a running netplay match only. Offline the game's
+    // own pause menu is in charge, as are the lobby and the main menu. It
+    // also closes by itself when the match ends.
+    const bool available = Netplay_IsActive() && !LobbyFlow_IsLobbyVisible();
+    g_available.store(available, std::memory_order_relaxed);
+    const bool padToggle = g_toggleRequested.exchange(false, std::memory_order_acq_rel);
+    if (!available) {
         g_open = false;
+        g_closeRequested = false;
+        g_openShared.store(false, std::memory_order_release);
         return;
     }
 
-    if (KeyPressed(VK_ESCAPE)) {
+    if (KeyPressed(VK_ESCAPE) || padToggle) {
         if (g_open)
             g_open = false;
         else if (!ChrSelImGui_IsOpen() && !TheMenu->GetActiveState())
-            g_open = true;
+            g_open = g_justOpened = true;
     }
+    if (g_closeRequested) {
+        g_open = false;
+        g_closeRequested = false;
+    }
+    g_openShared.store(g_open, std::memory_order_release);
 }
 
 void EscMenuImGui_Draw()
@@ -80,8 +190,9 @@ void EscMenuImGui_Draw()
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.55f, 0.49f, 0.30f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    // Mouse only: controller and keyboard navigation stay on the pause menu.
     ImGui::Begin("Settings##EscMenu", nullptr,
-                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
                  ImGuiWindowFlags_AlwaysAutoResize);
     const int renderingOverride = D3D9Reset_GetRenderingThreadOverride();
@@ -140,6 +251,10 @@ void EscMenuImGui_Draw()
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(300.0f, 0.0f));
+    // Gamepad and keyboard navigation start here, on Resume, when it opens.
+    const bool selectResume = g_justOpened;
+    g_justOpened = false;
+    if (selectResume) ImGui::SetNextWindowFocus();
     ImGui::Begin("PAUSE MENU", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
@@ -147,6 +262,13 @@ void EscMenuImGui_Draw()
     const ImVec2 buttonSize(-1.0f, 36.0f);
     if (ImGui::Button("Resume", buttonSize))
         g_open = false;
+    if (selectResume) {
+        // Highlighted at once, not only after the first d-pad press.
+        ImGuiContext& g = *GImGui;
+        ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+        g.NavDisableHighlight = false;
+        g.NavDisableMouseHover = true;
+    }
     // Someone watching has no match of their own to restart or re-pick.
     const bool spectating = LobbyFlow_IsSpectating();
     if (!spectating) {
@@ -172,6 +294,8 @@ void EscMenuImGui_Draw()
         ExitGame();
 
     ImGui::End();
+    // Buttons above close the menu directly; the pad poll follows at once.
+    g_openShared.store(g_open, std::memory_order_release);
 }
 
 void EscMenuImGui_DrawDisplaySettings()

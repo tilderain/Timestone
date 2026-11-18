@@ -3,6 +3,7 @@
 // predict missing remote input and replay frames when confirmation differs.
 #include "../pch.h"
 #include "controller.h"
+#include "escmenu_imgui.h"
 #include "lobby_flow.h"
 #include "lag_diagnostics.h"
 #include "mk10utils.h"
@@ -2196,6 +2197,9 @@ static void __fastcall hkpadPollAllSlots(uint64_t sPad)
     LagDiagnosticScope diagnostic(LagMetric::PadPoll);
     RollbackHookProfileScope profile(RollbackHookProfileId::PadPollAll);
     opadPollAllSlots(sPad);
+    // The netplay Esc menu reads this frame's decoded pad (Start toggles it)
+    // and, while open, clears it before anything else consumes it.
+    EscMenuImGui_OnPadPoll(sPad);
 }
 
 static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)

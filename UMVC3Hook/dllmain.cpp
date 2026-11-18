@@ -1113,6 +1113,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		// Publish the shared keyboard snapshot before ImGui consumes this frame's input.
 		diagnostic.Next(LagMetric::OverlayKeyboardPoll);
 		PollKeyboardDirectly();
+		EscMenuImGui_FeedGamepad();
 		diagnostic.Next(LagMetric::OverlayImGuiFrame);
 		ImGui::NewFrame();
 	}
