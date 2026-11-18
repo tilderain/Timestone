@@ -605,11 +605,11 @@ void ConnectionOptions(SteamNetworkingConfigValue_t (&options)[4])
     options[2].m_eValue = k_ESteamNetworkingConfig_SendTimeSincePreviousPacket;
     options[2].m_eDataType = k_ESteamNetworkingConfig_Int32;
     options[2].m_val.m_int32 = 1;
-    // Prefer SDR unless ICE's route score is better by at least 34 ms.
+    // No handicap on the direct route: ICE and SDR compete on their own scores.
     options[3] = {};
     options[3].m_eValue = k_ESteamNetworkingConfig_P2P_Transport_ICE_Penalty;
     options[3].m_eDataType = k_ESteamNetworkingConfig_Int32;
-    options[3].m_val.m_int32 = 42;
+    options[3].m_val.m_int32 = 0;
 }
 
 void RefreshPeerUsername()
@@ -1819,9 +1819,9 @@ int SteamRoom_EstimateMemberPing(uint64_t memberId)
     if (!encoded[0]) return -1;
     SteamNetworkPingLocation_t location = {};
     if (!g_networkingUtils->ParsePingLocationString(encoded, location)) return -1;
-    // The estimate is a round trip; report one-way latency like the launcher.
+    // The estimate is a round trip, and is reported as one.
     const int ping = g_networkingUtils->EstimatePingTimeFromLocalHost(location);
-    return ping >= 0 ? ping / 2 : -1;
+    return ping >= 0 ? ping : -1;
 }
 
 bool SteamRoom_SendChat(const void* data, int size)

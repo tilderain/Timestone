@@ -92,7 +92,7 @@ public:
     void ReportHealth(const uint8_t percent[3]);
     // Ping measured on the live connection to a member; shown in place of
     // the room's estimate for them until the next FinishMatch.
-    void SetMeasuredPing(uint64_t memberId, int oneWayMs);
+    void SetMeasuredPing(uint64_t memberId, int rttMs);
     // While watching: the member the local spectator's feed comes from (0 for
     // none yet). Published so that member, and everyone choosing a feed of
     // their own, can see it.

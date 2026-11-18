@@ -79,7 +79,7 @@ void UpdateLaunchNetworkConnection();
 // Send the host's selected training configuration after the peer connects.
 void SendTrainingLaunchPacket();
 
-// Delay/rollback the launcher would pick for a measured one-way ping.
+// Delay/rollback the launcher would pick for a measured round-trip ping.
 void LaunchMenu_GetAutomaticNetplaySettings(uint32_t pingMs, int32_t* delay,
                                             int32_t* rollback);
 

@@ -2111,7 +2111,7 @@ void FrameStepper_Draw()
             const float curRollback = Controller_GetAverageRollbackFrames();
             const int32_t jitterMs = Netplay_GetJitter();
             if (statusHudMode == 1) {
-                ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
+                ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT());
                 ImGui::TextColored(color, "FPS %.0f", GetGameUpdatesPerSecond(currentFrame));
                 ImGui::TextColored(color, "%dD %.0fR", curDelay, curRollback);
                 const ImVec2 pos = ImGui::GetWindowPos();
@@ -2125,7 +2125,7 @@ void FrameStepper_Draw()
                     roleLabelCenterX = ImGui::GetCursorPosX() + 75.f;
                 ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
                 ImGui::TextColored(color, "%s", roleLabel);
-                ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
+                ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT());
                 ImGui::TextColored(color, "FPS: %.1f",
                                    GetGameUpdatesPerSecond(currentFrame));
                 ImGui::TextColored(lossWarning ? warningColor : color,

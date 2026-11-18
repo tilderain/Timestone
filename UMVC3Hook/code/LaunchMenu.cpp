@@ -234,16 +234,18 @@ struct AutomaticNetplaySettings {
     int32_t rollback;
 };
 
-// Only the delay follows the ping; the rollback window is fixed.
+// Only the delay follows the ping; the rollback window is fixed. Ping here and
+// everywhere else is the full round trip.
 static AutomaticNetplaySettings GetAutomaticNetplaySettings(enet_uint32 pingMs)
 {
     const int32_t rollback = kNetplayRollbackFrames;
-    if (pingMs < 24)  return {2, rollback};
-    if (pingMs < 130) return {3, rollback};
-    if (pingMs < 150) return {4, rollback};
-    if (pingMs < 175) return {5, rollback};
-    if (pingMs < 200) return {6, rollback};
-    return {7, rollback};
+    if (pingMs < 24)  return {0, rollback};
+    if (pingMs < 40)  return {1, rollback};
+    if (pingMs < 80)  return {2, rollback};
+    if (pingMs < 175) return {3, rollback};
+    if (pingMs < 240) return {4, rollback};
+    if (pingMs < 300) return {5, rollback};
+    return {6, rollback};
 }
 
 static AutomaticNetplaySettings ApplyAutomaticNetplaySettings(enet_uint32 pingMs)
@@ -274,7 +276,7 @@ static enet_uint32 GetLaunchPingMs(ENetPeer* peer)
     const uint32_t roundTripTime = SteamTransport_IsActive()
         ? SteamTransport_GetRTT()
         : peer ? peer->roundTripTime : 0;
-    return roundTripTime / 2;
+    return roundTripTime;
 }
 
 static void CollectPingSample(ENetPeer* peer)
@@ -2531,7 +2533,7 @@ static INT_PTR HandleLaunchTimer(HWND hDlg, WPARAM wParam)
                         int ping = SteamLobby_GetResultEstimatedPing(i);
                         char pingText[32];
                         if (ping >= 0) {
-                            snprintf(pingText, sizeof(pingText), "~%d ms", ping / 2);
+                            snprintf(pingText, sizeof(pingText), "~%d ms", ping);
                         } else if (SteamLobby_ArePingEstimatesAvailable()) {
                             snprintf(pingText, sizeof(pingText), "Pending");
                         } else {

@@ -164,7 +164,7 @@ constexpr int kTeamRows = 12;
 // Picking a delay is the ready-up: with no pick, the seat is given up.
 constexpr uint32_t kDelayTimeout = 20 * 60;
 constexpr uint32_t kEntryTimeout = 30 * 60;   // no answer: start immediately
-constexpr uint32_t kTeamTimeout = 90 * 60;    // team screen before a match
+constexpr uint32_t kTeamTimeout = 40 * 60;    // team screen before a match
 
 float Clamp01(float value) { return value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value; }
 float EaseOut(float t) { t = 1.0f - Clamp01(t); return 1.0f - t * t * t; }
@@ -172,10 +172,10 @@ float EaseOut(float t) { t = 1.0f - Clamp01(t); return 1.0f - t * t * t; }
 int PingLevel(int pingMs)
 {
     if (pingMs < 0) return 0;
-    if (pingMs < 50) return 5;
-    if (pingMs < 90) return 4;
-    if (pingMs < 130) return 3;
-    if (pingMs < 180) return 2;
+    if (pingMs < 100) return 5;
+    if (pingMs < 180) return 4;
+    if (pingMs < 260) return 3;
+    if (pingMs < 360) return 2;
     return 1;
 }
 
@@ -997,11 +997,14 @@ bool LobbyUi::UpdateHandshake(const Input& input)
         handshakeFrames_ = 0;
         handshakeCursor_ = 0;
         if (step == Handshake::Delay) delayCursor_ = kDelayPickAuto;
+        // Both players reach the start/character-select choice together.
+        if (step == Handshake::Entry) entryFrames_ = 0;
     }
     // The other player watches the highlight move before it is locked in.
     if (step == Handshake::Delay) service_.HoverDelay(delayCursor_);
     if (step == Handshake::None) return false;
     ++handshakeFrames_;
+    if (step == Handshake::Entry || step == Handshake::WaitStart) ++entryFrames_;
 
     if (input.cancel) {
         // Backing out of any step gives the seat up.
@@ -1541,6 +1544,7 @@ void LobbyUi::UpdateTeam(const Input& input)
             return;
         }
         timedOut = ++handshakeFrames_ >= kTeamTimeout;
+        ++entryFrames_;
     }
     if (charPickerOpen_) {
         if (!timedOut) {
@@ -2505,6 +2509,7 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
     };
     const auto delayValue = [autoDelay](int pick) { return pick > kDelayPickAuto ? pick - 1 : autoDelay; };
     uint32_t limit = 0;
+    uint32_t elapsed = handshakeFrames_;
     switch (step) {
     case Handshake::Delay:
     case Handshake::WaitDelay: {
@@ -2544,12 +2549,17 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
     default:
         p.Text("Ready", cx, y + 130.0f, 0.9f, A_MC, kGreen);
         p.Text("Waiting for opponent.", cx, y + 172.0f, 0.74f, A_MC, kDim);
+        if (step == Handshake::WaitStart) {
+            // The longest the opponent can still take: their own choice, then
+            // a full character select opened at the last moment.
+            limit = kEntryTimeout + kTeamTimeout;
+            elapsed = entryFrames_;
+        }
         break;
     }
     if (limit) {
         char clock[16];
-        snprintf(clock, sizeof(clock), "%u",
-                 handshakeFrames_ < limit ? (limit - handshakeFrames_ + 59) / 60 : 0);
+        snprintf(clock, sizeof(clock), "%u", elapsed < limit ? (limit - elapsed + 59) / 60 : 0);
         p.Text(clock, x + w - 48.0f, y + 62.0f, 0.8f, A_MR, kDim);
     }
 }

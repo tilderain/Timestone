@@ -605,14 +605,14 @@ void SteamRoomService::ReportHealth(const uint8_t percent[3])
     PublishLocal();
 }
 
-void SteamRoomService::SetMeasuredPing(uint64_t memberId, int oneWayMs)
+void SteamRoomService::SetMeasuredPing(uint64_t memberId, int rttMs)
 {
-    if (measuredPeer_ == memberId && measuredPing_ == oneWayMs) return;
+    if (measuredPeer_ == memberId && measuredPing_ == rttMs) return;
     measuredPeer_ = memberId;
-    measuredPing_ = oneWayMs;
+    measuredPing_ = rttMs;
     for (int i = 0; i < room_.memberCount; ++i)
-        if (room_.members[i].id == memberId && oneWayMs >= 0)
-            room_.members[i].pingMs = static_cast<int16_t>(oneWayMs > 9999 ? 9999 : oneWayMs);
+        if (room_.members[i].id == memberId && rttMs >= 0)
+            room_.members[i].pingMs = static_cast<int16_t>(rttMs > 9999 ? 9999 : rttMs);
 }
 
 void SteamRoomService::ReportSetScore(int localGamesWon)
@@ -669,7 +669,7 @@ void SteamRoomService::RefreshResults()
         if (result.maxMembers <= 0) result.maxMembers = kMaxMembers;
         result.slotCount = SteamLobby_GetResultSlotCount(i);
         const int estimate = SteamLobby_GetResultEstimatedPing(i);
-        result.pingMs = estimate >= 0 ? estimate / 2 : -1;
+        result.pingMs = estimate >= 0 ? estimate : -1;
         result.compatible = SteamLobby_IsLobbyVersionCompatible(result.id);
         result.friendLobby = SteamLobby_IsFriendLobby(result.id);
         result.matchInProgress = SteamLobby_IsResultInMatch(i);

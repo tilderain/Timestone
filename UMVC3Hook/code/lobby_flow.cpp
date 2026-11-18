@@ -1017,7 +1017,7 @@ bool SendLaunchAsHost()
     // "Auto" is the ping measured on this connection, which has been up since
     // both players accepted the match: the same figure the prompt showed.
     const uint32_t rtt = SteamTransport_GetRTT();
-    LaunchMenu_GetAutomaticNetplaySettings(rtt / 2, &delay, &rollback);
+    LaunchMenu_GetAutomaticNetplaySettings(rtt, &delay, &rollback);
     // The players' own delay picks. Both run the same delay, so the higher
     // pick is used (a player who asked for more must not get less); "Auto"
     // stands for the value measured from the ping. The rollback window is
@@ -1026,7 +1026,7 @@ bool SendLaunchAsHost()
     delay = std::max(wanted(g_pairing.localDelayPick), wanted(g_pairing.opponentDelayPick));
     rollback = kNetplayRollbackFrames;
     HookLog("LobbyFlow: delay picks local=%d opponent=%d measured ping=%u ms -> %dD/%dR\n",
-            g_pairing.localDelayPick, g_pairing.opponentDelayPick, rtt / 2, delay, rollback);
+            g_pairing.localDelayPick, g_pairing.opponentDelayPick, rtt, delay, rollback);
     ApplyNetplaySettings(delay, rollback);
 
     DelayPacket settings = {};
@@ -1069,7 +1069,7 @@ bool SendLaunchAsHost()
     TrainingBootConfig config;
     FillBootConfig(config, g_pairing.localTeam, g_pairing.opponentTeam, launch.stageId);
     TrainingBoot_SetConfig(config);
-    HookLog("LobbyFlow: sent launch as P1 ping=%u ms settings=%dD/%dR stage=%d\n", rtt / 2, delay,
+    HookLog("LobbyFlow: sent launch as P1 ping=%u ms settings=%dD/%dR stage=%d\n", rtt, delay,
             rollback, launch.stageId);
     return true;
 }
@@ -1431,7 +1431,7 @@ void UpdateMatchStart(bool cancelPressed)
     // The prompts show this in place of the room's estimate, and "Auto" is
     // worked out from it on both sides.
     if (const uint32_t rtt = SteamTransport_GetRTT())
-        g_service->SetMeasuredPing(g_pairing.opponentId, static_cast<int>(rtt / 2));
+        g_service->SetMeasuredPing(g_pairing.opponentId, static_cast<int>(rtt));
     if (current.bothReady && !g_bothReadyTick) g_ui->SetBusy("Preparing the battle...");
     // Player 2 always listens: player 1 launches as soon as it sees both
     // ready, which can be a moment before this side's view of the room agrees.

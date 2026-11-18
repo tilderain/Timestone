@@ -194,6 +194,7 @@ private:
     char memberMenuName_[kNameCapacity] = {};
     Handshake handshake_ = Handshake::None; // step shown last frame
     uint32_t handshakeFrames_ = 0;          // frames spent on it
+    uint32_t entryFrames_ = 0;              // frames since both delay picks were in
     int handshakeCursor_ = 0;
     int delayCursor_ = 0;                   // delay pick being chosen
     bool teamForMatch_ = false;             // team screen opened from the Entry step

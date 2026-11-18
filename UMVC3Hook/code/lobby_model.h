@@ -193,7 +193,7 @@ public:
     virtual void PickDelay(int pick) = 0;
     // The delay currently highlighted, shown to the other player as it moves.
     virtual void HoverDelay(int pick) = 0;
-    // The input delay an "Auto" pick stands for at this one-way ping, or -1
+    // The input delay an "Auto" pick stands for at this round-trip ping, or -1
     // if the ping is not known yet.
     virtual int AutoDelay(int pingMs) const = 0;
     virtual void SetReady(bool ready) = 0;
