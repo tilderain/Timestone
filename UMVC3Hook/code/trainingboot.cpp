@@ -1,6 +1,7 @@
 // Boot directly into a configured battle, bypassing title/menu/character select.
 #include "../pch.h"
 #include "trainingboot.h"
+#include "chr_colors.h"
 #include "mk10utils.h"
 #include "netplay.h"
 #include "LaunchMenu.h"
@@ -47,7 +48,6 @@ static constexpr uintptr_t ACHRSELBLANK_DTI                  = 0x140d500f0;
 
 // sGameUI
 static constexpr uintptr_t SGAMEUI_GET_INSTANCE              = 0x140001ac0;
-static constexpr uintptr_t SGAMEUI_IS_CHAR_VARIANT_SELECTABLE = 0x1402bc990;
 static constexpr uintptr_t SGAMEUI_SET_BOOT_STATE            = 0x14000b440;
 static constexpr uintptr_t ACHRSELECT_UTIL_4AC0              = 0x140214ac0;  // writes to ui+0x5b74
 static constexpr uintptr_t SGAMEUI_CREATE_LOADING_SCREEN       = 0x1402c0540;
@@ -418,21 +418,8 @@ static bool LoadNativeGameConfig()
     return true;
 }
 
-static bool IsNativeColorSelectable(int32_t characterId, int32_t color)
-{
-    if (characterId < 1 || characterId > CHR_GALACTUS || color < 0)
-        return false;
-
-    typedef uint64_t(__fastcall* GetInstance_t)();
-    typedef bool(__fastcall* IsSelectable_t)(uint64_t, uint32_t, int32_t);
-    const uint64_t gameUi = ((GetInstance_t)_addr(SGAMEUI_GET_INSTANCE))();
-    if (!gameUi)
-        return false;
-
-    return ((IsSelectable_t)_addr(SGAMEUI_IS_CHAR_VARIANT_SELECTABLE))(
-        gameUi, static_cast<uint32_t>(characterId), color);
-}
-
+// Both peers run this over the same packet, so the rule must not depend on
+// either save file: a color is kept whenever its archive is installed.
 static void NormalizeBootColors()
 {
     for (int team = 0; team < 2; ++team) {
@@ -441,10 +428,10 @@ static void NormalizeBootColors()
                 ? g_bootConfig.p1Chars[slot] : g_bootConfig.p2Chars[slot];
             int32_t& color = team == 0
                 ? g_bootConfig.p1Colors[slot] : g_bootConfig.p2Colors[slot];
-            if (IsNativeColorSelectable(character, color))
+            if (color == 0 || ChrColors_Available(character, color))
                 continue;
 
-            HookLog("TrainingBoot: color %d is locked for chr %d; using color 0\n",
+            HookLog("TrainingBoot: color %d is not installed for chr %d; using color 0\n",
                     color, character);
             color = 0;
         }
@@ -1072,6 +1059,8 @@ void TrainingBoot_InitHooks()
         HookLog("TrainingBoot: MH_Initialize failed (%d)\n", mhStatus);
         return;
     }
+
+    ChrColors_InstallUnlock();
 
     if (MH_CreateHook(
         (LPVOID)_addr(0x140217200),

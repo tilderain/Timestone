@@ -113,7 +113,7 @@ const char* AssistName(int32_t, int assist)
     static const char* const names[] = {"Shoryuken", "Hadoken", "ROLLING BUCKLER (ROLLING SLIDE)"};
     return names[assist % 3];
 }
-int ColorCount(int32_t) { return 6; }
+int ColorCount(int32_t) { return 8; }
 int PresetCount() { return 3; }
 bool Preset(int index, Team* team)
 {

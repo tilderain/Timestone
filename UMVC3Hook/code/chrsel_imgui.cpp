@@ -5,6 +5,7 @@
 #include "../kiero/minhook/include/MinHook.h"
 #include "LaunchMenu.h"
 #include "assist_names.h"
+#include "chr_colors.h"
 #include "framestepper.h"
 #include "mk10utils.h"
 #include "netplay.h"
@@ -99,7 +100,6 @@ constexpr uintptr_t STAGE_HAS_LIVE_BODY = 0x1401F0950;
 constexpr uintptr_t GAME_UI_SET_CHAR = 0x14024E160;
 constexpr uintptr_t GAME_UI_SET_COLOR = 0x14024E120;
 constexpr uintptr_t GAME_UI_SET_ASSIST = 0x14024E100;
-constexpr uintptr_t GAME_UI_IS_CHAR_VARIANT_SELECTABLE = 0x1402BC990;
 constexpr uintptr_t ACTION_GET_INSTANCE = 0x140001A90;
 constexpr uintptr_t ACTION_OR_GAME_FLAG = 0x14000ADD0;
 
@@ -226,22 +226,15 @@ void LogResetState()
 
 int VariantCount(int characterId)
 {
-    if (characterId == 51) return 1;
-    if (characterId == 3 || characterId == 5 ||
-        characterId == 35 || characterId == 39) return 9;
-    return characterId > 0 && characterId < kCharNameCount ? 8 : 1;
+    const int count = ChrColors_Count(characterId);
+    return count > 0 ? count : 1;
 }
 
 bool IsColorSelectable(int characterId, int color)
 {
-    if (characterId <= 0 || characterId >= kCharNameCount || color < 0)
-        return false;
-
-    using GetInstanceFn = uint64_t(__fastcall*)();
-    using IsSelectableFn = bool(__fastcall*)(uint64_t, uint32_t, int32_t);
-    const uint64_t gameUi = ((GetInstanceFn)_addr(GAME_UI_GET_INSTANCE))();
-    return gameUi && ((IsSelectableFn)_addr(GAME_UI_IS_CHAR_VARIANT_SELECTABLE))(
-        gameUi, static_cast<uint32_t>(characterId), color);
+    // Galactus and an empty slot only have their base variant.
+    if (characterId <= 0 || characterId > 50) return color == 0;
+    return ChrColors_Available(characterId, color);
 }
 
 int NormalizeColor(int characterId, int color)
@@ -885,8 +878,8 @@ bool DrawTeam(int team, bool editable)
         const int variantCount = VariantCount(g_roster.chars[team][member]);
         char colorPreview[24];
         if (hasCharacter) {
-            std::snprintf(colorPreview, sizeof(colorPreview), "Color %d",
-                          g_roster.colors[team][member] + 1);
+            std::snprintf(colorPreview, sizeof(colorPreview), "Color %s",
+                          ChrColors_Label(g_roster.colors[team][member]));
         } else {
             std::snprintf(colorPreview, sizeof(colorPreview), "N/A");
         }
@@ -895,7 +888,7 @@ bool DrawTeam(int team, bool editable)
                 if (!IsColorSelectable(g_roster.chars[team][member], color))
                     continue;
                 char label[24];
-                std::snprintf(label, sizeof(label), "Color %d", color + 1);
+                std::snprintf(label, sizeof(label), "Color %s", ChrColors_Label(color));
                 if (ImGui::Selectable(label,
                         color == g_roster.colors[team][member])) {
                     g_roster.colors[team][member] = color;

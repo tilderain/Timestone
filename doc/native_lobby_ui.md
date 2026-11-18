@@ -902,3 +902,32 @@ the three picks in their set colors.
 - The pause-menu display settings are not reachable from the lobby.
 - Returning to the room stalls for about a second while ENet waits for a
   disconnect acknowledgement from a bridge that is already gone.
+
+## Character colors
+
+Reverse engineered for `chr_colors.cpp`; the select screen's color ids are
+zero-based archive variants (`chr\archive\%04d_%02d.arc`).
+
+| Color | Label (msg id) | Gate |
+| --- | --- | --- |
+| 0..5 | `1`..`6` (`0xE1`..`0xE6`) | none |
+| 6 | `H` (`0x95C`), the Herald color | cSecret bit `characterId + 0x33` |
+| 7 | `ALT` (`0x95D`), the alternate costume | cSecret bit `characterId + 0x352` |
+| 8 | never offered | Akuma, Wesker, Doctor Doom, Dormammu only (Herald boss forms) |
+
+- cSecret is `sGameConfig + 0xF70`, a bitfield at `+0xC`, tested by
+  `0x140207C60`. It is part of the save file.
+- `sGameConfig__synchronizeUnlockAwards` (`0x140255370`) rewrites the `+0x352`
+  bits from the DLC ownership bits (`sGameConfig + 0x4D35C`) each time the main
+  DLC phase runs, setting or clearing them.
+- The gates are `aChrSelect__cycleUnlockedColor` (`0x1402BC1A0`),
+  `RandomColorIDGenerator` (`0x1402BC410`), `sGameUI__isCharVariantSelectable`
+  (`0x1402BC990`), the model viewer and a team edit menu (`0x1404214E0`).
+- Loading has no gate: `cChrArchiveTable__requestArchive` (`0x14001EF00`)
+  only checks the variant count table at `0x140A6F9F0`.
+- Magneto has a face for color 7 but no `0029_07.arc` on PC.
+
+Timestone hooks the bit test and answers "owned" for those gate callers when
+the archive is installed, so nothing is written to the save and real unlocks
+are still recorded. The lobby, the in-match selector and the match boot all
+use the same install-based rule, so both peers resolve a team's colors alike.

@@ -5,6 +5,7 @@
 
 #include "LaunchMenu.h"
 #include "assist_names.h"
+#include "chr_colors.h"
 #include "connect_roster.h"
 #include "controller.h"
 #include "framestepper.h"
@@ -254,9 +255,8 @@ const char* RosterAssistName(int32_t id, int assist)
 
 int RosterColorCount(int32_t id)
 {
-    // Same archive-variant counts the launcher validates against.
-    if (id == 3 || id == 5 || id == 35 || id == 39) return 9;
-    return id >= 1 && id <= 50 ? 8 : 1;
+    const int count = ChrColors_Count(id);
+    return count > 0 ? count : 1;
 }
 
 void LoadPresets()
@@ -282,6 +282,8 @@ bool RosterPreset(int index, Team* team)
         team->assists[i] = g_presets[index].assists[i];
         team->colors[i] = g_presets[index].colors[i];
         if (team->chars[i] < 1 || team->chars[i] > 50) return false;
+        // A reserve unit may hold a color this install cannot load.
+        if (!ChrColors_Available(team->chars[i], team->colors[i])) team->colors[i] = 0;
     }
     return true;
 }
@@ -314,11 +316,14 @@ UiPrefs LoadPrefs()
     bool valid = true;
     for (int i = 0; i < 3; ++i) {
         valid &= prefs.team.chars[i] >= 1 && prefs.team.chars[i] <= 50 &&
-                 prefs.team.assists[i] >= 0 && prefs.team.assists[i] <= 2 &&
-                 prefs.team.colors[i] >= 0 &&
-                 prefs.team.colors[i] < RosterColorCount(prefs.team.chars[i]);
+                 prefs.team.assists[i] >= 0 && prefs.team.assists[i] <= 2;
     }
     if (!valid) prefs.team = Team{{CHR_RYU, CHR_WOLVERINE, CHR_DANTE}, {0, 0, 0}, {0, 0, 0}};
+    // A color that cannot be loaded costs the color, not the whole team.
+    for (int i = 0; i < 3; ++i) {
+        if (!ChrColors_Available(prefs.team.chars[i], prefs.team.colors[i]))
+            prefs.team.colors[i] = 0;
+    }
 
     prefs.presetIndex = GetPrivateProfileIntA("Lobby", "Preset", -1, path);
     if (prefs.presetIndex < -1 || prefs.presetIndex > 2) prefs.presetIndex = -1;

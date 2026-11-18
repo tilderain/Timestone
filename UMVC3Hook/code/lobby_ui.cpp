@@ -137,6 +137,14 @@ const char* const kSlotStateNames[] = {"OPEN", "WAITING", "STANDBY", "", ""};
 const char* const kTeamSlotNames[] = {"POINT", "SECOND", "ANCHOR"};
 const char* const kAssistLetters[] = {"A", "B", "Y"};
 
+// Colors exactly as the game's select screen labels them: six numbered
+// colors, then "H" (the Herald color) and "ALT" (the alternate costume).
+const char* ColorLabel(int color)
+{
+    static const char* const labels[] = {"1", "2", "3", "4", "5", "6", "H", "ALT"};
+    return color >= 0 && color < 8 ? labels[color] : "1";
+}
+
 // Create-screen rows.
 enum CreateRow {
     CREATE_NAME, CREATE_SIZE, CREATE_SLOTS, CREATE_VISIBILITY, CREATE_FORMAT, CREATE_ROTATION,
@@ -2600,7 +2608,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
                 valueColor = kDim;
             } else {
                 label = "   COLOR";
-                snprintf(value, sizeof(value), "%d", prefs_.team.colors[member] + 1);
+                snprintf(value, sizeof(value), "%s", ColorLabel(prefs_.team.colors[member]));
                 valueColor = kDim;
             }
         }

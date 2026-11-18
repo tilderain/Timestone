@@ -5,6 +5,7 @@
 #include "LaunchMenu_compact.h"
 #include "LaunchMenu_settings.h"
 #include "assist_names.h"
+#include "chr_colors.h"
 #include "controller.h"
 #include "launch_music.h"
 #include "launchmenu_dark.h"
@@ -172,10 +173,8 @@ static uint64_t GetInviteLobbyId()
 
 static int GetCharacterArchiveVariantCount(int characterId)
 {
-    if (characterId == 51) return 1;
-    if (characterId == 3 || characterId == 5 ||
-        characterId == 35 || characterId == 39) return 9;
-    return characterId > 0 && characterId < kCharNameCount ? 8 : 1;
+    const int count = ChrColors_Count(characterId);
+    return count > 0 ? count : 1;
 }
 
 static bool IsValidTeamSelection(const int32_t (&chars)[3],

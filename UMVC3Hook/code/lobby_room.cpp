@@ -70,7 +70,7 @@ bool IsPlausibleTeam(const Team& team)
 {
     for (int i = 0; i < 3; ++i) {
         if (team.chars[i] < 1 || team.chars[i] > 50 || team.assists[i] < 0 ||
-            team.assists[i] > 2 || team.colors[i] < 0 || team.colors[i] > 8)
+            team.assists[i] > 2 || team.colors[i] < 0 || team.colors[i] > 7)
             return false;
     }
     return true;
