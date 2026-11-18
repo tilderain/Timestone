@@ -54,6 +54,14 @@ Thus native live online skips full pause-object construction. Patching only
 this branch can create the object, but does not add a network protocol for menu
 state, cursor state, simulation stopping, or teardown.
 
+The plugin hooks this function (`Hook_OpenVersusPauseMenu`, `dllmain.cpp`,
+2026-11-18). A battle set up while a netplay session is running (player or
+spectator) gets what a native online battle gets: the pause request bytes at
+`+0x5AB8..+0x5ABA` cleared and no `uBattleUiPause`. Every other battle runs the
+native function, so offline modes keep their pause menu. This replaced a
+one-byte patch at `0x1402BA223` (JNZ to JMP) that removed the pause menu from
+every battle. Launch Normally installs neither.
+
 ## `sMain` Pause Gate
 
 `sMain__isPausedThisFrame` at `0x140006B50` returns true exactly when:

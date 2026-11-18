@@ -2101,6 +2101,21 @@ void OnInitializeHook()
 	CompleteLaunchInitialization(opt);
 }
 
+// sAction__openVersusPauseMenu (0x1402BA150) builds a battle's pause objects.
+// For a native online battle it clears the pause request bytes (+0x5AB8..BA)
+// and creates no uBattleUiPause; a netplay battle gets exactly that.
+static void(__fastcall* g_originalOpenVersusPauseMenu)(uint64_t) = nullptr;
+
+static void __fastcall Hook_OpenVersusPauseMenu(uint64_t self)
+{
+	if (!Netplay_IsActive()) {
+		g_originalOpenVersusPauseMenu(self);
+		return;
+	}
+	*(uint16_t*)(self + 0x5AB8) = 0;
+	*(uint8_t*)(self + 0x5ABA) = 0;
+}
+
 static void CompleteLaunchInitialization(LaunchOption opt)
 {
 	if (opt == LAUNCH_CANCELLED) {
@@ -2132,13 +2147,19 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 	//Memory::VP::Nop(_addr(0x1402BA17E), 6);
 	//HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JZ→NOP (force NetGallery)\n");
 
-	// Patch 2: Change JNZ (skip real pause if online) to JMP (always skip).
-	//   Original: 75 5C  (JNZ +0x5C)
-	//   Patched:  EB 5C  (JMP +0x5C)
-	// Preserve the game's normal pause menu when using Launch Normally.
+	// The real pause menu (uBattleUiPause) freezes game logic on one side
+	// only, so a netplay match must not have one. It used to be patched out
+	// for every battle; now only a battle set up during a netplay session
+	// goes without, and offline modes keep their pause menu.
+	// Launch Normally is left untouched.
 	if (opt != LAUNCH_NORMAL) {
-		Memory::VP::Patch<uint8_t>(_addr(0x1402BA223), 0xEB);
-		HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JNZ→JMP (skip real pause)\n");
+		void* target = (void*)_addr(0x1402BA150);
+		if (MH_CreateHook(target, (LPVOID)&Hook_OpenVersusPauseMenu,
+				(LPVOID*)&g_originalOpenVersusPauseMenu) == MH_OK &&
+			MH_EnableHook(target) == MH_OK)
+			HookLog("UMVC3Hook: Hooked sAction__openVersusPauseMenu (no pause menu in netplay)\n");
+		else
+			HookLog("UMVC3Hook: FAILED to hook sAction__openVersusPauseMenu\n");
 	}
 
 	// Patch 3: uBattleUiPauseNetGallery_vfn5 (0x1402e4320) checks
