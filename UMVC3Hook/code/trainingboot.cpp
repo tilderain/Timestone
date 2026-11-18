@@ -160,6 +160,7 @@ static ULONGLONG g_initialSettingsStartTick = 0;
 // Extern from dllmain.cpp
 // ---------------------------------------------------------------------------
 extern void HookLog(const char* fmt, ...);
+extern void HookLog_MarkGameLoaded();
 extern void BootTimer_Stamp(const char* label);
 
 // ---------------------------------------------------------------------------
@@ -1021,6 +1022,9 @@ static void __fastcall Hook_executeMatchPhase(uint64_t action, int32_t phase,
                                                uint64_t unit, uint64_t context)
 {
     oExecuteMatchPhase(action, phase, unit, context);
+    // A battle is running: startup is over (direct training boots never pass
+    // through the lobby).
+    HookLog_MarkGameLoaded();
     if (!g_fiveBarStart || (phase != 1 && phase != 5))
         return;
 

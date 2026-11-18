@@ -260,6 +260,39 @@ void HookLogTryWriteFatal(const char* text)
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
+// The log is normally only written out at set points. If the game hangs on a
+// black screen while starting, whatever was buffered is lost with it, so until
+// the game has actually loaded a small thread writes any new lines out once a
+// second. HookLog_MarkGameLoaded ends it.
+void HookLog(const char* fmt, ...);
+static std::atomic<bool> g_hookLogGameLoaded{false};
+static std::atomic<bool> g_hookLogStartupFlusherStarted{false};
+
+static DWORD WINAPI HookLogStartupFlusher(LPVOID)
+{
+	while (!g_hookLogGameLoaded.load(std::memory_order_acquire)) {
+		Sleep(1000);
+		HookLogTryFlush(); // nothing is written when no lines are waiting
+	}
+	return 0;
+}
+
+static void HookLogStartStartupFlusher()
+{
+	if (g_hookLogStartupFlusherStarted.exchange(true, std::memory_order_acq_rel))
+		return;
+	if (HANDLE thread = CreateThread(nullptr, 0, HookLogStartupFlusher, nullptr, 0, nullptr))
+		CloseHandle(thread);
+}
+
+void HookLog_MarkGameLoaded()
+{
+	if (g_hookLogGameLoaded.exchange(true, std::memory_order_acq_rel))
+		return;
+	HookLog("UMVC3Hook: game loaded; startup log flushing stopped\n");
+	HookLogFlush();
+}
+
 static void HookLogWriteConsoleLocked(const char* data, size_t length)
 {
 	if (!g_hookConsoleOutputEnabled)
@@ -1835,6 +1868,7 @@ void OnInitializeHook()
 {
 	// Open log file for hook debugging (append mode so 2nd instance doesn't clobber)
 	HookLogSetFile("Timestone.log");
+	HookLogStartStartupFlusher();
 
 	if (HookLogConsoleEnabledByConfig())
 	{

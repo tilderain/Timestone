@@ -35,6 +35,7 @@
 
 extern void HookLog(const char* fmt, ...);
 extern void HookLogFlush();
+extern void HookLog_MarkGameLoaded();
 
 using namespace lobby;
 
@@ -1823,6 +1824,8 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
 
     if (PumpBootSavedataLoad()) return false;
 
+    // The lobby is about to run: startup is over (dllmain.cpp).
+    HookLog_MarkGameLoaded();
     RunLobbyFrame(titleArea);
     return g_phase == Phase::Launching;
 }
