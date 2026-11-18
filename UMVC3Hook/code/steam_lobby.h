@@ -24,6 +24,9 @@ const char* SteamLobby_GetConnectionType();
 const char* SteamLobby_GetLocalUsername();
 uint64_t SteamLobby_GetPeerSteamId();
 const char* SteamLobby_GetPeerUsername();
+// 64x64 RGBA profile picture of any Steam user Steam knows about (room
+// members are); `rgba` must hold 64*64*4 bytes. False until it is available.
+bool SteamLobby_GetAvatar64(uint64_t steamId, uint8_t* rgba);
 bool SteamLobby_GetPeerAvatarRGBA(uint8_t* rgba, size_t capacity,
                                   uint32_t* width, uint32_t* height);
 bool SteamLobby_HasPeerProfile();

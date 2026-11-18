@@ -107,6 +107,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/savedata.cpp \
 	$(SRCDIR)/code/steam_lobby.cpp \
 	$(SRCDIR)/code/lobby_canvas.cpp \
+	$(SRCDIR)/code/lobby_avatar.cpp \
 	$(SRCDIR)/code/lobby_ui.cpp \
 	$(SRCDIR)/code/lobby_native.cpp \
 	$(SRCDIR)/code/lobby_room.cpp \

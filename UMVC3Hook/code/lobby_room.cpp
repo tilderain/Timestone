@@ -1,6 +1,7 @@
 #include "../pch.h"
 #include "lobby_room.h"
 #include "lobby_music.h"
+#include "lobby_native.h"
 #include "LaunchMenu.h"
 #include "steam_lobby.h"
 
@@ -16,7 +17,13 @@ namespace lobby {
 namespace {
 
 constexpr char kMemberKey[] = "ts";      // per-member room state
+// Per-member lobby icon, on its own key so the member string keeps its
+// format: a decimal number, kIconSteam or a character id.
+constexpr char kIconKey[] = "ti";
 constexpr char kMusicKey[] = "bgm";      // lobby data: the host's music choice
+// Lobby data read by the lobby list: the host's Steam id (decimal) and icon.
+constexpr char kHostIdKey[] = "hid";
+constexpr char kHostIconKey[] = "hicon";
 // Lobby data: SteamIDs the host removed, as comma-separated hex. Steam has no
 // kick, so the list is the kick: a listed client leaves by itself, every
 // other client drops listed members from its room, and Join refuses a lobby
@@ -474,6 +481,22 @@ void SteamRoomService::SetTeam(const Team& team)
     PublishLocal();
 }
 
+void SteamRoomService::SetIcon(int icon)
+{
+    local_.icon = icon < kIconSteam || icon > kIconMax ? kIconSteam : icon;
+    if (!SteamRoom_IsActive()) return;
+    char value[8];
+    snprintf(value, sizeof(value), "%d", local_.icon);
+    SteamRoom_SetLocalData(kIconKey, value);
+    PublishHostIcon(); // the lobby list shows the host's icon
+    RefreshRoom();
+}
+
+Tex SteamRoomService::AvatarTex(uint64_t memberId) const
+{
+    return Native_AvatarTex(memberId ? memberId : SteamRoom_GetLocalId());
+}
+
 int SteamRoomService::AutoDelay(int pingMs) const
 {
     if (pingMs < 0) return -1;
@@ -628,7 +651,34 @@ void SteamRoomService::RefreshResults()
         result.friendLobby = SteamLobby_IsFriendLobby(result.id);
         result.matchInProgress = SteamLobby_IsResultInMatch(i);
         result.firstTo = ParseFirstTo(SteamRoom_GetLobbyData(result.id, kFirstToKey));
+        // Written by the lobby's host, so untrusted: the id is only ever
+        // handed to Steam to look up a picture, and the icon is a number
+        // that must be one of the known icons.
+        const char* hostId = SteamRoom_GetLobbyData(result.id, kHostIdKey);
+        bool digits = hostId && hostId[0];
+        for (const char* c = hostId; digits && *c; ++c) digits = *c >= '0' && *c <= '9';
+        result.hostId = digits && strlen(hostId) <= 20 ? strtoull(hostId, nullptr, 10) : 0;
+        const char* hostIcon = SteamRoom_GetLobbyData(result.id, kHostIconKey);
+        const int icon = hostIcon ? atoi(hostIcon) : kIconSteam;
+        result.hostIcon = static_cast<int16_t>(icon < kIconSteam || icon > kIconMax ? kIconSteam : icon);
     }
+}
+
+// The lobby's owner keeps their Steam id and icon in the lobby's data, where
+// the lobby list can read them without joining. A new owner (the host left)
+// takes this over on their next pump.
+void SteamRoomService::PublishHostIcon()
+{
+    if (!SteamRoom_IsActive() || SteamRoom_GetOwner() != SteamRoom_GetLocalId()) return;
+    const uint64_t room = SteamRoom_GetLobbyId();
+    if (hostIconRoom_ == room && hostIconPublished_ == local_.icon) return;
+    char value[24];
+    snprintf(value, sizeof(value), "%llu", static_cast<unsigned long long>(SteamRoom_GetLocalId()));
+    SteamRoom_SetData(kHostIdKey, value);
+    snprintf(value, sizeof(value), "%d", local_.icon);
+    SteamRoom_SetData(kHostIconKey, value);
+    hostIconRoom_ = room;
+    hostIconPublished_ = local_.icon;
 }
 
 void SteamRoomService::RefreshRoom()
@@ -690,6 +740,7 @@ void SteamRoomService::RefreshRoom()
             member.delayPick = static_cast<int8_t>(local_.delayPick);
             member.delayHover = static_cast<int8_t>(local_.delayHover);
             member.team = local_.team;
+            member.icon = static_cast<int16_t>(local_.icon);
             member.wins = static_cast<int16_t>(local_.wins);
             member.losses = static_cast<int16_t>(local_.losses);
             member.setWins = static_cast<int8_t>(local_.setWins);
@@ -715,6 +766,11 @@ void SteamRoomService::RefreshRoom()
                 memset(member.health, kHealthUnknown, sizeof(member.health));
                 member.status = MemberStatus::Idle;
             }
+            // Another player's choice is only ever a small number: anything
+            // outside the known icons is shown as their Steam picture.
+            const char* iconText = SteamRoom_GetMemberData(id, kIconKey);
+            const int icon = iconText ? atoi(iconText) : kIconSteam;
+            member.icon = static_cast<int16_t>(icon < kIconSteam || icon > kIconMax ? kIconSteam : icon);
             if (member.slot >= next.settings.slotCount) member.slot = -1;
             if (member.watchSlot >= next.settings.slotCount) member.watchSlot = -1;
             if (member.queueSlot >= next.settings.slotCount) member.queueSlot = -1;
@@ -956,6 +1012,7 @@ void SteamRoomService::Pump()
         if (frame_ % kRefreshInterval == 0) {
             RefreshRoom();
             RunQueue();
+            PublishHostIcon();
         }
     }
     if (SteamLobby_TakeResultsChanged() || (!inRoom && frame_ % 45 == 0)) RefreshResults();

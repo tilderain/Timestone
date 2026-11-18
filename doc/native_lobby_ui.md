@@ -843,6 +843,55 @@ Press Start, so it runs that step itself (`PumpBootSavedataLoad`).
   `sBattleSetting+0x58C` into `CtrlType`. The battle boot puts the player's
   own `CtrlType` there first, so the save keeps it.
 
+## Player icons and Steam profile pictures
+
+Each player picks a lobby icon on the team screen (ICON row): their Steam
+profile picture (the default) or any of the game's 240 license icons
+(`ui\lic\lic_user_i000`..`239`), picked from a grid. The choice is saved as
+`[Lobby] Icon` and published as its own member value `ti` (a decimal number:
+0 for the Steam picture, else the icon's number + 1), beside the member string
+`ts`, whose format is unchanged. A value outside that range reads as 0.
+
+Steam pictures are drawn through the game's own sprites:
+
+- `rTexture` keeps its GPU texture (`nDraw::Texture`) at `+0xE0`
+  (`rTexture__load` `0x140515240`, `rTexture__setHandle` `0x140515A60`); width
+  and height are at `+0xF0` / `+0xF4`.
+- `rTexture__load` builds that texture with `0x140781C40` (allocate `0x78`
+  bytes, align `0x10`) and the constructor `0x140781720`
+  `(this, u16 width, height, u8 mips, type 1, format, usage 0, flags, 0, 0, pixels)`.
+  `nDraw__Texture__create` `0x140782060` copies the pixels in at once.
+- Release is vtable `+0x28` (`0x140783650`); the engine defers the free while
+  a recent frame still references the texture.
+- The license icons (`ui\lic\lic_user_i`, 64x64, one mip) are TEX format
+  `0x2A`: DXT5 with luma in the alpha block and Cr / real alpha / Cb in the
+  colour block's red / green / blue. `lobby_avatar.cpp` encodes a 64x64 RGBA
+  picture into that layout (4096 bytes).
+- Nine country flags (`ui\lic\lic_flag_i`, the same 64x64 `0x2A` format,
+  never drawn by the lobby) are the slots (`TEX_AVATAR_FIRST`); every license
+  icon is selectable, so none of those can be used. `Native_AvatarTex` gives a
+  Steam id a slot, builds a texture from `SteamLobby_GetAvatar64` and swaps it
+  into the flag's `+0xE0`, keeping the original pointer. `Native_Shutdown` /
+  `Native_Invalidate` put the originals back and release ours before dropping
+  the references.
+- Nothing parses image data from another player: Steam returns decoded
+  pixels, only an exactly 64x64 picture is accepted into a fixed buffer, and
+  the encoder's input and output sizes are constants.
+
+## Character faces
+
+The team screen draws the character select faces: loose files
+`ui\chs\chs_face_a\chs_cs_f\f_<Name><NN>_BM_HQ_NOMIP.tex`, 128x128, format
+`0x2A`, one per character (id order: Ryu, Chunli, Gouki, ...) and color
+`00`..`07`. The art is the same 120x84 window in every file (x 4..123,
+y 42..125); the rest is transparent. They are not in any archive the lobby
+holds, so the backend loads them on first draw:
+`sResource__createFromDTIPath` (`0x140516D70`) returns a cached resource, else
+with flag bit 0 reads the file synchronously (bit 1 would queue it on the
+loader thread). At most four are read per frame (`ARC_LOOSE` in
+`lobby_native.cpp`). The character grid shows every face; the team card shows
+the three picks in their set colors.
+
 ## Not done yet
 
 - **Native character select.** "Character select" entry currently opens the

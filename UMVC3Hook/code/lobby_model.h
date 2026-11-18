@@ -3,6 +3,8 @@
 // Data model shared by the lobby screens, the Steam room service and the
 // host-side preview harness. Nothing here touches the game or Steam.
 
+#include "lobby_canvas.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -73,6 +75,9 @@ struct Member {
     int8_t delayPick;
     int8_t delayHover; // what they have highlighted while still choosing
     Team team;
+    // Lobby icon: kIconSteam for the Steam profile picture, else the id of
+    // the character whose portrait they picked (lobby_canvas.h).
+    int16_t icon;
     int16_t wins;   // sets won in this room
     int16_t losses;
     int8_t setWins; // games won in the set being played right now
@@ -123,6 +128,10 @@ struct SearchResult {
     uint64_t id;
     char name[kNameCapacity];
     char host[kNameCapacity];
+    // The host's Steam id (0 if the lobby does not say) and lobby icon, as
+    // Member::icon.
+    uint64_t hostId;
+    int16_t hostIcon;
     int members;
     int maxMembers;
     int slotCount;
@@ -189,6 +198,11 @@ public:
     virtual int AutoDelay(int pingMs) const = 0;
     virtual void SetReady(bool ready) = 0;
     virtual void SetTeam(const Team& team) = 0;
+    // The local player's lobby icon (see Member::icon), shown to the room.
+    virtual void SetIcon(int icon) = 0;
+    // Texture holding a member's Steam profile picture (0 = the local
+    // player); the default player icon until one is available.
+    virtual Tex AvatarTex(uint64_t memberId) const = 0;
     virtual void InviteFriends() = 0;
     // Host only: the room's music, a lobby_music.h track id. Everyone in the
     // room sees it in RoomState::music.

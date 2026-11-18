@@ -62,6 +62,8 @@ public:
     int AutoDelay(int pingMs) const override;
     void SetReady(bool ready) override;
     void SetTeam(const Team& team) override;
+    void SetIcon(int icon) override;
+    Tex AvatarTex(uint64_t memberId) const override;
     void InviteFriends() override;
     void SetMusic(int32_t trackId) override;
     void ViewProfile(uint64_t memberId) override;
@@ -106,6 +108,7 @@ private:
         int delayPick = kDelayPickNone;
         int delayHover = kDelayPickNone;
         Team team = {};
+        int icon = kIconSteam;
         int wins = 0;
         int losses = 0;
         int setWins = 0;
@@ -118,6 +121,7 @@ private:
     };
 
     void PublishLocal();
+    void PublishHostIcon();
     void RefreshRoom();
     void RefreshResults();
     void DrainChat();
@@ -137,6 +141,9 @@ private:
     bool creating_ = false;
     bool publishedOnce_ = false;
     bool liveAdvertised_ = false;
+    // Host icon last written to the lobby's data, and for which room.
+    int hostIconPublished_ = -1;
+    uint64_t hostIconRoom_ = 0;
     int watchIntent_ = -1;      // setup whose matches the player wants to watch
     int32_t pendingMusic_ = -1; // track to publish once the created room exists
     int pendingFirstTo_ = -1;   // likewise the set length

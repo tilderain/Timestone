@@ -30,6 +30,7 @@ struct UpdateView {
 struct UiPrefs {
     Team team;
     int presetIndex; // saved-roster preset in use, or -1 for a custom team
+    int icon;        // lobby icon: kIconSteam or a character id (lobby_canvas.h)
     RoomSettings create;
 };
 
@@ -107,6 +108,11 @@ private:
     void UpdateChatFocus(const Input& input);
     void UpdateTeam(const Input& input);
     void UpdateCharPicker(const Input& input);
+    // Texture for a player's lobby icon: their Steam picture or a portrait.
+    Tex IconTex(uint64_t memberId, int icon) const;
+    void SetIcon(int icon);
+    void UpdateIconPicker(const Input& input);
+    void DrawIconPicker(Canvas& canvas) const;
     void UpdateText(const Input& input);
     void SyncWithService();
 
@@ -122,7 +128,7 @@ private:
     int ChatRowsFrom(int firstMessage) const; // display rows of messages [first, count)
     const char* DrawTeam(Canvas& canvas) const; // returns footer help
     void DrawTeamCard(Canvas& canvas, float x, float y, float w) const;
-    void DrawCharPicker(Canvas& canvas, float centerX, float rowY) const;
+    void DrawCharPicker(Canvas& canvas) const;
     void DrawListMenu(Canvas& canvas, const char* title, const char* const* items,
                       int count, int cursor) const;
     void DrawMusicMenu(Canvas& canvas) const;
@@ -165,6 +171,9 @@ private:
     int teamCursor_ = 0;
     bool charPickerOpen_ = false; // character dropdown on a team member row
     int charPickerCursor_ = 0;    // roster index highlighted in it
+    bool iconPickerOpen_ = false; // icon grid on the team screen's ICON row
+    int iconCursor_ = 0;          // icon value highlighted in it (0 = Steam picture)
+    int iconScroll_ = 0;          // first grid row on screen
 
     bool roomMenuOpen_ = false;
     int roomMenuCursor_ = 0;

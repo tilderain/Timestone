@@ -3,6 +3,8 @@
 // identified.
 #include "../pch.h"
 #include "lobby_native.h"
+#include "lobby_avatar.h"
+#include "steam_lobby.h"
 #include "lobby_ui.h"
 #include "mk10utils.h"
 
@@ -292,6 +294,10 @@ void RequestLicenseArchive()
             g_licenseArchive);
 }
 
+constexpr int kLooseLoadsPerFrame = 4;
+uint32_t g_looseLoadFrame = 0;
+int g_looseLoads = 0;
+
 void* GetTexture(Tex tex)
 {
     if (tex >= TEX_COUNT) return nullptr;
@@ -300,6 +306,17 @@ void* GetTexture(Tex tex)
 
     const TexInfo& info = GetTexInfo(tex);
     if (info.archive == ARC_LICENSE) RequestLicenseArchive();
+    if (info.archive == ARC_LOOSE) {
+        // These are read from disk on the spot (sResource__createFromDTIPath
+        // 0x140516D70, flag bit 0), so only a few are taken per frame; the
+        // rest of a freshly opened grid fills in over the next frames.
+        if (g_looseLoadFrame != g_frame) {
+            g_looseLoadFrame = g_frame;
+            g_looseLoads = 0;
+        }
+        if (g_looseLoads >= kLooseLoadsPerFrame) return nullptr;
+        ++g_looseLoads;
+    }
     char path[0x108] = {};
     if (info.localized) {
         using Compose = void(__fastcall*)(int, const char*, char*, char);
@@ -328,6 +345,96 @@ void* GetTexture(Tex tex)
     }
     g_textures[tex] = texture;
     return texture;
+}
+
+// ---------------------------------------------------------------------------
+// Steam profile pictures
+//
+// rTexture keeps its GPU texture (nDraw::Texture) at +0xE0 (rTexture__load
+// 0x140515240, rTexture__setHandle 0x140515A60). A picture is converted to the
+// icon textures' own format and built into a new nDraw::Texture exactly as
+// rTexture__load builds one (allocation 0x140781C40, constructor 0x140781720,
+// which copies the pixels). That texture is swapped into a country flag
+// texture (same size and format as the icons, never drawn by the lobby) for
+// as long as the lobby holds it; the original pointer is kept and put
+// back, and ours released (vtable +0x28, deferred by the engine while a frame
+// still references it), before the icon's resource reference is dropped.
+// ---------------------------------------------------------------------------
+constexpr uintptr_t NDRAW_TEXTURE_ALLOC = 0x140781C40;  // (size, align) -> memory
+constexpr uintptr_t NDRAW_TEXTURE_CTOR = 0x140781720;
+constexpr size_t NDRAW_TEXTURE_SIZE = 0x78;
+constexpr size_t NDRAW_TEXTURE_VT_RELEASE = 0x28;
+constexpr size_t RTEXTURE_GPU_TEXTURE = 0xE0;
+constexpr size_t RTEXTURE_WIDTH = 0xF0;
+constexpr size_t RTEXTURE_HEIGHT = 0xF4;
+constexpr uint32_t kTexFormatIcon = 0x2A;
+constexpr uint32_t kAvatarRetryFrames = 90;   // Steam has not cached the picture yet
+constexpr uint32_t kAvatarKeepFrames = 180;   // a slot drawn this recently is not reused
+
+struct AvatarSlot {
+    uint64_t steamId = 0;
+    void* original = nullptr; // the icon's own GPU texture, restored on release
+    void* ours = nullptr;
+    uint32_t lastUsed = 0;
+    uint32_t nextTry = 0;
+};
+AvatarSlot g_avatars[kAvatarSlots];
+bool g_avatarLogged = false;
+
+Tex AvatarSlotTex(int slot) { return static_cast<Tex>(TEX_AVATAR_FIRST + slot); }
+
+// Puts the icon's own texture back and frees ours.
+void ReleaseAvatar(int index)
+{
+    AvatarSlot& slot = g_avatars[index];
+    if (slot.ours) {
+        if (void* texture = g_textures[AvatarSlotTex(index)])
+            Field<void*>(texture, RTEXTURE_GPU_TEXTURE) = slot.original;
+        using Release = void(__fastcall*)(void*);
+        (*reinterpret_cast<Release*>(*reinterpret_cast<uint8_t**>(slot.ours) +
+                                     NDRAW_TEXTURE_VT_RELEASE))(slot.ours);
+    }
+    slot = AvatarSlot{};
+}
+
+void ReleaseAllAvatars()
+{
+    for (int i = 0; i < kAvatarSlots; ++i) ReleaseAvatar(i);
+}
+
+bool UploadAvatar(int index)
+{
+    AvatarSlot& slot = g_avatars[index];
+    void* texture = GetTexture(AvatarSlotTex(index));
+    if (!texture) return false;
+    // Only ever replace what we expect: a loaded 64x64 icon.
+    void* current = Field<void*>(texture, RTEXTURE_GPU_TEXTURE);
+    if (!current || Field<uint32_t>(texture, RTEXTURE_WIDTH) != kAvatarSize ||
+        Field<uint32_t>(texture, RTEXTURE_HEIGHT) != kAvatarSize)
+        return false;
+
+    static uint8_t rgba[kAvatarRgbaBytes];
+    static uint8_t encoded[kAvatarTextureBytes];
+    if (!SteamLobby_GetAvatar64(slot.steamId, rgba)) return false;
+    EncodeAvatarTexture(rgba, encoded);
+
+    using Allocate = void*(__fastcall*)(size_t, uint32_t);
+    using Construct = void*(__fastcall*)(void*, uint16_t, uint32_t, uint8_t, uint32_t, uint32_t,
+                                         int32_t, uint32_t, void*, uint32_t, void*);
+    void* memory = Native<Allocate>(NDRAW_TEXTURE_ALLOC)(NDRAW_TEXTURE_SIZE, 0x10);
+    if (!memory) return false;
+    // Arguments as rTexture__load passes them for a plain 2D texture.
+    void* created = Native<Construct>(NDRAW_TEXTURE_CTOR)(
+        memory, kAvatarSize, kAvatarSize, 1, 1, kTexFormatIcon, 0, 0, nullptr, 0, encoded);
+    if (!created) return false;
+    slot.original = current;
+    slot.ours = created;
+    Field<void*>(texture, RTEXTURE_GPU_TEXTURE) = created;
+    if (!g_avatarLogged) {
+        g_avatarLogged = true;
+        HookLog("LobbyNative: Steam profile pictures are drawing (first one in slot %d)\n", index);
+    }
+    return true;
 }
 
 void HideSchedulerUnits()
@@ -874,6 +981,7 @@ void Native_Shutdown()
     }
     if (IsUnitAlive(g_scheduler)) KillUnit(g_scheduler);
 
+    ReleaseAllAvatars(); // while the icon textures are still referenced
     using Release = void(__fastcall*)(void*);
     for (void*& texture : g_textures) {
         if (texture) Native<Release>(CRESOURCE_RELEASE_REF)(texture);
@@ -886,12 +994,45 @@ void Native_Shutdown()
 void Native_Invalidate()
 {
     // Texture references are still ours to release; unit memory is not.
+    ReleaseAllAvatars();
     using Release = void(__fastcall*)(void*);
     for (void*& texture : g_textures) {
         if (texture) Native<Release>(CRESOURCE_RELEASE_REF)(texture);
         texture = nullptr;
     }
     ResetState();
+}
+
+// The texture showing a Steam user's profile picture, or the default player
+// icon while there is none (not cached by Steam yet, every slot busy, no
+// Steam). Pictures are fetched once and kept while they are being drawn.
+Tex Native_AvatarTex(uint64_t steamId)
+{
+    if (!steamId) return TEX_USER_ICON;
+    int found = -1, spare = -1;
+    for (int i = 0; i < kAvatarSlots; ++i) {
+        if (g_avatars[i].steamId == steamId) found = i;
+    }
+    if (found < 0) {
+        // A free slot, else the one that has gone longest without being drawn.
+        for (int i = 0; i < kAvatarSlots; ++i) {
+            const AvatarSlot& slot = g_avatars[i];
+            if (slot.steamId && g_frame - slot.lastUsed < kAvatarKeepFrames) continue;
+            if (spare < 0 || !slot.steamId ||
+                (g_avatars[spare].steamId && slot.lastUsed < g_avatars[spare].lastUsed))
+                spare = i;
+            if (!slot.steamId) break;
+        }
+        if (spare < 0) return TEX_USER_ICON;
+        ReleaseAvatar(spare);
+        g_avatars[spare].steamId = steamId;
+        found = spare;
+    }
+    AvatarSlot& slot = g_avatars[found];
+    slot.lastUsed = g_frame;
+    if (!slot.ours && g_frame >= slot.nextTry && !UploadAvatar(found))
+        slot.nextTry = g_frame + kAvatarRetryFrames;
+    return slot.ours ? AvatarSlotTex(found) : TEX_USER_ICON;
 }
 
 // ---------------------------------------------------------------------------

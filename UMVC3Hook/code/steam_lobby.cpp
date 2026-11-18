@@ -82,6 +82,7 @@ struct SteamAPI {
     const char* (*GetPersonaName)(void*) = nullptr;
     const char* (*GetFriendPersonaName)(void*, uint64_t) = nullptr;
     int (*GetMediumFriendAvatar)(void*, uint64_t) = nullptr;
+    bool (*RequestUserInformation)(void*, uint64_t, bool) = nullptr;
     int (*GetFriendCount)(void*, int) = nullptr;
     uint64_t (*GetFriendByIndex)(void*, int, int) = nullptr;
     bool (*GetFriendGamePlayed)(void*, uint64_t, FriendGameInfo_t*) = nullptr;
@@ -416,6 +417,8 @@ bool ResolveExports()
     ok &= Resolve(g_api.GetFriendPersonaName, "SteamAPI_ISteamFriends_GetFriendPersonaName");
     ResolveOptional(g_api.GetMediumFriendAvatar,
                     "SteamAPI_ISteamFriends_GetMediumFriendAvatar");
+    ResolveOptional(g_api.RequestUserInformation,
+                    "SteamAPI_ISteamFriends_RequestUserInformation");
     ResolveOptional(g_api.GetFriendCount, "SteamAPI_ISteamFriends_GetFriendCount");
     ResolveOptional(g_api.GetFriendByIndex, "SteamAPI_ISteamFriends_GetFriendByIndex");
     ResolveOptional(g_api.GetFriendGamePlayed, "SteamAPI_ISteamFriends_GetFriendGamePlayed");
@@ -1355,6 +1358,29 @@ bool SteamLobby_GetPeerAvatarRGBA(uint8_t* rgba, size_t capacity,
     const size_t bytes = static_cast<size_t>(*width) * *height * 4;
     return bytes <= capacity &&
            g_api.GetImageRGBA(g_utils, image, rgba, static_cast<int>(bytes));
+}
+
+// A member's 64x64 Steam profile picture as raw RGBA. Steam decodes the
+// image itself and hands back plain pixels; anything that is not exactly
+// 64x64 is refused, so the caller's fixed 64*64*4 buffer is always filled
+// exactly and never overrun. False until Steam has the picture cached.
+bool SteamLobby_GetAvatar64(uint64_t steamId, uint8_t* rgba)
+{
+    if (LocalLobby_Enabled() || !rgba || !steamId || !g_friends || !g_utils ||
+        !g_api.GetMediumFriendAvatar || !g_api.GetImageSize || !g_api.GetImageRGBA)
+        return false;
+    const int image = g_api.GetMediumFriendAvatar(g_friends, steamId);
+    if (image <= 0) {
+        // Someone Steam has not seen yet (the host of a lobby in the list):
+        // ask it to fetch their name and picture; a later call finds it.
+        if (g_api.RequestUserInformation)
+            g_api.RequestUserInformation(g_friends, steamId, false);
+        return false;
+    }
+    uint32_t width = 0, height = 0;
+    if (!g_api.GetImageSize(g_utils, image, &width, &height) || width != 64 || height != 64)
+        return false;
+    return g_api.GetImageRGBA(g_utils, image, rgba, 64 * 64 * 4);
 }
 
 bool SteamLobby_OpenPeerProfile()

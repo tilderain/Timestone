@@ -116,7 +116,11 @@ constexpr int kSlotMenuCount = 3;
 const char* const kRoomMenuItems[] = {"TEAM SETUP", "LOBBY MUSIC", "INVITE FRIENDS", "LEAVE LOBBY"};
 constexpr int kRoomMenuCount = 4;
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
-constexpr int kCharPickerRows = 9; // characters visible at once in the team dropdown
+constexpr int kCharGridColumns = 10; // faces across in the team screen's character grid
+// The art in every select-screen face texture (128x128) is the same 120x84
+// window; the rest is transparent.
+constexpr Uv kFaceUv{4.0f / 128.0f, 42.0f / 128.0f, 124.0f / 128.0f, 126.0f / 128.0f};
+constexpr float kFaceAspect = 84.0f / 120.0f;
 
 const char* const kQuickChat[] = {
     "Type a message...", "Good fight!", "One more?", "Nice!", "Hello!",
@@ -141,8 +145,11 @@ enum CreateRow {
 // Team-screen rows: preset selector, 3 x (character, assist, colour), entry, done.
 constexpr int kTeamRowPreset = 0;
 constexpr int kTeamRowFirstSlot = 1;
-constexpr int kTeamRowDone = 10;
-constexpr int kTeamRows = 11;
+constexpr int kTeamRowIcon = 10; // the player's lobby icon
+constexpr int kIconGridColumns = 14;
+constexpr int kIconGridRows = 6;
+constexpr int kTeamRowDone = 11;
+constexpr int kTeamRows = 12;
 
 // Pre-match prompts: how long each waits for an answer (frames at 60 fps).
 // Picking a delay is the ready-up: with no pick, the seat is given up.
@@ -215,6 +222,17 @@ public:
         Text(fitted, x, y, scale, anchor, color, font);
     }
 
+    // Like TextFit, but the whole text is always shown: it is drawn smaller
+    // until it fits maxWidth, never cut. Returns the scale used.
+    float TextShrink(const char* text, float x, float y, float scale, float maxWidth,
+                     Anchor anchor, Color color = kText, Font font = FONT_BODY) const
+    {
+        const float width = TextWidth(text, font) * scale;
+        if (width > maxWidth && width > 0.0f) scale *= maxWidth / width;
+        Text(text, x, y, scale, anchor, color, font);
+        return scale;
+    }
+
     // Small label with a dark drop for legibility over the busy backdrop.
     void Label(const char* text, float x, float y, float scale, Anchor anchor,
                Color color = kText) const
@@ -244,6 +262,8 @@ void DrawGlyph(const Painter& p, Button button, bool keyboard, float right, floa
 // and the value text is fitted to stay clear of the arrows.
 constexpr float kValueArrowSpan = 150.0f;
 constexpr float kValueTextWidth = 2.0f * (kValueArrowSpan - 24.0f);
+// Team screen assist names: the room between the row label and the panel edge.
+constexpr float kAssistTextWidth = 380.0f;
 
 // Left/right arrows around a selectable value: the option menu's own arrow
 // art (drawn pointing left; the right one is the mirror image), 32 px as
@@ -324,6 +344,7 @@ void LobbyUi::GoTo(Screen screen)
     quickChatOpen_ = false;
     musicOpen_ = false;
     charPickerOpen_ = false;
+    iconPickerOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
     chatFocus_ = false;
@@ -408,6 +429,7 @@ void LobbyUi::ReturnToRoom()
     quickChatOpen_ = false;
     musicOpen_ = false;
     charPickerOpen_ = false;
+    iconPickerOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
     chatFocus_ = false;
@@ -444,6 +466,7 @@ void LobbyUi::SyncWithService()
     if (inRoom && !wasInRoom_) {
         // Create/Join completed: publish our team and show the room.
         service_.SetTeam(prefs_.team);
+        service_.SetIcon(prefs_.icon);
         seatSlot_ = 0;
         seatSide_ = 0;
         leftByChoice_ = false;
@@ -1378,18 +1401,12 @@ void LobbyUi::StepTeamField(int delta)
         if (index < -1) index = presets - 1;
         if (index >= presets) index = -1;
         ApplyPreset(index);
-    } else if (teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowDone) {
+    } else if (teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowIcon) {
         const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
         const int field = (teamCursor_ - kTeamRowFirstSlot) % 3;
         Team& team = prefs_.team;
         if (field == 0) {
-            const int count = roster_.characterCount ? roster_.characterCount() : 0;
-            if (count <= 0) return;
-            int index = 0;
-            for (int i = 0; i < count; ++i)
-                if (roster_.characterId(i) == team.chars[member]) index = i;
-            index = ((index + delta) % count + count) % count;
-            SetTeamCharacter(member, roster_.characterId(index));
+            return; // characters are picked from the grid (confirm), not stepped
         } else if (field == 1) {
             team.assists[member] = ((team.assists[member] + delta) % 3 + 3) % 3;
         } else {
@@ -1399,10 +1416,59 @@ void LobbyUi::StepTeamField(int delta)
         }
         prefs_.presetIndex = -1; // edited by hand: no longer the saved preset
     } else {
-        return;
+        return; // the icon row opens its grid on confirm
     }
     Play(SFX_MOVE);
     CommitTeam();
+}
+
+Tex LobbyUi::IconTex(uint64_t memberId, int icon) const
+{
+    return icon > kIconSteam && icon <= kIconMax ? LicenseIcon(icon - 1) : service_.AvatarTex(memberId);
+}
+
+// The icon grid: the Steam picture first, then the license icons in order.
+// Directions move a cell, the page keys a screenful, confirm picks.
+void LobbyUi::UpdateIconPicker(const Input& input)
+{
+    if (input.cancel || input.menu) {
+        iconPickerOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
+    }
+    const int count = kIconMax + 1;
+    int next = iconCursor_;
+    if (input.left) next -= 1;
+    if (input.right) next += 1;
+    if (input.up) next -= kIconGridColumns;
+    if (input.down) next += kIconGridColumns;
+    if (input.pageLeft) next -= kIconGridColumns * kIconGridRows;
+    if (input.pageRight) next += kIconGridColumns * kIconGridRows;
+    // Left and right wrap around the ends; a page stops at them; up on the
+    // first row stays put.
+    if (next < 0) next = input.left ? count - 1 : input.pageLeft ? 0 : iconCursor_;
+    if (next >= count) next = input.right ? 0 : count - 1;
+    if (next != iconCursor_) {
+        iconCursor_ = next;
+        Play(SFX_MOVE);
+    }
+    // Keep the cursor's row inside the window.
+    const int row = iconCursor_ / kIconGridColumns;
+    if (row < iconScroll_) iconScroll_ = row;
+    if (row >= iconScroll_ + kIconGridRows) iconScroll_ = row - kIconGridRows + 1;
+    if (!input.confirm) return;
+    iconPickerOpen_ = false;
+    Play(SFX_CONFIRM);
+    SetIcon(iconCursor_);
+}
+
+void LobbyUi::SetIcon(int icon)
+{
+    if (icon < kIconSteam || icon > kIconMax) icon = kIconSteam;
+    if (icon == prefs_.icon) return;
+    prefs_.icon = icon;
+    prefsDirty_ = true;
+    if (service_.Room().inRoom) service_.SetIcon(icon);
 }
 
 // Puts a character in a team member's slot, keeping the color in range.
@@ -1414,8 +1480,9 @@ void LobbyUi::SetTeamCharacter(int member, int32_t id)
     if (team.colors[member] >= colors) team.colors[member] = 0;
 }
 
-// The character dropdown under a team member row. Up/down walks the roster,
-// left/right turns a page, confirm puts the character in the slot.
+// The character grid for a team member row: the roster's select-screen faces.
+// Directions move a cell (left and right wrap around the ends), confirm puts
+// the character in the slot.
 void LobbyUi::UpdateCharPicker(const Input& input)
 {
     const int count = roster_.characterCount ? roster_.characterCount() : 0;
@@ -1424,16 +1491,16 @@ void LobbyUi::UpdateCharPicker(const Input& input)
         Play(SFX_CANCEL);
         return;
     }
-    if (!MoveCursor(charPickerCursor_, count, input)) {
-        int next = charPickerCursor_;
-        if (input.right || input.pageRight) next += kCharPickerRows;
-        else if (input.left || input.pageLeft) next -= kCharPickerRows;
-        if (next < 0) next = 0;
-        if (next >= count) next = count - 1;
-        if (next != charPickerCursor_) {
-            charPickerCursor_ = next;
-            Play(SFX_MOVE);
-        }
+    int next = charPickerCursor_;
+    if (input.left) next -= 1;
+    if (input.right) next += 1;
+    if (input.up) next -= kCharGridColumns;
+    if (input.down) next += kCharGridColumns;
+    if (next < 0) next = input.left ? count - 1 : charPickerCursor_;
+    if (next >= count) next = input.right ? 0 : charPickerCursor_;
+    if (next != charPickerCursor_) {
+        charPickerCursor_ = next;
+        Play(SFX_MOVE);
     }
     if (!input.confirm) return;
     charPickerOpen_ = false;
@@ -1468,6 +1535,13 @@ void LobbyUi::UpdateTeam(const Input& input)
         }
         charPickerOpen_ = false; // out of time: go with the team as it stands
     }
+    if (iconPickerOpen_) {
+        if (!timedOut) {
+            UpdateIconPicker(input);
+            return;
+        }
+        iconPickerOpen_ = false;
+    }
     MoveCursor(teamCursor_, kTeamRows, input);
     const int delta = (input.right ? 1 : 0) - (input.left ? 1 : 0);
     if (delta != 0) StepTeamField(delta);
@@ -1493,7 +1567,7 @@ void LobbyUi::UpdateTeam(const Input& input)
         return;
     }
     if (!input.confirm) return;
-    const bool characterRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowDone &&
+    const bool characterRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowIcon &&
                               (teamCursor_ - kTeamRowFirstSlot) % 3 == 0;
     const int count = roster_.characterCount ? roster_.characterCount() : 0;
     if (characterRow && count > 0) {
@@ -1502,6 +1576,16 @@ void LobbyUi::UpdateTeam(const Input& input)
         for (int i = 0; i < count; ++i)
             if (roster_.characterId(i) == prefs_.team.chars[member]) charPickerCursor_ = i;
         charPickerOpen_ = true;
+        Play(SFX_CONFIRM);
+        return;
+    }
+    if (teamCursor_ == kTeamRowIcon) {
+        iconCursor_ = prefs_.icon;
+        iconScroll_ = iconCursor_ / kIconGridColumns - kIconGridRows / 2;
+        const int lastScroll = (kIconMax + kIconGridColumns) / kIconGridColumns - kIconGridRows;
+        if (iconScroll_ > lastScroll) iconScroll_ = lastScroll;
+        if (iconScroll_ < 0) iconScroll_ = 0;
+        iconPickerOpen_ = true;
         Play(SFX_CONFIRM);
         return;
     }
@@ -1597,15 +1681,21 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_CONFIRM, "Select");
         if (createCursor_ != CREATE_MUSIC) add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Back");
+    } else if (screen_ == Screen::Team && iconPickerOpen_) {
+        add(BTN_CONFIRM, "Select");
+        add(BTN_DPAD, "Move");
+        add(BTN_CANCEL, "Close");
     } else if (screen_ == Screen::Team && charPickerOpen_) {
         add(BTN_CONFIRM, "Select");
-        add(BTN_DPAD, "Scroll");
+        add(BTN_DPAD, "Move");
         add(BTN_CANCEL, "Close");
     } else if (screen_ == Screen::Team) {
-        const bool characterRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowDone &&
+        const bool characterRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowIcon &&
                                   (teamCursor_ - kTeamRowFirstSlot) % 3 == 0;
         if (characterRow) add(BTN_CONFIRM, "Characters");
-        add(BTN_DPAD, "Change");
+        if (teamCursor_ == kTeamRowIcon) add(BTN_CONFIRM, "Icons");
+        if (!characterRow && teamCursor_ != kTeamRowIcon && teamCursor_ != kTeamRowDone)
+            add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Done");
     } else if (roomMenuOpen_ || slotMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
         add(BTN_CONFIRM, "Select");
@@ -1666,20 +1756,24 @@ void LobbyUi::DrawTeamCard(Canvas& canvas, float x, float y, float w) const
     const float t = Clamp01(screenFrame_ / static_cast<float>(kTransitionFrames));
     const Painter p(canvas, t, 0.0f);
     p.Box(TEX_PANEL_DARK, x, y, w, 300.0f);
-    p.Sprite(TEX_USER_ICON, x + 34.0f, y + 58.0f, 56.0f, 56.0f, kFullUv, A_ML);
+    p.Sprite(IconTex(0, prefs_.icon), x + 34.0f, y + 58.0f, 56.0f, 56.0f, kFullUv, A_ML);
     p.TextFit(service_.LocalName(), x + 104.0f, y + 46.0f, 0.95f, w - 130.0f, A_ML);
     p.Text(prefs_.presetIndex >= 0 ? "RESERVE UNIT" : "CUSTOM TEAM", x + 104.0f, y + 74.0f, 0.62f,
            A_ML, kYellow);
     p.Sprite(TEX_LINE, x + 28.0f, y + 100.0f, w - 56.0f, 3.0f, Uv{0.1f, 0.55f, 0.9f, 0.95f}, A_TL,
              WithAlpha(kCyan, 0.8f));
+    // The team as its select-screen faces, each in the color it is set to.
+    const float column = (w - 56.0f) / 3.0f, face = 128.0f;
     for (int i = 0; i < 3; ++i) {
-        const float rowY = y + 132.0f + i * 40.0f;
-        p.Text(kTeamSlotNames[i], x + 34.0f, rowY, 0.6f, A_ML, kFaint);
+        const float cx = x + 28.0f + column * (i + 0.5f);
+        p.Text(kTeamSlotNames[i], cx, y + 118.0f, 0.56f, A_MC, kFaint);
+        p.Sprite(CharacterFace(prefs_.team.chars[i], prefs_.team.colors[i]), cx, y + 144.0f, face,
+                 face * kFaceAspect, kFaceUv, A_TC);
         const char* name = roster_.characterName ? roster_.characterName(prefs_.team.chars[i]) : "";
-        p.TextFit(name, x + 130.0f, rowY, 0.84f, w - 250.0f, A_ML);
+        p.TextFit(name, cx, y + 256.0f, 0.7f, column - 10.0f, A_MC);
         char assist[48];
         snprintf(assist, sizeof(assist), "ASSIST %s", kAssistLetters[prefs_.team.assists[i] % 3]);
-        p.Text(assist, x + w - 34.0f, rowY, 0.62f, A_MR, kDim);
+        p.Text(assist, cx, y + 278.0f, 0.54f, A_MC, kDim);
     }
 }
 
@@ -1759,7 +1853,11 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
             const float pulse = 0.5f + 0.22f * SelectionWave(frame_);
             p.Box(TEX_SLANT_SEL, kSafeLeft, y - 29.0f, rowWidth, 58.0f, WithAlpha(kWhite, pulse));
         }
-        r.Sprite(TEX_USER_ICON, 104.0f, y, 38.0f, 38.0f, kFullUv, A_ML);
+        // The host's icon. A Steam picture needs their id; without one
+        // (a lobby from an older version) it is the default icon.
+        const Tex hostIcon = result.hostIcon > kIconSteam || result.hostId
+            ? IconTex(result.hostId, result.hostIcon) : TEX_USER_ICON;
+        r.Sprite(hostIcon, 104.0f, y, 38.0f, 38.0f, kFullUv, A_ML);
         r.TextFit(result.name, 152.0f, y, 0.86f, 420.0f, A_ML);
         r.TextFit(result.host, 590.0f, y, 0.74f, 240.0f, A_ML, kDim);
 
@@ -1926,7 +2024,7 @@ void LobbyUi::DrawRoomMembers(Canvas& canvas) const
                  Uv{11.0f / 64.0f, (member.isHost ? 196.0f : 228.0f) / 256.0f, 53.0f / 64.0f,
                     (member.isHost ? 220.0f : 252.0f) / 256.0f},
                  A_ML);
-        p.Sprite(TEX_USER_ICON, x + 64.0f, cy, 34.0f, 34.0f, kFullUv, A_ML);
+        p.Sprite(IconTex(member.id, member.icon), x + 64.0f, cy, 34.0f, 34.0f, kFullUv, A_ML);
         p.TextFit(member.name, x + 106.0f, cy, 0.78f, 172.0f, A_ML, member.isLocal ? kCyan : kText);
 
         // Status: BATTLE (row 0) while fighting, WATCH (row 2) while spectating.
@@ -2474,6 +2572,13 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
             else
                 snprintf(value, sizeof(value), "CUSTOM");
             valueColor = kYellow;
+        } else if (row == kTeamRowIcon) {
+            label = "ICON";
+            if (prefs_.icon == kIconSteam)
+                snprintf(value, sizeof(value), "STEAM PICTURE");
+            else
+                snprintf(value, sizeof(value), "ICON %d", prefs_.icon);
+            valueColor = kYellow;
         } else if (row == kTeamRowDone) {
             p.Text(teamForMatch_ ? "START" : "DONE", panelX + panelW * 0.5f, y, 0.4f, A_MC, kText,
                    FONT_HEADING);
@@ -2499,13 +2604,31 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
                 valueColor = kDim;
             }
         }
-        const bool header = row == kTeamRowPreset ||
-                            (row >= kTeamRowFirstSlot && (row - kTeamRowFirstSlot) % 3 == 0);
+        const bool header = row == kTeamRowPreset || row == kTeamRowIcon ||
+                            (row >= kTeamRowFirstSlot && row < kTeamRowIcon &&
+                             (row - kTeamRowFirstSlot) % 3 == 0);
         p.Text(label, labelX, y, header ? 0.8f : 0.68f, A_ML,
                selected || header ? kText : kFaint);
-        p.TextFit(value, valueX, y, header ? 0.8f : 0.7f, kValueTextWidth, A_MC, selected ? kText : valueColor);
-        if (selected) {
-            DrawValueArrows(p, frame_, valueX, y, kValueArrowSpan);
+        // An assist name is never cut: it gets the width of the panel's
+        // value column and, past that, is drawn smaller.
+        const bool assistRow = row >= kTeamRowFirstSlot && row < kTeamRowIcon &&
+                               (row - kTeamRowFirstSlot) % 3 == 1;
+        float arrowSpan = kValueArrowSpan;
+        if (assistRow) {
+            const float scale = p.TextShrink(value, valueX, y, 0.7f, kAssistTextWidth, A_MC,
+                                             selected ? kText : valueColor);
+            const float half = TextWidth(value) * scale * 0.5f + 24.0f;
+            if (half > arrowSpan) arrowSpan = half;
+        } else {
+            p.TextFit(value, valueX, y, header ? 0.8f : 0.7f, kValueTextWidth, A_MC,
+                      selected ? kText : valueColor);
+        }
+        // Characters and the icon are picked from a grid, not stepped.
+        const bool gridRow = row == kTeamRowIcon ||
+                             (row >= kTeamRowFirstSlot && row < kTeamRowIcon &&
+                              (row - kTeamRowFirstSlot) % 3 == 0);
+        if (selected && !gridRow) {
+            DrawValueArrows(p, frame_, valueX, y, arrowSpan);
         }
     }
 
@@ -2520,20 +2643,26 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
     }
 
     if (charPickerOpen_) {
-        DrawCharPicker(canvas, panelX + 430.0f, panelY + 40.0f + teamCursor_ * 39.0f);
+        DrawCharPicker(canvas);
         return "Choose a character.";
+    }
+    if (iconPickerOpen_) {
+        DrawIconPicker(canvas);
+        return "Choose the icon other players see.";
     }
 
     const char* help = teamForMatch_ ? "Choose your team, then select START."
                                      : "Edit your team.";
     if (teamCursor_ == kTeamRowPreset)
         help = "Use one of your reserve units, or build a custom team.";
+    else if (teamCursor_ == kTeamRowIcon)
+        help = "Your Steam profile picture, or one of the game's icons.";
     return help;
 }
 
-// The character dropdown, over the value column of the row it belongs to.
-// It is centred on that row where the screen allows.
-void LobbyUi::DrawCharPicker(Canvas& canvas, float centerX, float rowY) const
+// The character grid, centred on the screen: every character's face, the
+// slot's current character in the color it is set to.
+void LobbyUi::DrawCharPicker(Canvas& canvas) const
 {
     const int count = roster_.characterCount ? roster_.characterCount() : 0;
     if (count <= 0) return;
@@ -2541,39 +2670,84 @@ void LobbyUi::DrawCharPicker(Canvas& canvas, float centerX, float rowY) const
     const Painter p(canvas, 1.0f, 0.0f);
     p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.55f});
 
-    const float rowH = 40.0f;
-    const float w = 380.0f;
-    const float h = 112.0f + kCharPickerRows * rowH;
-    const float x = centerX - w * 0.5f;
-    float y = rowY - h * 0.5f;
-    if (y > kScreenH - 70.0f - h) y = kScreenH - 70.0f - h; // clear of the footer
-    if (y < 16.0f) y = 16.0f;
+    const int rows = (count + kCharGridColumns - 1) / kCharGridColumns;
+    const float cell = 88.0f, cellH = 68.0f, face = 80.0f;
+    const float w = kCharGridColumns * cell + 72.0f;
+    const float h = rows * cellH + 128.0f;
+    const float x = (kScreenW - w) * 0.5f, y = (kScreenH - h) * 0.5f - 20.0f;
     // The panel texture is translucent; the team rows under it must not show.
     p.Fill(x + 4.0f, y + 4.0f, w - 8.0f, h - 8.0f, Color{0.02f, 0.03f, 0.05f, 0.92f});
     p.Box(TEX_PANEL_DARK, x, y, w, h);
     p.Text(kTeamSlotNames[member], x + w * 0.5f, y + 36.0f, 0.36f, A_MC, kYellow, FONT_HEADING);
 
-    // Keep the cursor in the middle of the window where the list allows it.
-    int first = charPickerCursor_ - kCharPickerRows / 2;
-    if (first > count - kCharPickerRows) first = count - kCharPickerRows;
-    if (first < 0) first = 0;
-    for (int row = 0; row < kCharPickerRows && first + row < count; ++row) {
-        const int index = first + row;
-        const float itemY = y + 78.0f + row * rowH;
-        const bool selected = index == charPickerCursor_;
-        if (selected) {
-            const float pulse = SelectionPulse(frame_);
-            p.Box(TEX_ROW_SEL, x + 18.0f, itemY - 22.0f, w - 36.0f, 44.0f, WithAlpha(kWhite, pulse));
-        }
+    const float gridX = x + 36.0f, gridY = y + 66.0f;
+    for (int index = 0; index < count; ++index) {
+        const float cx = gridX + (index % kCharGridColumns) * cell + cell * 0.5f;
+        const float cy = gridY + (index / kCharGridColumns) * cellH + cellH * 0.5f;
         const int32_t id = roster_.characterId(index);
         const bool current = id == prefs_.team.chars[member];
-        const char* name = roster_.characterName ? roster_.characterName(id) : "";
-        p.TextFit(name ? name : "", x + w * 0.5f, itemY, 0.76f, w - 80.0f, A_MC,
-                  current ? kCyan : selected ? kText : kDim);
+        const bool selected = index == charPickerCursor_;
+        if (selected) {
+            // A frame wider than the cell, and the face itself a size up.
+            p.Box(TEX_ROW_SEL, cx - cell * 0.5f - 5.0f, cy - cellH * 0.5f - 5.0f, cell + 10.0f,
+                  cellH + 10.0f);
+        } else if (current) {
+            p.Box(TEX_ROW_SEL, cx - cell * 0.5f, cy - cellH * 0.5f, cell, cellH,
+                  WithAlpha(kCyan, 0.6f));
+        }
+        const float size = selected ? face + 8.0f : face;
+        p.Sprite(CharacterFace(id, current ? prefs_.team.colors[member] : 0), cx, cy, size,
+                 size * kFaceAspect, kFaceUv, A_MC);
     }
-    char position[24];
-    snprintf(position, sizeof(position), "%d / %d", charPickerCursor_ + 1, count);
-    p.Text(position, x + w - 40.0f, y + h - 24.0f, 0.56f, A_MR, kDim);
+    const int32_t highlighted = roster_.characterId(charPickerCursor_);
+    const char* name = roster_.characterName ? roster_.characterName(highlighted) : "";
+    p.TextFit(name ? name : "", x + w * 0.5f, y + h - 30.0f, 0.8f, w - 120.0f, A_MC,
+              highlighted == prefs_.team.chars[member] ? kCyan : kText);
+}
+
+// The icon grid, centred on the screen. Cell 0 is the Steam profile picture.
+void LobbyUi::DrawIconPicker(Canvas& canvas) const
+{
+    const Painter p(canvas, 1.0f, 0.0f);
+    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.55f});
+
+    const float cell = 62.0f, icon = 52.0f;
+    const float w = kIconGridColumns * cell + 72.0f;
+    const float h = kIconGridRows * cell + 128.0f;
+    const float x = (kScreenW - w) * 0.5f, y = (kScreenH - h) * 0.5f - 20.0f;
+    // The panel texture is translucent; the team rows under it must not show.
+    p.Fill(x + 4.0f, y + 4.0f, w - 8.0f, h - 8.0f, Color{0.02f, 0.03f, 0.05f, 0.92f});
+    p.Box(TEX_PANEL_DARK, x, y, w, h);
+    p.Text("ICON", x + w * 0.5f, y + 36.0f, 0.36f, A_MC, kYellow, FONT_HEADING);
+
+    const int count = kIconMax + 1;
+    const float gridX = x + 36.0f, gridY = y + 66.0f;
+    for (int row = 0; row < kIconGridRows; ++row) {
+        for (int column = 0; column < kIconGridColumns; ++column) {
+            const int index = (iconScroll_ + row) * kIconGridColumns + column;
+            if (index >= count) break;
+            const float cx = gridX + column * cell + cell * 0.5f;
+            const float cy = gridY + row * cell + cell * 0.5f;
+            const bool selected = index == iconCursor_;
+            if (selected) {
+                // A frame wider than the cell, and the icon itself a size up.
+                const float frame = cell + 10.0f;
+                p.Box(TEX_ROW_SEL, cx - frame * 0.5f, cy - frame * 0.5f, frame, frame);
+            } else if (index == prefs_.icon) {
+                // The icon in use now.
+                p.Box(TEX_ROW_SEL, cx - cell * 0.5f, cy - cell * 0.5f, cell, cell,
+                      WithAlpha(kCyan, 0.6f));
+            }
+            const float size = selected ? icon + 8.0f : icon;
+            p.Sprite(IconTex(0, index), cx, cy, size, size, kFullUv, A_MC);
+        }
+    }
+    char position[40];
+    if (iconCursor_ == kIconSteam)
+        snprintf(position, sizeof(position), "STEAM PICTURE");
+    else
+        snprintf(position, sizeof(position), "ICON %d / %d", iconCursor_, kIconMax);
+    p.Text(position, x + w * 0.5f, y + h - 30.0f, 0.62f, A_MC, kDim);
 }
 
 bool LobbyUi::DrawModal(Canvas& canvas) const

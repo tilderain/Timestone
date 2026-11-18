@@ -9,9 +9,7 @@ namespace {
 
 // Paths and pixel sizes read from the retail archives (ui\cmn, ui\netroom,
 // ui\mnmain). Order must match enum Tex.
-#define LIC_ICON(n) \
-    {"ui\\lic\\lic_user_i\\lic_user_i" #n "_BM_HQ_NOMIP", 64, 64, ARC_LICENSE, false}
-const TexInfo kTextures[TEX_COUNT] = {
+const TexInfo kTextures[TEX_ICON_FIRST] = {
     {"ui\\ui_filter\\white_BM_HQ_NOMIP", 32, 32, ARC_COMMON, false},
     {"ui\\net\\net_sprite\\ga_net_waku_a_BM_HQ_NOMIP", 1024, 64, ARC_NETROOM, false},
     {"ui\\net\\net_sprite\\ga_net_waku_f_BM_HQ_NOMIP", 64, 128, ARC_NETROOM, false},
@@ -44,61 +42,61 @@ const TexInfo kTextures[TEX_COUNT] = {
     {"ui\\cmn\\cmn_sprite\\ga_cmn_bar_BM_HQ_NOMIP", 256, 16, ARC_COMMON, false},
     {"ui\\mainmenu\\mai_hlp\\mai_hlp03_BM_HQ_NOMIP", 256, 256, ARC_COMMON, false},
     {"ui\\mainmenu\\mai_hlp\\mai_hlp04_BM_HQ_NOMIP", 256, 256, ARC_COMMON, false},
-    // Character portraits, by character id 1..51. The numbers are the license
-    // icons showing each character (read off the icon sheet).
-    LIC_ICON(001),
-    LIC_ICON(006),
-    LIC_ICON(017),
-    LIC_ICON(003),
-    LIC_ICON(011),
-    LIC_ICON(009),
-    LIC_ICON(004),
-    LIC_ICON(007),
-    LIC_ICON(181),
-    LIC_ICON(013),
-    LIC_ICON(012),
-    LIC_ICON(008),
-    LIC_ICON(014),
-    LIC_ICON(010),
-    LIC_ICON(002),
-    LIC_ICON(018),
-    LIC_ICON(005),
-    LIC_ICON(015),
-    LIC_ICON(016),
-    LIC_ICON(171),
-    LIC_ICON(179),
-    LIC_ICON(177),
-    LIC_ICON(178),
-    LIC_ICON(180),
-    LIC_ICON(182),
-    LIC_ICON(028),
-    LIC_ICON(022),
-    LIC_ICON(019),
-    LIC_ICON(032),
-    LIC_ICON(020),
-    LIC_ICON(027),
-    LIC_ICON(035),
-    LIC_ICON(021),
-    LIC_ICON(026),
-    LIC_ICON(024),
-    LIC_ICON(031),
-    LIC_ICON(174),
-    LIC_ICON(030),
-    LIC_ICON(034),
-    LIC_ICON(023),
-    LIC_ICON(033),
-    LIC_ICON(025),
-    LIC_ICON(036),
-    LIC_ICON(029),
-    LIC_ICON(183),
-    LIC_ICON(188),
-    LIC_ICON(184),
-    LIC_ICON(185),
-    LIC_ICON(186),
-    LIC_ICON(187),
-    LIC_ICON(037),
 };
-#undef LIC_ICON
+
+// The license icon (ui\lic\lic_user_i, 000..239) showing each character, by
+// character id 1..51 (read off the icon sheet).
+const uint8_t kCharacterIcon[51] = {
+    1, 6, 17, 3, 11, 9, 4, 7, 181, 13, 12, 8, 14,
+    10, 2, 18, 5, 15, 16, 171, 179, 177, 178, 180, 182, 28,
+    22, 19, 32, 20, 27, 35, 21, 26, 24, 31, 174, 30, 34,
+    23, 33, 25, 36, 29, 183, 188, 184, 185, 186, 187, 37
+};
+
+// Country flags (ui\lic\lic_flag_i): 64x64 and in the icons' format, and
+// never drawn by the lobby, so they host the Steam profile pictures.
+const char* const kAvatarHosts[kAvatarSlots] = {
+    "japan", "united_states", "uk", "iceland", "ireland", "argentina", "israel", "italy", "india",
+    "indonesia", "australia", "austria", "oman", "netherlands", "qatar", "canada",
+};
+
+// File name stem of each character's select-screen faces, by id 1..50.
+const char* const kFaceNames[50] = {
+    "Ryu", "Chunli", "Gouki", "Chris", "Wesker", "VJoe", "Dante", "Trish", "Frank", "Spencer",
+    "Arthur", "Amaterasu", "Zero", "Tron", "Morrigan", "Leilei", "Felicia", "CViper", "Haggar",
+    "Jill", "Hiryu", "Vergil", "Naruhodo", "RedArremer", "Nemesis", "SpiderMan", "CapAmerica",
+    "Wolverine", "Magneto", "Hulk", "SheHulk", "TaskMaster", "IronMan", "Thor", "DrDoom",
+    "Phoenix", "Shuma", "Modok", "Dormammu", "DeadPool", "Storm", "SuperSkrull", "Sentinel",
+    "X23", "Nova", "RRaccoon", "GhostRider", "IronFist", "DrStrange", "HawkEye",
+};
+
+// Paths for the icon, avatar and face ranges, built on first use.
+TexInfo g_generated[TEX_COUNT - TEX_ICON_FIRST];
+char g_generatedPaths[TEX_COUNT - TEX_ICON_FIRST][64];
+bool g_generatedReady = false;
+
+void BuildGenerated()
+{
+    for (int i = 0; i < TEX_COUNT - TEX_ICON_FIRST; ++i) {
+        if (i < kLicenseIcons)
+            snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
+                     "ui\\lic\\lic_user_i\\lic_user_i%03d_BM_HQ_NOMIP", i);
+        else if (i < kLicenseIcons + kAvatarSlots)
+            snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
+                     "ui\\lic\\lic_flag_i\\lic_flag_%s_BM_HQ_NOMIP",
+                     kAvatarHosts[i - kLicenseIcons]);
+        else {
+            const int face = i - kLicenseIcons - kAvatarSlots;
+            snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
+                     "ui\\chs\\chs_face_a\\chs_cs_f\\f_%s%02d_BM_HQ_NOMIP",
+                     kFaceNames[face / 8], face % 8);
+            g_generated[i] = TexInfo{g_generatedPaths[i], 128, 128, ARC_LOOSE, false};
+            continue;
+        }
+        g_generated[i] = TexInfo{g_generatedPaths[i], 64, 64, ARC_LICENSE, false};
+    }
+    g_generatedReady = true;
+}
 
 // Advance widths for U+0020..U+007E, copied from the fonts' FSD metric tables
 // (ui\font\nrodinpro and ui\font\bada_b). Glyph index is codepoint - 0x20.
@@ -153,15 +151,31 @@ float GlyphWidth(const char* text, size_t length, Font font)
 
 } // namespace
 
+Tex LicenseIcon(int number)
+{
+    if (number < 0 || number >= kLicenseIcons) return TEX_USER_ICON;
+    return static_cast<Tex>(TEX_ICON_FIRST + number);
+}
+
 Tex CharacterIcon(int32_t characterId)
 {
     if (characterId < 1 || characterId > 51) return TEX_USER_ICON;
-    return static_cast<Tex>(TEX_CHAR_FIRST + characterId - 1);
+    return LicenseIcon(kCharacterIcon[characterId - 1]);
+}
+
+Tex CharacterFace(int32_t characterId, int color)
+{
+    if (characterId < 1 || characterId > 50) return TEX_USER_ICON;
+    if (color < 0 || color > 7) color = 0;
+    return static_cast<Tex>(TEX_FACE_FIRST + (characterId - 1) * 8 + color);
 }
 
 const TexInfo& GetTexInfo(Tex tex)
 {
-    return kTextures[tex < TEX_COUNT ? tex : TEX_WHITE];
+    if (tex < TEX_ICON_FIRST) return kTextures[tex];
+    if (tex >= TEX_COUNT) return kTextures[TEX_WHITE];
+    if (!g_generatedReady) BuildGenerated();
+    return g_generated[tex - TEX_ICON_FIRST];
 }
 
 float TextWidth(const char* utf8, Font font)

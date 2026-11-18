@@ -28,6 +28,9 @@ void Native_Shutdown();
 // already destroyed the units (e.g. the title area re-ran sUnit::killAll).
 void Native_Invalidate();
 bool Native_IsReady();
+// Texture showing a Steam user's profile picture; the default player icon
+// until it is available. Game thread, while the backend is up.
+Tex Native_AvatarTex(uint64_t steamId);
 
 // Merged pad + keyboard menu input with edge detection and direction repeat.
 // textActive routes typed characters to Input::typed and suppresses the

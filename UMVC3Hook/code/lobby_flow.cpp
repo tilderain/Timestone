@@ -322,6 +322,8 @@ UiPrefs LoadPrefs()
 
     prefs.presetIndex = GetPrivateProfileIntA("Lobby", "Preset", -1, path);
     if (prefs.presetIndex < -1 || prefs.presetIndex > 2) prefs.presetIndex = -1;
+    prefs.icon = GetPrivateProfileIntA("Lobby", "Icon", lobby::kIconSteam, path);
+    if (prefs.icon < lobby::kIconSteam || prefs.icon > lobby::kIconMax) prefs.icon = lobby::kIconSteam;
     GetPrivateProfileStringA("Lobby", "RoomName", "", prefs.create.name,
                              sizeof(prefs.create.name), path);
     prefs.create.maxMembers = GetPrivateProfileIntA("Lobby", "RoomSize", kMaxMembers, path);
@@ -349,6 +351,7 @@ void SavePrefs(const UiPrefs& prefs)
     ConnectRoster_Save(path, g_rosterPrefs);
     const IniSafe_Entry entries[] = {
         {"Lobby", "Preset", std::to_string(prefs.presetIndex)},
+        {"Lobby", "Icon", std::to_string(prefs.icon)},
         {"Lobby", "RoomName", prefs.create.name},
         {"Lobby", "RoomSize", std::to_string(prefs.create.maxMembers)},
         {"Lobby", "RoomSlots", std::to_string(prefs.create.slotCount)},

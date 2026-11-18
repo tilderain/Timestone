@@ -44,7 +44,7 @@ constexpr Uv kFullUv{0.0f, 0.0f, 1.0f, 1.0f};
 
 // Native texture resources. Every entry is an existing game asset; nothing is
 // shipped by the plugin. The archive column says which .arc must be resident.
-enum Tex : uint8_t {
+enum Tex : uint16_t {
     TEX_WHITE,           // 1x1-style white for flat fills
     TEX_TITLE_BAR,       // ga_net_waku_a   1024x64 blue gradient bar
     TEX_PANEL_DARK,      // ga_net_waku_f   dark translucent panel (9-slice)
@@ -77,10 +77,23 @@ enum Tex : uint8_t {
     TEX_YELLOW_BAR,      // ga_cmn_bar      yellow accent bar
     TEX_PAD_GLYPHS,      // mai_hlp03       controller button glyphs
     TEX_KEY_GLYPHS,      // mai_hlp04       keyboard key glyphs
-    // One portrait per character, in character-id order (id 1 first): the
-    // license card's icon set, ui\lic\lic_user_i. See CharacterIcon.
-    TEX_CHAR_FIRST,
-    TEX_CHAR_LAST = TEX_CHAR_FIRST + 50,
+    // The license card's icon set, ui\lic\lic_user_i000..239: the icons a
+    // player can pick, among them one portrait per character. See
+    // LicenseIcon and CharacterIcon.
+    TEX_ICON_FIRST,
+    TEX_ICON_LAST = TEX_ICON_FIRST + 239,
+    // Steam profile pictures. Each slot is a country flag texture (same size
+    // and format as the icons, never drawn by the lobby) whose pixels the
+    // plugin replaces with a room member's picture while the lobby is up.
+    // Slots are handed out by the backend; the screens get one through
+    // RoomService::AvatarTex.
+    TEX_AVATAR_FIRST,
+    TEX_AVATAR_LAST = TEX_AVATAR_FIRST + 15,
+    // Character select faces, 128x128: one per character (id 1..50) and
+    // color (0..7), loose files under ui\chs\chs_face_a\chs_cs_f. See
+    // CharacterFace.
+    TEX_FACE_FIRST,
+    TEX_FACE_LAST = TEX_FACE_FIRST + 50 * 8 - 1,
     TEX_COUNT,
 };
 
@@ -89,6 +102,7 @@ enum Archive : uint8_t {
     ARC_NETROOM,  // ui\netroom  - loaded by the lobby itself
     ARC_MAINMENU, // ui\mnmain   - resident while the title area is alive
     ARC_LICENSE,  // ui\lic      - requested by the lobby when a portrait is first drawn
+    ARC_LOOSE,    // a file of its own on disk, read when first drawn
 };
 
 struct TexInfo {
@@ -102,8 +116,22 @@ struct TexInfo {
 };
 
 const TexInfo& GetTexInfo(Tex tex);
+constexpr int kLicenseIcons = TEX_ICON_LAST - TEX_ICON_FIRST + 1;
+constexpr int kAvatarSlots = TEX_AVATAR_LAST - TEX_AVATAR_FIRST + 1;
+// License icon by number (0..239); the default player icon otherwise.
+Tex LicenseIcon(int number);
 // Portrait for a character id (1..51); the default player icon otherwise.
 Tex CharacterIcon(int32_t characterId);
+
+// Character select face for a character id (1..50) in one of its colors;
+// colors past the eight that have art show the first. The default player
+// icon for anything else.
+Tex CharacterFace(int32_t characterId, int color);
+
+// A player's lobby icon as published to the room: kIconSteam for their Steam
+// profile picture, otherwise a license icon's number + 1.
+constexpr int kIconSteam = 0;
+constexpr int kIconMax = kLicenseIcons;
 
 // The game ships five fonts; these two are the ones menus use.
 enum Font : uint8_t {

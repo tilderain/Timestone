@@ -109,7 +109,8 @@ int32_t CharacterId(int index) { return index + 1; }
 const char* CharacterName(int32_t id) { return id >= 1 && id <= 50 ? kNames[id] : "?"; }
 const char* AssistName(int32_t, int assist)
 {
-    static const char* const names[] = {"Shoryuken", "Hadoken", "Tatsumaki Senpukyaku"};
+    // The last is the longest name in the game, to show it is never cut.
+    static const char* const names[] = {"Shoryuken", "Hadoken", "ROLLING BUCKLER (ROLLING SLIDE)"};
     return names[assist % 3];
 }
 int ColorCount(int32_t) { return 6; }
@@ -195,6 +196,12 @@ public:
     {
         if (Member* local = Local()) local->team = team;
     }
+    void SetIcon(int icon) override
+    {
+        if (Member* local = Local()) local->icon = static_cast<int16_t>(icon);
+    }
+    // No Steam here: a profile picture shows as the default player icon.
+    Tex AvatarTex(uint64_t) const override { return TEX_USER_ICON; }
     void AcceptMatch() override
     {
         if (Member* local = Local()) local->accepted = true;
@@ -264,6 +271,8 @@ public:
         member.health[0] = member.health[1] = member.health[2] = kHealthUnknown;
         member.pingMs = static_cast<int16_t>(20 + id * 23 % 190);
         Preset(static_cast<int>(id % 3), &member.team);
+        // Every other member has picked a game icon instead of a Steam picture.
+        member.icon = static_cast<int16_t>(id % 2 ? kIconSteam : 40 + id * 7 % 190);
         return member;
     }
     void Seat(int memberIndex, int slot, int side, bool ready, MemberStatus status)
@@ -322,6 +331,9 @@ SearchResult MakeResult(uint64_t id, const char* name, const char* host, int mem
     result.id = id;
     snprintf(result.name, sizeof(result.name), "%s", name);
     snprintf(result.host, sizeof(result.host), "%s", host);
+    // Every other host has picked a game icon instead of a Steam picture.
+    result.hostId = id;
+    result.hostIcon = static_cast<int16_t>(id % 2 ? kIconSteam : 30 + id * 11 % 200);
     result.members = members;
     result.maxMembers = maxMembers;
     result.slotCount = 2;
@@ -615,6 +627,19 @@ int main(int argc, char** argv)
         ui.Update(Press(&Input::confirm));
         Settle(ui, 2);
         ok &= Capture(ui, directory, "team_characters_anchor");
+        ui.Update(Press(&Input::cancel));
+        for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down)); // ICON row
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_icon");
+        ui.Update(Press(&Input::confirm)); // icon grid
+        ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::down));
+        for (int i = 0; i < 5; ++i) ui.Update(Press(&Input::right));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_icon_list");
+        ui.Update(Press(&Input::confirm)); // pick a portrait
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_icon_picked");
     }
     {   // Notice modal.
         FakeService service;

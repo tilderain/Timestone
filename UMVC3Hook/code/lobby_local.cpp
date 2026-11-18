@@ -21,7 +21,7 @@ namespace {
 
 constexpr uint32_t kMagic = 0x544C4C33; // layout version; bump on any change
 constexpr int kMaxMembers = 8;
-constexpr int kMaxRoomKeys = 12;
+constexpr int kMaxRoomKeys = 16;
 constexpr int kMaxMemberKeys = 4;
 constexpr int kKeySize = 16;
 constexpr int kRoomValueSize = 1280; // the ban list is the longest value

@@ -181,6 +181,18 @@ def extract(game_dir, cache):
                 extension = '.sdl' if type_hash == TYPE_SDL else '.fsd'
                 open(os.path.join(cache, base + extension), 'wb').write(payload)
                 counts['sdl' if type_hash == TYPE_SDL else 'fsd'] += 1
+    # Character select faces are loose TEX files, one per character and color.
+    faces = os.path.join(ui_dir, 'chs', 'chs_face_a', 'chs_cs_f')
+    if os.path.isdir(faces):
+        for name in sorted(os.listdir(faces)):
+            if not name.endswith('_BM_HQ_NOMIP.tex'):
+                continue
+            try:
+                image = tex_decode(open(os.path.join(faces, name), 'rb').read())
+                image.save(os.path.join(cache, name[:-4] + '.png'))
+                counts['png'] += 1
+            except ValueError as error:
+                print('skip %s: %s' % (name, error))
     print('extracted %(png)d textures, %(sdl)d layouts, %(fsd)d font metric tables' % counts,
           'to', os.path.abspath(cache))
 
