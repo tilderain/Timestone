@@ -2,9 +2,9 @@ Timestone (MVC3 Rollback) :steamhappy:
 
 # About
 
-This is a work in progress rollback mod for UMVC3. The current code right now is a huge prototype with many outdated assumptions and duct taped hacks to keep this shit still running somehow. It was made under the goal of "Get this shit working as fast as possible" while many parts of the umvc3 engine were still unknown. It currently uses a traditional object save restore approach rather than tracking modified Windows memory pages with the windows api. The goal is to restore only the minimal game state that is needed for rollback, keeping snapshot and resim costs small and predictable. Whether or not that performs better than a heavily optimized dirty page approach remains to be seen ... but I have hopes that it will
+This is a work in progress rollback mod for UMVC3. 
 
-Timestone currently has semi functional rollback/netplay but is not considered finished or tournament-ready at all. I would like to finish the rollback system (with a delayed shot / effect free system and state restore), and preferably transfer the netplay prototype code to something like GekkoNet. Don't forget about the UI and lobbies.
+Timestone currently has semi functional rollback/netplay but is not considered finished or tournament-ready.
 
 The current research of MVC3 (in a Ghidra DB) made throughout this project will be made publically available later, but please contact me on Discord if you are going to contribute and want a copy.
 
