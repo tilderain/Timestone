@@ -2113,7 +2113,7 @@ void FrameStepper_Draw()
             if (statusHudMode == 1) {
                 ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
                 ImGui::TextColored(color, "FPS %.0f", GetGameUpdatesPerSecond(currentFrame));
-                ImGui::TextColored(color, "%dD %.1fR", curDelay, curRollback);
+                ImGui::TextColored(color, "%dD %.0fR", curDelay, curRollback);
                 const ImVec2 pos = ImGui::GetWindowPos();
                 warningPos = ImVec2(pos.x, pos.y + ImGui::GetWindowSize().y + 4.0f);
             } else {
@@ -2137,7 +2137,7 @@ void FrameStepper_Draw()
                     ImGui::TextColored(color, "Jitter: N/A");
                 if(GetLaunchOption() == LAUNCH_DUAL_TRAINING)
                     ImGui::TextColored(color, "Frame: %d", currentFrame);
-                ImGui::TextColored(color, "Delay: %d  Rollback: %.1f", curDelay, curRollback);
+                ImGui::TextColored(color, "Delay: %d  Rollback: %.0f", curDelay, curRollback);
 
                 const ImGuiStyle& style = ImGui::GetStyle();
                 const float controlsWidth = ImGui::CalcTextSize("D-").x +
