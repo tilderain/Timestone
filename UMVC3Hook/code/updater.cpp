@@ -551,7 +551,7 @@ DWORD WINAPI DownloadThread(void*)
     DeleteFileA(paths.staged.c_str());
 
     char stage[160];
-    snprintf(stage, sizeof(stage), "Downloading Timestone %s from tilderain/Timestone", tag.c_str());
+    snprintf(stage, sizeof(stage), "Downloading Timestone %s from Github", tag.c_str());
     SetStage(stage);
     g_downloadStartedAt = GetTickCount64();
     if (!Download(url, paths.download)) {

@@ -402,7 +402,7 @@ void LobbyUi::OfferUpdate(const char* installed, const char* available)
 {
     snprintf(updateOffer_, sizeof(updateOffer_),
              "A Timestone update is available.\nInstalled: %s     Latest: %s\n"
-             "Download and install it now?\nThe game restarts once it is ready.",
+             "Download and install it now?",
              installed ? installed : "?", available ? available : "?");
     confirm_ = Confirm::Update;
     confirmCursor_ = 0; // default to "Yes"
