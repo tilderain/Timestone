@@ -204,6 +204,8 @@ public:
     // player); the default player icon until one is available.
     virtual Tex AvatarTex(uint64_t memberId) const = 0;
     virtual void InviteFriends() = 0;
+    // Puts a link that joins the room on the clipboard, to paste to anyone.
+    virtual void CopyLobbyLink() = 0;
     // Host only: the room's music, a lobby_music.h track id. Everyone in the
     // room sees it in RoomState::music.
     virtual void SetMusic(int32_t trackId) = 0;

@@ -65,6 +65,7 @@ public:
     void SetIcon(int icon) override;
     Tex AvatarTex(uint64_t memberId) const override;
     void InviteFriends() override;
+    void CopyLobbyLink() override;
     void SetMusic(int32_t trackId) override;
     void ViewProfile(uint64_t memberId) override;
     void Kick(uint64_t memberId) override;
@@ -97,6 +98,11 @@ public:
     // their own, can see it.
     void SetUpstream(uint64_t memberId);
     void PostSystemLine(const char* text);
+    // A Steam invite accepted while in another room moves the player to the
+    // invited one. While held (a match is starting or running) the move
+    // waits, and RoomChangeWaiting says that it does.
+    void HoldRoomChange(bool hold) { holdRoomChange_ = hold; }
+    bool RoomChangeWaiting() const { return holdRoomChange_ && invitedRoom_ != 0; }
 
 private:
     struct LocalState {
@@ -139,6 +145,8 @@ private:
     LocalState local_;
     bool joining_ = false;
     bool creating_ = false;
+    uint64_t invitedRoom_ = 0; // room to move to (see HoldRoomChange)
+    bool holdRoomChange_ = false;
     bool publishedOnce_ = false;
     bool liveAdvertised_ = false;
     // Host icon last written to the lobby's data, and for which room.

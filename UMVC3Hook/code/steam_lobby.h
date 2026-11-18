@@ -47,6 +47,11 @@ bool SteamLobby_ArePingEstimatesAvailable();
 bool SteamLobby_TakeResultsChanged();
 bool SteamLobby_TakeVersionMismatch(char* message, size_t messageSize);
 bool SteamLobby_TakeReplacementJoin(uint64_t* lobbyId);
+// A lobby the player was invited to (the game was started from the invite):
+// joined by the next SteamLobby_Pump that is free to, like an invite accepted
+// while the game runs. QueuedJoin is that lobby until the pump has taken it.
+void SteamLobby_QueueJoin(uint64_t lobbyId);
+uint64_t SteamLobby_QueuedJoin();
 bool SteamLobby_ResetHostPeer();
 bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
                                    bool* outIsHost);
@@ -87,7 +92,11 @@ int SteamRoom_EstimateMemberPing(uint64_t memberId);
 bool SteamRoom_SendChat(const void* data, int size);
 // Returns the next received lobby chat entry (including our own), or false.
 bool SteamRoom_PollChat(uint64_t* sender, char* buffer, int capacity, int* size);
-void SteamRoom_InviteFriends();
+// Opens Steam's invite dialog for the room. False if the overlay is unavailable.
+bool SteamRoom_InviteFriends();
+// "steam://joinlobby/..." link to the room, as the launcher's Copy Lobby Link
+// gives for its lobby. False outside a room.
+bool SteamRoom_GetJoinLink(char* link, size_t capacity);
 // Opens the Steam overlay on a player's profile. False if it is unavailable.
 bool SteamRoom_ViewProfile(uint64_t memberId);
 // Data of any lobby Steam has told us about (search results, the current room).

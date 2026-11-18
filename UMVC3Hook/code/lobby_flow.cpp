@@ -942,6 +942,10 @@ void SetPhase(Phase phase)
 {
     g_phase = phase;
     g_phaseStartTick = GetTickCount64();
+    // An accepted invite does not pull the room out from under a match.
+    if (g_service)
+        g_service->HoldRoomChange(phase == Phase::Launching || phase == Phase::InMatch ||
+                                  phase == Phase::Returning);
 }
 
 void DropMatchConnection()
@@ -1452,9 +1456,11 @@ void EnsureObjects()
         if (const char* invite = strstr(GetCommandLineA(), "+connect_lobby")) {
             const uint64_t lobbyId = strtoull(invite + strlen("+connect_lobby"), nullptr, 10);
             if (lobbyId) {
+                // Queued, not joined here: Steam may not be up yet, and the
+                // join then waits for it instead of being lost.
                 HookLog("LobbyFlow: joining invited lobby %llu\n",
                         static_cast<unsigned long long>(lobbyId));
-                g_service->Join(lobbyId);
+                SteamLobby_QueueJoin(lobbyId);
             }
         }
     }
@@ -1876,6 +1882,18 @@ bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea)
 
     FollowActivePad();
 
+    // An invite accepted on the main menu opens the lobby as Online does.
+    // Once per invite: one that cannot be joined (Steam is down) must not
+    // send the player back to the lobby every time they leave it.
+    static uint64_t openedFor = 0;
+    const uint64_t invited = SteamLobby_QueuedJoin();
+    if (invited && invited != openedFor && !g_onlineChosen) {
+        HookLog("LobbyFlow: invite accepted on the main menu; opening the lobby\n");
+        openedFor = invited;
+        g_onlineChosen = true;
+        StartBlack();
+    }
+
     // "Online" on the main menu: switch once the fade has covered the screen.
     if (g_onlineChosen &&
         GetTickCount64() - g_fadeOutStart.load(std::memory_order_relaxed) >= kOnlineFadeOutMs)
@@ -2035,6 +2053,13 @@ void LobbyFlow_GameTick()
         if (Netplay_TakePeerDisconnected())
             LobbyFlow_RequestReturnToLobby(Netplay_PeerLeftByChoice()
                 ? "Your opponent left the match." : "Connection to opponent has been lost.");
+    }
+    // An invite to another room was accepted: leave the match as if from its
+    // menu; the room is changed once back at the title.
+    if (g_service && g_service->RoomChangeWaiting() &&
+        !g_returnRequested.load(std::memory_order_relaxed)) {
+        HookLog("LobbyFlow: invite accepted during the match; leaving it\n");
+        LobbyFlow_RequestLeaveMatch();
     }
     if (!g_returnRequested.exchange(false, std::memory_order_acq_rel)) return;
     // After a decided set the other player leaving is the normal ending, and

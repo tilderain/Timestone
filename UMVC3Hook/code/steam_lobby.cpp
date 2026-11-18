@@ -76,6 +76,7 @@ struct SteamAPI {
     void* (*GetUserInterface)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
     uint64_t (*GetSteamID)(void*) = nullptr;
     void (*ActivateInviteDialog)(void*, uint64_t) = nullptr;
+    bool (*IsOverlayEnabled)(void*) = nullptr;
     bool (*SetRichPresence)(void*, const char*, const char*) = nullptr;
     void (*SetPlayedWith)(void*, uint64_t) = nullptr;
 
@@ -117,6 +118,7 @@ bool g_isHost = false;
 // peer connection; one is opened on request between the two seated players.
 bool g_roomMode = false;
 int g_roomCreateSlots = 2;
+bool g_roomCreatePrivate = false;
 uint64_t g_roomPeer = 0;
 bool g_roomPeerFailed = false;
 uint64_t g_localSteamId = 0;
@@ -230,8 +232,13 @@ public:
     {
         if (!param) return;
         auto* request = static_cast<GameRichPresenceJoinRequestedCompat_t*>(param);
+        // The text is whatever the other player's game published: never
+        // read past the field, whether or not it is terminated.
+        char connect[sizeof(request->m_rgchConnect) + 1];
+        memcpy(connect, request->m_rgchConnect, sizeof(request->m_rgchConnect));
+        connect[sizeof(request->m_rgchConnect)] = '\0';
         uint64_t lobbyId = 0;
-        if (ParseLobbyConnectString(request->m_rgchConnect, lobbyId))
+        if (ParseLobbyConnectString(connect, lobbyId))
             QueueJoinLobby(lobbyId);
     }
 
@@ -409,6 +416,7 @@ bool ResolveExports()
     ResolveOptional(g_api.GetSteamID, "SteamAPI_ISteamUser_GetSteamID");
     ResolveOptional(g_api.ActivateInviteDialog,
                     "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog");
+    ResolveOptional(g_api.IsOverlayEnabled, "SteamAPI_ISteamUtils_IsOverlayEnabled");
     ResolveOptional(g_api.SetRichPresence, "SteamAPI_ISteamFriends_SetRichPresence");
     ResolveOptional(g_api.ActivateOverlayToUser,
                     "SteamAPI_ISteamFriends_ActivateGameOverlayToUser");
@@ -471,7 +479,11 @@ void PublishLobbyRichPresence()
              static_cast<unsigned long long>(g_lobbyId));
     SetRichPresence("status", g_roomMode ? "In a Timestone lobby"
                                          : "Waiting in Timestone launch menu");
-    SetRichPresence("connect", connect);
+    // A private room is reached by invitation only: no "Join Game" on the
+    // friends list for it. An invitation carries the lobby by itself.
+    const char* isPrivate = g_roomMode ? g_api.GetLobbyData(g_matchmaking, g_lobbyId, "private")
+                                       : nullptr;
+    SetRichPresence("connect", isPrivate && isPrivate[0] == '1' ? "" : connect);
 }
 
 void ClearLobbyRichPresence()
@@ -1233,6 +1245,8 @@ void SteamLobby_Pump()
                     char slots[8];
                     snprintf(slots, sizeof(slots), "%d", g_roomCreateSlots);
                     g_api.SetLobbyData(g_matchmaking, g_lobbyId, "slots", slots);
+                    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "private",
+                                       g_roomCreatePrivate ? "1" : "0");
                     // Fallback identity when ISteamUser is unavailable: the
                     // creator of a lobby is its first owner.
                     if (!g_localSteamId)
@@ -1606,7 +1620,9 @@ void SteamLobby_Shutdown(bool preserveConnection)
 void SteamLobby_EndSession()
 {
     if (LocalLobby_Enabled()) { LocalLobby_DisconnectPeer(); return; }
-    if (g_roomMode && g_lobbyId)
+    // Room mode never shuts Steam down, in a room or out of one: that would
+    // also stop listening for invitations until the next search or join.
+    if (g_roomMode)
         SteamRoom_DisconnectPeer();
     else
         SteamLobby_Shutdown(false);
@@ -1706,6 +1722,7 @@ void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const 
     if (maxMembers < 2) maxMembers = 2;
     if (maxMembers > 8) maxMembers = 8;
     g_roomCreateSlots = slotCount < 1 ? 1 : slotCount;
+    g_roomCreatePrivate = type == SteamLobbyType::Private;
     snprintf(g_lobbyName, sizeof(g_lobbyName), "%s", name ? name : "");
     g_pendingHandle = g_api.CreateLobby(g_matchmaking, static_cast<int>(type), maxMembers);
     g_pendingCall = PendingCall::Create;
@@ -1837,11 +1854,38 @@ bool SteamRoom_PollChat(uint64_t* sender, char* buffer, int capacity, int* size)
     return false;
 }
 
-void SteamRoom_InviteFriends()
+bool SteamRoom_InviteFriends()
+{
+    if (LocalLobby_Enabled()) return true;
+    if (!SteamRoom_IsActive() || !g_friends || !g_api.ActivateInviteDialog) return false;
+    g_api.ActivateInviteDialog(g_friends, g_lobbyId);
+    // Without the overlay the request above does nothing at all.
+    return !g_api.IsOverlayEnabled || !g_utils || g_api.IsOverlayEnabled(g_utils);
+}
+
+void SteamLobby_QueueJoin(uint64_t lobbyId)
 {
     if (LocalLobby_Enabled()) return;
-    if (SteamRoom_IsActive() && g_friends && g_api.ActivateInviteDialog)
-        g_api.ActivateInviteDialog(g_friends, g_lobbyId);
+    QueueJoinLobby(lobbyId);
+}
+
+uint64_t SteamLobby_QueuedJoin()
+{
+    if (LocalLobby_Enabled()) return 0;
+    return g_pendingJoinLobby.load(std::memory_order_acquire);
+}
+
+bool SteamRoom_GetJoinLink(char* link, size_t capacity)
+{
+    if (!link || capacity == 0) return false;
+    link[0] = '\0';
+    if (LocalLobby_Enabled() || !SteamRoom_IsActive()) return false;
+    const uint64_t owner = g_api.GetLobbyOwner(g_matchmaking, g_lobbyId);
+    if (!owner) return false;
+    const int length = snprintf(link, capacity, "steam://joinlobby/357190/%llu/%llu",
+        static_cast<unsigned long long>(g_lobbyId),
+        static_cast<unsigned long long>(owner));
+    return length > 0 && static_cast<size_t>(length) < capacity;
 }
 
 bool SteamRoom_ViewProfile(uint64_t memberId)

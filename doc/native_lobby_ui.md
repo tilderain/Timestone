@@ -409,6 +409,41 @@ Only the lobby owner can write lobby data, so only the host can ban. Nothing
 removes the player from the Steam lobby itself: a modified client can stay in
 it and read its chat, and still counts towards the member limit.
 
+## Steam invites
+
+Read from the code and Ghidra on 2026-11-18; **not yet run with two Steam
+accounts** (the test build has no Steam, and no log on record shows an invite).
+
+Sending: INVITE FRIENDS opens Steam's invite dialog for the lobby
+(`SteamRoom_InviteFriends`); a notice says so if Steam reports the overlay off.
+Every room member also publishes `connect = "+connect_lobby <id>"` as rich
+presence, which is what puts "Join Game" on the friends list, except in a
+private room (lobby data `private = 1`): that one is reached by invitation only.
+
+Receiving, by where the player is:
+
+| Where | What happens |
+| --- | --- |
+| Game not running | Steam starts it with `+connect_lobby <id>`; `EnsureObjects` queues the lobby (`SteamLobby_QueueJoin`) and the first lobby frame joins it. |
+| Lobby menus | The callback (`GameLobbyJoinRequested` 333, or `GameRichPresenceJoinRequested` 337 for "Join Game") queues the lobby; `SteamLobby_Pump` joins it. |
+| In another room | `SteamLobby_Join` hands the lobby back as a replacement; `SteamRoomService::Pump` leaves the room and joins. |
+| Match starting or running, or watching one | The move is held (`HoldRoomChange`, set from `SetPhase`); `LobbyFlow_GameTick` leaves the match as its menu would and the move is made back at the title. |
+| Main menu (lobby released) | `LobbyFlow_ReleasedTitleTick` opens the lobby as Online does, once per invite. |
+| Offline modes, training | Nothing pumps the lobby: the invite stays queued and is joined when the lobby is next opened. |
+
+A failed join (full, gone, wrong version) shows the same notices as a join
+from the list. A banned player gets in and is removed by the room refresh.
+
+The game listens too: `MtNetMediator` registers its own handler for 333
+(`MtNetMediator__onGameLobbyJoinRequested` `0x1404DA0A0`) and parses
+`+connect_lobby` in its constructor. It only records the lobby and asks Steam
+for its data. What would act on it (the MtNet context move at `0x140509174`,
+then the join or error dialog in `sMvc3Guide::move`) sits under
+`nNet::sComponent::move`, which the mod NOPs at startup
+(`native_network_disable.md`), so the game never reacts to an invite of ours.
+If that NOP is ever lifted, a Timestone lobby fails the game's check (no
+`OwnerId` in its data) and the game would raise its "could not join" dialog.
+
 ## Pre-match prompts
 
 There is no ready button on the room screen. Once both seats of a match slot

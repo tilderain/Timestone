@@ -241,6 +241,7 @@ public:
         if (Member* local = Local()) local->watchSlot = -1;
     }
     void InviteFriends() override {}
+    void CopyLobbyLink() override {}
     void SetMusic(int32_t trackId) override { room.music = trackId; }
     void ViewProfile(uint64_t) override {}
     void Kick(uint64_t) override {}

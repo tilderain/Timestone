@@ -113,8 +113,9 @@ constexpr int kTopCount = 4;
 
 const char* const kSlotMenuItems[] = {"JOIN QUEUE & SPECTATE", "JOIN QUEUE", "SPECTATE ONLY"};
 constexpr int kSlotMenuCount = 3;
-const char* const kRoomMenuItems[] = {"TEAM SETUP", "LOBBY MUSIC", "INVITE FRIENDS", "LEAVE LOBBY"};
-constexpr int kRoomMenuCount = 4;
+const char* const kRoomMenuItems[] = {"TEAM SETUP", "LOBBY MUSIC", "INVITE FRIENDS",
+                                       "COPY LOBBY LINK", "LEAVE LOBBY"};
+constexpr int kRoomMenuCount = 5;
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
 constexpr int kCharGridColumns = 10; // faces across in the team screen's character grid
 // The art in every select-screen face texture (128x128) is the same 120x84
@@ -483,7 +484,9 @@ void LobbyUi::SyncWithService()
         if (screen_ == Screen::Room || (screen_ == Screen::Team && teamReturn_ == Screen::Room)) {
             GoTo(Screen::Top);
             // An error from the service (e.g. removed by the host) says more.
-            if (!leftByChoice_ && !notice_[0]) ShowNotice("Lobby has been closed.");
+            // Nor is it closed when an accepted invite is moving us on.
+            if (!leftByChoice_ && !notice_[0] && service_.Busy() != RoomBusy::Joining)
+                ShowNotice("Lobby has been closed.");
         }
         leftByChoice_ = false;
     }
@@ -1259,6 +1262,9 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
     case 2:
         service_.InviteFriends();
         break;
+    case 3:
+        service_.CopyLobbyLink();
+        break;
     default:
         confirm_ = Confirm::LeaveRoom;
         confirmCursor_ = 1;
@@ -1991,9 +1997,9 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
     const char* const help[CREATE_ROWS] = {
         "Set your lobby title.",
         "Set the maximum number of players in your lobby.",
-        "Setups let several pairs fight at the same time.",
+        "How many tables are in the lobby.",
         "Choose who can find and join this lobby.",
-        "Games needed to win a set. Endless: rematch until someone leaves.",
+        "Games needed to win a set. Endless is rematch until someone leaves.",
         "Who makes way for the next player in line when a set ends.",
         "Choose the music everyone in the lobby hears.",
         "Create a lobby.",

@@ -274,7 +274,30 @@ void SteamRoomService::Leave()
 
 void SteamRoomService::InviteFriends()
 {
-    SteamRoom_InviteFriends();
+    if (!SteamRoom_InviteFriends())
+        SetError("The Steam overlay is not available.\nInvite from your Steam friends list instead.");
+}
+
+void SteamRoomService::CopyLobbyLink()
+{
+    char link[128] = {};
+    bool copied = false;
+    if (SteamRoom_GetJoinLink(link, sizeof(link))) {
+        const size_t size = strlen(link) + 1;
+        if (HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, size)) {
+            if (void* data = GlobalLock(memory)) {
+                memcpy(data, link, size);
+                GlobalUnlock(memory);
+                if (OpenClipboard(nullptr)) {
+                    copied = EmptyClipboard() && SetClipboardData(CF_TEXT, memory) != nullptr;
+                    CloseClipboard();
+                }
+            }
+            if (!copied) GlobalFree(memory); // the clipboard owns it otherwise
+        }
+    }
+    if (copied) PostSystemLine("Lobby link copied.");
+    else SetError("Could not copy the lobby link.\nPlease try again.");
 }
 
 // The choice lives in the lobby's own data, so Steam delivers it to everyone
@@ -949,13 +972,23 @@ void SteamRoomService::Pump()
         SetError(mismatch);
         joining_ = false;
     }
+    // A Steam invite accepted while we were in another room. Never under a
+    // match: the room would take the match connection down with it, so the
+    // match is left first (lobby_flow.cpp) and the move made after.
     uint64_t replacement = 0;
-    if (SteamLobby_TakeReplacementJoin(&replacement)) {
-        // A Steam invite arrived while we were in another room.
+    if (SteamLobby_TakeReplacementJoin(&replacement)) invitedRoom_ = replacement;
+    if (invitedRoom_ && !holdRoomChange_) {
+        HookLog("LobbyRoom: moving to invited room %llu\n",
+                static_cast<unsigned long long>(invitedRoom_));
         Leave();
-        joining_ = true;
-        SteamLobby_Join(replacement);
+        SteamLobby_Join(invitedRoom_);
+        // Steam was busy with another request: joined once it is free.
+        if (SteamLobby_GetPendingKind() != 3) SteamLobby_QueueJoin(invitedRoom_);
+        invitedRoom_ = 0;
     }
+    // A join Steam started for us (an invite) reports its outcome like one
+    // picked from the list.
+    if (SteamLobby_GetPendingKind() == 3) joining_ = true;
 
     const bool inRoom = SteamRoom_IsActive();
     const bool pending = SteamLobby_GetPendingKind() != 0;
