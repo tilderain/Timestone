@@ -173,13 +173,15 @@ jobs:
           https://discord.gg/BvDNwPzwy4
 
           MAKE SURE YOU HAVE NO MODS INSTALLED WHEN PLAYING THIS
-          Everything is broken, desyncs occassionally, crashes occassionally
 
           To install, extract the contents of Timestone.zip into your marvel folder
 
-          Primary connection method is Steam Lobby, make a lobby or search for lobbies and join. You can use invite to game in Steam, and you can right click join when someone is hosting a lobby.
+          Go to your Marvel 3 install directory, 
+          easiest way is go to Steam, right click Marvel 3, and select Manage -> Browse Local Files.
+          Unzip the contents of Timestone.zip in the marvel folder. You should have all of the Timestone files and the dinput8.dll files in the same area as the umvc3.exe.
+          Have fun getting TAC infinited by dr doom
 
-          There is an issue with BITDEFENDER. Bitdefender WILL crash your game, please add an exclusion for marvel folder / disable it
+          There might be an issue with BITDEFENDER. Bitdefender MAY crash your game, please add an exclusion for marvel folder / disable it
 
 
           # Credits
