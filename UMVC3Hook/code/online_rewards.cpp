@@ -144,8 +144,7 @@ constexpr size_t BATTLE_SETTING_BATTLE_TYPE = 0x34C; // int32
 constexpr size_t GAME_UI_CSS_STATE = 0x5B74;         // int32, selects the PP formula
 constexpr size_t NETWORK_ROOM_TYPE = 0x38;           // int32
 constexpr size_t NETWORK_ROOM_MY_NET_TEAM = 0xBE8;   // int32
-constexpr size_t LICENSE_DATA = 0x58;                // pointer
-constexpr size_t LICENSE_DATA_PLAY_POINT = 0x1C;     // int32, PP total
+constexpr size_t LICENSE_PLAY_POINT = 0x74;          // int32, PP total (inline, not behind a pointer)
 
 constexpr int32_t kBattleTypeLiveOnline = 3;
 // Room type 3 is the 8-player lobby: 0 and 1 are ranked (rank points, ranked
@@ -172,8 +171,7 @@ uint64_t Instance(uintptr_t getter)
 int32_t PlayPointTotal()
 {
     const uint64_t license = Instance(FN_LICENSE_GET_INSTANCE);
-    const uint64_t data = license ? *reinterpret_cast<uint64_t*>(license + LICENSE_DATA) : 0;
-    return data ? *reinterpret_cast<int32_t*>(data + LICENSE_DATA_PLAY_POINT) : 0;
+    return license ? *reinterpret_cast<int32_t*>(license + LICENSE_PLAY_POINT) : 0;
 }
 
 void __fastcall Hook_CommitBattleRewards(uint64_t area)
