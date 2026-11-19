@@ -286,13 +286,26 @@ void DrawValueArrows(const Painter& p, uint32_t frame, float centerX, float y, f
              Uv{1.0f, 0.0f, 0.0f, 1.0f}, A_MC);
 }
 
-void DrawPing(const Painter& p, float x, float y, int pingMs, float scale = 1.0f)
+void DrawPing(const Painter& p, float x, float y, int pingMs, float scale = 1.0f,
+              float width = 94.0f)
 {
     // Six 32px rows; the bars occupy columns 35..222 of the 256px sheet.
-    p.Sprite(TEX_PING, x, y, 94.0f * scale, 16.0f * scale,
+    p.Sprite(TEX_PING, x, y, width * scale, 16.0f * scale,
              Uv{35.0f / 256.0f, (PingLevel(pingMs) * 32 + 4) / 256.0f, 222.0f / 256.0f,
                 (PingLevel(pingMs) * 32 + 28) / 256.0f},
              A_ML);
+}
+
+// Bars narrowed to barsWidth (their height still follows scale), then the
+// ping in ms, right-aligned in numberWidth.
+void DrawPingWithNumber(const Painter& p, float x, float y, int pingMs, float scale,
+                        float barsWidth, float numberWidth, float textScale)
+{
+    DrawPing(p, x, y, pingMs, scale, barsWidth / scale);
+    if (pingMs < 0) return;
+    char text[8];
+    snprintf(text, sizeof(text), "%d", pingMs > 999 ? 999 : pingMs);
+    p.TextShrink(text, x + barsWidth + 4.0f + numberWidth, y, textScale, numberWidth, A_MR, kText);
 }
 
 void TeamSummary(const RosterSource& roster, const Team& team, char* out, size_t size)
@@ -1949,9 +1962,9 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
     p.TextFit(service_.StatusText(), kSafeRight, 70.0f, 0.7f, 620.0f, A_MR, kDim);
 
     p.Label("LOBBY", 150.0f, 122.0f, 0.6f, A_ML, kYellow);
-    p.Label("HOST", 590.0f, 122.0f, 0.6f, A_ML, kYellow);
-    p.Label("PLAYERS", 846.0f, 122.0f, 0.6f, A_ML, kYellow);
-    p.Label("CONNECTION", 1066.0f, 122.0f, 0.6f, A_ML, kYellow);
+    p.Label("HOST", 556.0f, 122.0f, 0.6f, A_ML, kYellow);
+    p.Label("PLAYERS", 812.0f, 122.0f, 0.6f, A_ML, kYellow);
+    p.Label("CONNECTION", 1032.0f, 122.0f, 0.6f, A_ML, kYellow);
 
     const int count = service_.ResultCount();
     const float rowWidth = kSafeRight - kSafeLeft;
@@ -1981,36 +1994,37 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
         r.TextFit(result.name, 152.0f, y, 0.86f, 420.0f, A_ML,
                   result.friendsOnly ? kGreen : kText);
         if (result.friendsOnly) {
-            r.TextFit(result.host, 590.0f, y - 8.0f, 0.74f, 240.0f, A_ML, kDim);
-            r.Text("FRIENDS ONLY", 590.0f, y + 13.0f, 0.46f, A_ML, kGreen);
+            r.TextFit(result.host, 556.0f, y - 8.0f, 0.74f, 240.0f, A_ML, kDim);
+            r.Text("FRIENDS ONLY", 556.0f, y + 13.0f, 0.46f, A_ML, kGreen);
         } else {
-            r.TextFit(result.host, 590.0f, y, 0.74f, 240.0f, A_ML, kDim);
+            r.TextFit(result.host, 556.0f, y, 0.74f, 240.0f, A_ML, kDim);
         }
 
         // One head per seat: host first, then members, then empty seats.
         for (int seat = 0; seat < result.maxMembers && seat < kMaxMembers; ++seat) {
             const int cell = seat == 0 ? 0 : seat < result.members ? 1 : 2;
-            r.Sprite(TEX_MEMBER_ICONS, 846.0f + seat * 19.0f, y, 20.0f, 40.0f,
+            r.Sprite(TEX_MEMBER_ICONS, 812.0f + seat * 19.0f, y, 20.0f, 40.0f,
                      Uv{cell * 0.125f, 0.0f, (cell + 1) * 0.125f, 1.0f}, A_ML);
         }
         char players[16];
         snprintf(players, sizeof(players), "%d/%d", result.members, result.maxMembers);
-        r.Text(players, 1042.0f, y, 0.74f, A_MR,
+        r.Text(players, 1008.0f, y, 0.74f, A_MR,
                result.members >= result.maxMembers ? kRed : kText);
 
         if (!result.compatible) {
             p.Text(result.versionOrder < 0 ? "OLD VERSION" : result.versionOrder > 0 ? "NEW VERSION"
-                                           : "VERSION MISMATCH", 1066.0f, y, 0.5f, A_ML, kRed);
+                                           : "VERSION MISMATCH", 1032.0f, y, 0.5f, A_ML, kRed);
         } else {
-            DrawPing(r, 1066.0f, y - (result.matchInProgress ? 8.0f : 0.0f), result.pingMs);
+            DrawPingWithNumber(r, 1032.0f, y - (result.matchInProgress ? 8.0f : 0.0f), result.pingMs,
+                               1.0f, 50.0f, 36.0f, 0.56f);
             if (result.matchInProgress)
-                r.Text("MATCH IN PROGRESS", 1066.0f, y + 13.0f, 0.46f, A_ML, kYellow);
+                r.Text("MATCH IN PROGRESS", 1032.0f, y + 13.0f, 0.46f, A_ML, kYellow);
         }
         if (result.compatible) {
             char format[12];
             if (result.firstTo == kFirstToEndless) snprintf(format, sizeof(format), "END");
             else snprintf(format, sizeof(format), "FT%d", result.firstTo);
-            r.Text(format, 1176.0f, y - (result.matchInProgress ? 8.0f : 0.0f), 0.6f, A_ML, kDim);
+            r.Text(format, 1136.0f, y - (result.matchInProgress ? 8.0f : 0.0f), 0.6f, A_ML, kDim);
         }
     }
 
@@ -2171,7 +2185,7 @@ void LobbyUi::DrawRoomMembers(Canvas& canvas) const
             snprintf(wait, sizeof(wait), "S%d #%d", member.queueSlot + 1, member.queuePos);
             p.Text(wait, x + 288.0f, cy, 0.56f, A_ML, member.queuePos == 1 ? kCyan : kDim);
         }
-        if (!member.isLocal) DrawPing(p, x + 356.0f, cy, member.pingMs, 0.66f);
+        if (!member.isLocal) DrawPingWithNumber(p, x + 355.0f, cy, member.pingMs, 0.66f, 24.0f, 25.0f, 0.5f);
     }
 }
 
