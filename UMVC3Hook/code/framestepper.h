@@ -11,6 +11,8 @@ void FrameStepper_InitNetplay();
 void FrameStepper_Process();
 void FrameStepper_Draw();
 float FrameStepper_GetStatusHudBottom();
+// The frame stepper has the game paused (F3 then advances a frame).
+bool FrameStepper_IsPaused();
 void FrameStepper_DrawAutoTest();
 void FrameStepper_ShowOpponentDisconnected();
 // In-game lobby: tear down the current netplay match (rollback state, battle

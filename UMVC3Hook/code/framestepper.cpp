@@ -388,6 +388,7 @@ static int KEY_ADVANCE = VK_F3;
 // State
 // ---------------------------------------------------------------------------
 static bool isPaused     = false;
+bool FrameStepper_IsPaused() { return isPaused; }
 static bool advanceFrame = false;
 
 // Frame counter: incremented each time a game frame actually advances while paused

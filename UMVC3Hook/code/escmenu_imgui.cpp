@@ -142,20 +142,31 @@ void EscMenuImGui_Update()
     io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
 
-    // This menu belongs to a running netplay match only. Offline the game's
-    // own pause menu is in charge, as are the lobby and the main menu. It
-    // also closes by itself when the match ends.
-    const bool available = Netplay_IsActive() && !LobbyFlow_IsLobbyVisible();
-    g_available.store(available, std::memory_order_relaxed);
+    // In a netplay match this is the pause menu: Esc or the pad's Start
+    // opens it. Offline the game's own pause menu keeps those, and F3 opens
+    // this one for its settings (not while the frame stepper is paused,
+    // where F3 advances a frame). The lobby and a match ending close it.
+    const bool lobby = LobbyFlow_IsLobbyVisible();
+    const bool netplay = Netplay_IsActive() && !lobby;
+    const bool offline = !Netplay_IsActive() && !lobby;
     const bool padToggle = g_toggleRequested.exchange(false, std::memory_order_acq_rel);
-    if (!available) {
+    static bool wasNetplay = false;
+    if ((!netplay && !offline) || netplay != wasNetplay) {
         g_open = false;
         g_closeRequested = false;
+    }
+    wasNetplay = netplay;
+    // Offline the pad belongs to the game until the menu is open.
+    g_available.store(netplay || (offline && g_open), std::memory_order_relaxed);
+    if (!netplay && !offline) {
         g_openShared.store(false, std::memory_order_release);
         return;
     }
 
-    if (KeyPressed(VK_ESCAPE) || padToggle) {
+    const bool toggle = netplay ? (KeyPressed(VK_ESCAPE) || padToggle)
+        : (KeyPressed(VK_F3) && !FrameStepper_IsPaused()) ||
+          (g_open && padToggle); // not Esc: offline that is the game's own pause
+    if (toggle) {
         if (g_open)
             g_open = false;
         else if (!ChrSelImGui_IsOpen() && !TheMenu->GetActiveState())
