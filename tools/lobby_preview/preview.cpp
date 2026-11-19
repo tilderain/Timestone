@@ -453,6 +453,9 @@ int main(int argc, char** argv)
             MakeResult(17, "Tournament practice", "Ryn", 4, 6, -1),
             MakeResult(18, "overflow row", "anotak", 1, 8, 90),
         };
+        // Friends-only lobbies, one under the cursor and one not.
+        service.results[1].friendsOnly = true;
+        service.results[3].friendsOnly = true;
         LobbyUi ui(service, kRoster, DefaultPrefs());
         Settle(ui);
         ui.Update(Press(&Input::confirm));

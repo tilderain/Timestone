@@ -138,6 +138,7 @@ struct SearchResult {
     int pingMs;        // -1 when not yet estimated
     bool compatible;   // same Timestone protocol version
     bool friendLobby;
+    bool friendsOnly;  // the host made it visible to friends only
     bool matchInProgress;
     int firstTo;
 };

@@ -1414,6 +1414,25 @@ void LobbyUi::UpdateText(const Input& input)
     }
 }
 
+void LobbyUi::RefreshPreset()
+{
+    if (prefs_.presetIndex < 0) return;
+    Team team;
+    if (!roster_.preset || !roster_.preset(prefs_.presetIndex, &team)) {
+        prefs_.presetIndex = -1; // keep the team, as a custom one
+        prefsDirty_ = true;
+        return;
+    }
+    bool same = true;
+    for (int i = 0; i < 3; ++i)
+        same &= team.chars[i] == prefs_.team.chars[i] &&
+                team.assists[i] == prefs_.team.assists[i] &&
+                team.colors[i] == prefs_.team.colors[i];
+    if (same) return;
+    prefs_.team = team;
+    CommitTeam();
+}
+
 void LobbyUi::ApplyPreset(int index)
 {
     Team team;
@@ -1888,8 +1907,11 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
         const Painter r = p.Faded(result.compatible ? 1.0f : 0.5f);
 
         // The parallelogram row plate, pushed to slate so white text reads.
-        r.Box(TEX_SLANT_ROW, kSafeLeft, y - 29.0f, rowWidth, 58.0f,
-              selected ? Color{0.42f, 0.44f, 0.5f, 0.96f} : Color{0.2f, 0.22f, 0.28f, 0.9f});
+        // A friends-only lobby is green: plate, name and a tag by the host.
+        const Color plate = result.friendsOnly
+            ? (selected ? Color{0.3f, 0.52f, 0.34f, 0.96f} : Color{0.13f, 0.3f, 0.18f, 0.9f})
+            : (selected ? Color{0.42f, 0.44f, 0.5f, 0.96f} : Color{0.2f, 0.22f, 0.28f, 0.9f});
+        r.Box(TEX_SLANT_ROW, kSafeLeft, y - 29.0f, rowWidth, 58.0f, plate);
         if (selected) {
             const float pulse = 0.5f + 0.22f * SelectionWave(frame_);
             p.Box(TEX_SLANT_SEL, kSafeLeft, y - 29.0f, rowWidth, 58.0f, WithAlpha(kWhite, pulse));
@@ -1899,8 +1921,14 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
         const Tex hostIcon = result.hostIcon > kIconSteam || result.hostId
             ? IconTex(result.hostId, result.hostIcon) : TEX_USER_ICON;
         r.Sprite(hostIcon, 104.0f, y, 38.0f, 38.0f, kFullUv, A_ML);
-        r.TextFit(result.name, 152.0f, y, 0.86f, 420.0f, A_ML);
-        r.TextFit(result.host, 590.0f, y, 0.74f, 240.0f, A_ML, kDim);
+        r.TextFit(result.name, 152.0f, y, 0.86f, 420.0f, A_ML,
+                  result.friendsOnly ? kGreen : kText);
+        if (result.friendsOnly) {
+            r.TextFit(result.host, 590.0f, y - 8.0f, 0.74f, 240.0f, A_ML, kDim);
+            r.Text("FRIENDS ONLY", 590.0f, y + 13.0f, 0.46f, A_ML, kGreen);
+        } else {
+            r.TextFit(result.host, 590.0f, y, 0.74f, 240.0f, A_ML, kDim);
+        }
 
         // One head per seat: host first, then members, then empty seats.
         for (int seat = 0; seat < result.maxMembers && seat < kMaxMembers; ++seat) {

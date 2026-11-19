@@ -74,6 +74,9 @@ public:
     // first. The lobby calls this when it actually becomes visible: frames
     // tick before the native backend can draw, and under the fade from black.
     void PlayEntrance(uint32_t delayFrames);
+    // The reserve units were read again: if the team is one of them, take
+    // its current contents (or fall back to a custom team if it is gone).
+    void RefreshPreset();
 
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };

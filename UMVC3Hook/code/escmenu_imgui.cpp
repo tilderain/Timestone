@@ -195,22 +195,23 @@ void EscMenuImGui_Draw()
                  ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
                  ImGuiWindowFlags_AlwaysAutoResize);
-    const int renderingOverride = D3D9Reset_GetRenderingThreadOverride();
-    bool renderingThread = renderingOverride < 0
-        ? D3D9Reset_IsRenderingThreadEnabled() : renderingOverride != 0;
-    static bool saveFailed = false;
-    ImGui::BeginDisabled(!D3D9Reset_RenderingThreadOverrideAvailable);
-    if (ImGui::Checkbox("RenderingThread", &renderingThread))
-        saveFailed = !D3D9Reset_SetRenderingThreadOverride(renderingThread ? 1 : 0);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("ON adds one frame of display latency.\n"
-                          "OFF may decrease performance or other various issues.");
-    }
-    if (renderingOverride < 0 && D3D9Reset_RenderingThreadOverrideAvailable)
-        ImGui::TextDisabled("Using game default until changed.");
-    ImGui::EndDisabled();
-    if (saveFailed)
-        ImGui::TextUnformatted("Could not save; previous setting retained.");
+    // RenderingThread toggle: hidden for now.
+    // const int renderingOverride = D3D9Reset_GetRenderingThreadOverride();
+    // bool renderingThread = renderingOverride < 0
+    //     ? D3D9Reset_IsRenderingThreadEnabled() : renderingOverride != 0;
+    // static bool saveFailed = false;
+    // ImGui::BeginDisabled(!D3D9Reset_RenderingThreadOverrideAvailable);
+    // if (ImGui::Checkbox("RenderingThread", &renderingThread))
+    //     saveFailed = !D3D9Reset_SetRenderingThreadOverride(renderingThread ? 1 : 0);
+    // if (ImGui::IsItemHovered()) {
+    //     ImGui::SetTooltip("ON adds one frame of display latency.\n"
+    //                       "OFF may decrease performance or other various issues.");
+    // }
+    // if (renderingOverride < 0 && D3D9Reset_RenderingThreadOverrideAvailable)
+    //     ImGui::TextDisabled("Using game default until changed.");
+    // ImGui::EndDisabled();
+    // if (saveFailed)
+    //     ImGui::TextUnformatted("Could not save; previous setting retained.");
     EscMenuImGui_DrawDisplaySettings();
     ImGui::Separator();
     const auto capture = LagDiagnostics_GetCaptureStatus();

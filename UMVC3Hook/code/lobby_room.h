@@ -155,6 +155,7 @@ private:
     int watchIntent_ = -1;      // setup whose matches the player wants to watch
     int32_t pendingMusic_ = -1; // track to publish once the created room exists
     int pendingFirstTo_ = -1;   // likewise the set length
+    int pendingVisibility_ = -1; // likewise who can find the room
     int pendingRotation_ = -1;  // and the rotation rule
     void RunQueue();
     int QueueLength(int slot) const;

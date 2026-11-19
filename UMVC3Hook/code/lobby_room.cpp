@@ -30,6 +30,7 @@ constexpr char kHostIconKey[] = "hicon";
 // that lists the local player. It lives and dies with the lobby.
 constexpr char kBanKey[] = "ban";
 constexpr char kFirstToKey[] = "ft";     // lobby data: games needed to win a set
+constexpr char kVisibilityKey[] = "vis"; // lobby data: "1" for a friends-only room
 constexpr char kRotationKey[] = "rot";   // lobby data: Rotation, as a number
 constexpr int kMaxBans = 64;
 constexpr int kMemberVersion = 7;
@@ -230,6 +231,7 @@ void SteamRoomService::Create(const RoomSettings& settings)
     creating_ = true;
     pendingMusic_ = settings.music;
     pendingFirstTo_ = settings.firstTo;
+    pendingVisibility_ = static_cast<int>(settings.visibility);
     pendingRotation_ = static_cast<int>(settings.rotation);
     SteamRoom_Create(ToSteamType(settings.visibility), settings.maxMembers, settings.slotCount,
                      settings.name);
@@ -245,6 +247,7 @@ void SteamRoomService::Join(uint64_t roomId)
     joining_ = true;
     pendingMusic_ = -1;
     pendingFirstTo_ = -1;
+    pendingVisibility_ = -1;
     pendingRotation_ = -1;
     SteamLobby_Join(roomId);
 }
@@ -673,6 +676,8 @@ void SteamRoomService::RefreshResults()
         result.compatible = SteamLobby_IsLobbyVersionCompatible(result.id);
         result.friendLobby = SteamLobby_IsFriendLobby(result.id);
         result.matchInProgress = SteamLobby_IsResultInMatch(i);
+        const char* visibility = SteamRoom_GetLobbyData(result.id, kVisibilityKey);
+        result.friendsOnly = visibility && strcmp(visibility, "1") == 0;
         result.firstTo = ParseFirstTo(SteamRoom_GetLobbyData(result.id, kFirstToKey));
         // Written by the lobby's host, so untrusted: the id is only ever
         // handed to Steam to look up a picture, and the icon is a number
@@ -1029,6 +1034,13 @@ void SteamRoomService::Pump()
             room_.settings.firstTo = pendingFirstTo_;
         }
         pendingFirstTo_ = -1;
+        // So the lobby list can mark it; Steam does not say what type a
+        // lobby is to those who find it.
+        if (pendingVisibility_ >= 0)
+            SteamRoom_SetData(kVisibilityKey,
+                              pendingVisibility_ == static_cast<int>(Visibility::FriendsOnly)
+                                  ? "1" : "0");
+        pendingVisibility_ = -1;
         if (pendingRotation_ >= 0) {
             char value[8];
             snprintf(value, sizeof(value), "%d", pendingRotation_);

@@ -271,12 +271,48 @@ int RosterColorCount(int32_t id)
     return count > 0 ? count : 1;
 }
 
+// The reserve units come from the game's live license profile, not from
+// savedata.bin: the lobby only shows once the save has been applied to it,
+// the license screen edits it in place, and reading it costs no file access.
+// The profile is the 0x690-byte block the save's +0x20 is copied into
+// (sLicense__copyIncoming, 0x140223240); table offsets as in
+// doc/saved_roster_presets.md.
+constexpr size_t SLICENSE_PROFILE = 0x40;
+constexpr size_t PROFILE_PRESET_CHARS = 0xB8;   // int32_t[3][3]
+constexpr size_t PROFILE_PRESET_ASSISTS = 0xDC;
+constexpr size_t PROFILE_PRESET_COLORS = 0x100;
+
 void LoadPresets()
 {
     if (g_presetsLoaded) return;
     g_presetsLoaded = true;
-    g_presetCount = Savedata_LoadRosters(g_presets, 3);
-    HookLog("LobbyFlow: loaded %u saved roster presets\n", static_cast<unsigned>(g_presetCount));
+    g_presetCount = 0;
+    using GetInstance = void*(__fastcall*)();
+    const uint8_t* license = static_cast<const uint8_t*>(
+        reinterpret_cast<GetInstance>(_addr(SLICENSE_GET_INSTANCE))());
+    if (!license) return;
+    const uint8_t* profile = license + SLICENSE_PROFILE;
+    const auto table = [profile](size_t offset, size_t index) {
+        int32_t value = 0;
+        memcpy(&value, profile + offset + index * sizeof(int32_t), sizeof(value));
+        return value;
+    };
+    for (size_t preset = 0; preset < 3; ++preset) {
+        SavedRoster roster = {};
+        bool valid = true;
+        for (size_t slot = 0; slot < 3; ++slot) {
+            const size_t index = preset * 3 + slot;
+            roster.chars[slot] = table(PROFILE_PRESET_CHARS, index);
+            roster.assists[slot] = table(PROFILE_PRESET_ASSISTS, index);
+            roster.colors[slot] = table(PROFILE_PRESET_COLORS, index);
+            valid &= roster.chars[slot] >= 1 && roster.chars[slot] <= 51;
+            valid &= roster.assists[slot] >= 0 && roster.assists[slot] <= 2;
+            valid &= roster.colors[slot] >= 0 && roster.colors[slot] <= 8;
+        }
+        if (valid) g_presets[g_presetCount++] = roster;
+    }
+    HookLog("LobbyFlow: read %u reserve units from the live profile\n",
+            static_cast<unsigned>(g_presetCount));
 }
 
 int RosterPresetCount()
@@ -1695,6 +1731,11 @@ void RunLobbyFrame(uint64_t titleArea)
             // First frame the lobby can be seen on this visit: play the
             // screen's slide-in now, after most of any fade from black.
             g_entrancePending = false;
+            // The reserve units may have been edited on the license screen
+            // since the last visit: read them again, and bring a team that
+            // is one of them up to date.
+            g_presetsLoaded = false;
+            g_ui->RefreshPreset();
             g_ui->PlayEntrance(g_fadeHold.load(std::memory_order_relaxed) ? kEntranceFadeDelay : 0);
         }
         g_ui->Draw(*canvas);
@@ -1781,7 +1822,7 @@ void LobbyFlow_DrawOverlay()
         memcpy(line, g_watchLine, sizeof(line));
         line[sizeof(line) - 1] = '\0';
         const SpectateStatus status = Spectate_GetStatus();
-        const char* note = status.desynced ? "OUT OF SYNC WITH THE MATCH (FIXES ITSELF NEXT GAME)"
+        const char* note = status.desynced ? "DESYNCED"
                          : status.feedLost ? "RECONNECTING..."
                          : status.catchingUp ? "CATCHING UP..."
                          : status.waiting ? "WAITING FOR THE MATCH..." : "SPECTATING";
