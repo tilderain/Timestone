@@ -21,6 +21,7 @@
 #include "code/lag_diagnostics.h"
 #include "code/trainingboot.h"
 #include "code/lobby_flow.h"
+#include "code/online_rewards.h"
 #include "code/lobby_local.h"
 #include "code/launchmenu_utils.h"
 #include "code/netplay.h"
@@ -2165,6 +2166,9 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 			HookLog("UMVC3Hook: Hooked sAction__openVersusPauseMenu (no pause menu in netplay)\n");
 		else
 			HookLog("UMVC3Hook: FAILED to hook sAction__openVersusPauseMenu\n");
+		// Native online rewards for netplay matches; Steam achievement
+		// delivery, which the removed native network update used to do.
+		OnlineRewards_InstallHooks();
 	}
 
 	// Patch 3: uBattleUiPauseNetGallery_vfn5 (0x1402e4320) checks

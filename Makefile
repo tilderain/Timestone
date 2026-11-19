@@ -117,6 +117,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/spectate.cpp \
 	$(SRCDIR)/code/lobby_flow.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
+	$(SRCDIR)/code/online_rewards.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \
 	$(SRCDIR)/imgui/imgui_draw.cpp \
