@@ -4,6 +4,7 @@
 #include "netplay.h" // ENet includes winsock2 before the Windows/D3D headers.
 #include "d3d9reset.h"
 #include "shader_constants.h"
+#include "d3d9ex.h"
 
 #include "mk10utils.h"
 #include "framestepper.h"
@@ -220,9 +221,26 @@ bool CreateRendererDevice(void* app)
 
     g_creatingNativeDevice = true;
     PrepareD3D9NativeCreate(parameters->focusWindow, parameters->presentation);
-    const D3DPRESENT_PARAMETERS requested = *parameters->presentation;
-    const HRESULT result = core->CreateDevice(parameters->adapter, parameters->type,
+    const D3DPRESENT_PARAMETERS ordinary = *parameters->presentation;
+    D3D9Ex_Prepare(*parameters->presentation);
+    D3DPRESENT_PARAMETERS requested = *parameters->presentation;
+    HRESULT result = core->CreateDevice(parameters->adapter, parameters->type,
         parameters->focusWindow, parameters->behavior, parameters->presentation, parameters->output);
+    if (D3D9Ex_Enabled() && (result != D3D_OK || !D3D9Ex_IsDevice(*parameters->output))) {
+        // No Ex device (old Windows, a driver without FLIPEX, a wrapper
+        // d3d9.dll): the game still runs, on the ordinary backend.
+        HookLog("D3D9Ex: creation failed HRESULT=0x%08X; using the ordinary D3D9 backend\n",
+            (uint32_t)result);
+        if (*parameters->output) {
+            (*parameters->output)->Release();
+            *parameters->output = nullptr;
+        }
+        D3D9Ex_FallBack();
+        *parameters->presentation = ordinary;
+        requested = ordinary;
+        result = core->CreateDevice(parameters->adapter, parameters->type,
+            parameters->focusWindow, parameters->behavior, parameters->presentation, parameters->output);
+    }
     if (result != D3D_OK || !*parameters->output)
         FailTransition(result != D3D_OK ? result : E_UNEXPECTED, "native renderer CreateDevice failed");
     RecordNativeDevice(*parameters->output, requested);
@@ -279,10 +297,14 @@ void RememberActive(IDirect3DDevice9* device,
         }
     }
     g_deviceOperational = true;
-    HookLog("D3D9: effective device=%p bb=%ux%u interval=0x%08X "
+    if (D3D9Ex_IsDevice(device) && (!g_haveActive ||
+        g_effective.SwapEffect != D3DSWAPEFFECT_FLIPEX || !g_effective.Windowed))
+        D3D9Reset_AbortStartup("D3D9Ex device did not report a windowed FLIPEX swapchain");
+    HookLog("D3D9: effective device=%p bb=%ux%u interval=0x%08X swap=%u buffers=%u "
         "queried=%d result=0x%08X\n", device,
         g_effective.BackBufferWidth, g_effective.BackBufferHeight,
-        g_effective.PresentationInterval, g_haveActive, (uint32_t)result);
+        g_effective.PresentationInterval, (unsigned)g_effective.SwapEffect,
+        g_effective.BackBufferCount, g_haveActive, (uint32_t)result);
 }
 
 bool MatchesEffective(D3DPRESENT_PARAMETERS request)
@@ -303,7 +325,10 @@ bool ValidRequest(const D3DPRESENT_PARAMETERS& p)
         (!p.Windowed || !p.FullScreen_RefreshRateInHz) &&
         (p.Windowed || (p.BackBufferWidth && p.BackBufferHeight)) &&
         (p.SwapEffect == D3DSWAPEFFECT_DISCARD || p.SwapEffect == D3DSWAPEFFECT_FLIP ||
-         p.SwapEffect == D3DSWAPEFFECT_COPY) &&
+         p.SwapEffect == D3DSWAPEFFECT_COPY ||
+         (D3D9Ex_IsDevice(g_device) && p.SwapEffect == D3DSWAPEFFECT_FLIPEX &&
+          p.Windowed && p.BackBufferCount >= 2 &&
+          !(p.Flags & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER))) &&
         p.BackBufferCount <= 3 &&
         (p.SwapEffect != D3DSWAPEFFECT_COPY || p.BackBufferCount <= 1) &&
         (p.MultiSampleType == D3DMULTISAMPLE_NONE || p.SwapEffect == D3DSWAPEFFECT_DISCARD) &&
@@ -324,7 +349,7 @@ void ServiceUIJob()
     HRESULT result = D3DERR_INVALIDCALL;
     g_job.skipped = false;
     if (GetCurrentThreadId() == g_createThread && g_job.device == g_device) {
-        result = g_job.device->TestCooperativeLevel();
+        result = D3D9Ex_Check(g_job.device);
         if (g_job.kind == JobKind::Reset &&
             (result == D3D_OK || result == D3DERR_DEVICENOTRESET)) {
             AcquireSRWLockExclusive(&g_deviceLock);
@@ -482,7 +507,8 @@ HRESULT WINAPI HookResetDevice(IDirect3DDevice9* device,
     D3DPRESENT_PARAMETERS requested = *parameters;
     D3DPRESENT_PARAMETERS working = requested;
     const ULONGLONG start = GetTickCount64();
-    const HRESULT result = g_originalReset(device, &working);
+    const HRESULT result = D3D9Ex_IsDevice(device)
+        ? D3D9Ex_Reset(device, &working) : g_originalReset(device, &working);
     *parameters = working; // Preserve the D3D9 API's actual in/out contract.
 
     HookLog("D3D9: Reset result=0x%08X elapsed=%llums thread=%lu "
@@ -496,7 +522,7 @@ HRESULT WINAPI HookResetDevice(IDirect3DDevice9* device,
         // TestCooperativeLevel is legal after failed Reset; resource/display
         // probes are not. Never claim success or rebuild plugin objects here.
         HookLog("D3D9: Reset failed cooperative=0x%08X; retaining failure\n",
-            (uint32_t)device->TestCooperativeLevel());
+            (uint32_t)D3D9Ex_Check(device));
     }
     ReleaseSRWLockExclusive(&g_deviceLock);
     g_transitions.fetch_sub(1);
@@ -512,6 +538,7 @@ uint64_t __fastcall HookAppReset(void* app, IDirect3DDevice9* device,
         FailTransition(E_UNEXPECTED, "Reset outside the resource-release boundary");
     D3DPRESENT_PARAMETERS requested = *parameters;
     PrepareD3D9PresentationParameters(&requested, "native Reset request");
+    D3D9Ex_Prepare(requested);
     g_phase.store(Phase::Resetting);
     const ULONGLONG start = GetTickCount64();
     ULONGLONG retryStart = start;
@@ -1079,6 +1106,8 @@ DWORD WINAPI StartupWatchdogThread(LPVOID)
 bool D3D9Reset_InstallNativeHooks()
 {
     D3D9Reset_GetRenderingThreadOverride();
+    if (!D3D9Ex_Initialize())
+        return false;
     struct Hook { uintptr_t address; void* detour; void** original; };
 #define RESET_HOOK(address, name, original) \
     { address, reinterpret_cast<void*>(&name), reinterpret_cast<void**>(&original) }
@@ -1141,6 +1170,13 @@ bool D3D9Reset_IsRenderingThreadEnabled()
 bool D3D9Reset_SetRenderingThreadOverride(int mode)
 {
     return mode == 0;
+}
+
+bool D3D9Reset_IsNativeCreation(IDirect3DDevice9** output)
+{
+    void* render = NativeRenderer();
+    return g_creatingNativeDevice && render &&
+        output == &Field<IDirect3DDevice9*>(render, 0xB0);
 }
 
 [[noreturn]] void D3D9Reset_AbortStartup(const char* reason)

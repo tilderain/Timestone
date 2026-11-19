@@ -32,6 +32,7 @@
 #include "code/xinput_discovery.h"
 #include "code/d3d9reset.h"
 #include "code/shader_constants.h"
+#include "code/d3d9ex.h"
 #include "code/exception.h"
 #include "code/mk10utils.h"
 #include <Windows.h>
@@ -1439,6 +1440,15 @@ static HANDLE GetDualHostDeviceReadyEvent()
 	return candidate;
 }
 
+static HRESULT CreateD3D9Device(
+	IDirect3D9* core, UINT adapter, D3DDEVTYPE type, HWND window, DWORD behavior,
+	D3DPRESENT_PARAMETERS* parameters, IDirect3DDevice9** output)
+{
+	if (D3D9Ex_Enabled() && D3D9Reset_IsNativeCreation(output))
+		return D3D9Ex_Create(adapter, type, window, behavior, parameters, output);
+	return g_originalD3D9CreateDevice(core, adapter, type, window, behavior, parameters, output);
+}
+
 static HRESULT WINAPI HookD3D9CreateDevice(
 	IDirect3D9* d3d9,
 	UINT adapter,
@@ -1485,7 +1495,7 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 	}
 
 	if (!g_serializeD3D9CreateDevice) {
-		const HRESULT result = g_originalD3D9CreateDevice(
+		const HRESULT result = CreateD3D9Device(
 			d3d9, adapter, deviceType, focusWindow, behaviorFlags,
 			presentationParameters, returnedDevice);
 		if (firstCreate)
@@ -1512,7 +1522,7 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 	for (int attempt = 0; attempt < 8; ++attempt) {
 		if (presentationParameters)
 			*presentationParameters = requested;
-		result = g_originalD3D9CreateDevice(
+		result = CreateD3D9Device(
 			d3d9, adapter, deviceType, focusWindow, behaviorFlags,
 			presentationParameters, returnedDevice);
 		if (result != D3DERR_NOTAVAILABLE || attempt == 7)
@@ -1666,7 +1676,10 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 					return FALSE;
 				}
 				BootTimer_Stamp("Hooked engine D3D9 device");
-				if constexpr (LAG_BACKEND_TIMING_ENABLED) {
+				// The D3D9Ex backend already hooks Present on its device and
+				// times it there; a second hook on the same function fails.
+				if (LAG_BACKEND_TIMING_ENABLED &&
+					!D3D9Ex_IsDevice(static_cast<IDirect3DDevice9*>(device))) {
 					const auto status = kiero::bind(17, (void**)&oBackendPresent, (void*)hkBackendPresent);
 					if (status != kiero::Status::Success)
 						HookLog("Timing: backend Present hook failed (%d)\n", (int)status);

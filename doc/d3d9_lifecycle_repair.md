@@ -212,8 +212,10 @@ Runtime resolution changes require Reset in the existing native design. A
 restart-required graphics mode is a reasonable explicit compatibility option,
 but is not equivalent to implementing live changes and does not eliminate
 genuine device loss. Borderless reduces exclusive-mode transitions; it does not
-eliminate backbuffer-size/interval resets. D3D9Ex or a translation layer would
-be a separate compatibility project, not a proven drop-in cure.
+eliminate backbuffer-size/interval resets. D3D9Ex or a translation layer is a
+separate compatibility project, not a proven drop-in cure. The native Ex
+experiment is described in [`d3d9ex_experiment.md`](d3d9ex_experiment.md); it is
+on by default and can be turned off in `Timestone.ini`.
 
 ## Instrumentation needed to finish the fix
 

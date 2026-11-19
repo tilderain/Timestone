@@ -14,6 +14,7 @@ inline constexpr bool D3D9Reset_RenderingThreadOverrideAvailable = false;
 int D3D9Reset_GetRenderingThreadOverride();
 bool D3D9Reset_IsRenderingThreadEnabled();
 bool D3D9Reset_SetRenderingThreadOverride(int mode);
+bool D3D9Reset_IsNativeCreation(IDirect3DDevice9** output);
 [[noreturn]] void D3D9Reset_AbortStartup(const char* reason);
 
 // A successful Begin holds the plugin device lock until End. Never hold this

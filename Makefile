@@ -71,6 +71,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/gameui.cpp \
 	$(SRCDIR)/code/d3d9reset.cpp \
 	$(SRCDIR)/code/shader_constants.cpp \
+	$(SRCDIR)/code/d3d9ex.cpp \
 	$(SRCDIR)/code/framestepper.cpp \
 	$(SRCDIR)/code/dtieditor.cpp \
 	$(SRCDIR)/code/trainingboot.cpp \

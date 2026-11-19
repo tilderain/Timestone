@@ -10,6 +10,7 @@
 #include "steam_lobby.h"
 #include "umvc3menu.h"
 #include "d3d9reset.h"
+#include "d3d9ex.h"
 #include "lag_diagnostics.h"
 #include <Windows.h>
 #include <algorithm>
@@ -195,6 +196,7 @@ void EscMenuImGui_Draw()
                  ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
                  ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::TextDisabled("Renderer: %s", D3D9Ex_BackendName());
     // RenderingThread toggle: hidden for now.
     // const int renderingOverride = D3D9Reset_GetRenderingThreadOverride();
     // bool renderingThread = renderingOverride < 0
