@@ -1,7 +1,6 @@
 # Sound And BGM Under Rollback (Research)
 
-Ghidra **8192** `umvc3.exe.unpacked.exe` (static decompilation, 2026-11-14), with
-BK4RB on **8193** as a reference design (strings and hook targets only). This was a
+Ghidra **8192** `umvc3.exe.unpacked.exe` (static decompilation, 2026-11-14). This was a
 Ghidra-only pass: no plugin source was read, so every statement about current
 plugin behavior is phrased as something to verify. No runtime trace was taken.
 Comments and renames were added in Ghidra 8192 at the addresses cited.
@@ -75,8 +74,7 @@ stored in `+0x208`.
 `sSound__setStreamEntry @ 0x1405D2410`: play, stop, pause, resume, fades,
 volume/pan/pitch, and the `requestStream_*` functions. It appends a `0x78`-byte
 entry to the ring at `sSound+0x1CEF8` (count `+0x1CFE8`, capacity `+0x1CF64`). The
-sound thread drains the ring through `sSound__extract*Stream`. BK4RB hooks exactly
-this target.
+sound thread drains the ring through `sSound__extract*Stream`.
 
 ## 2. Why BGM Goes Out Of Sync
 
@@ -143,26 +141,7 @@ at `+0xA38` (6 slots, stride `0x438`) into persistent voice requests. Those queu
 overwrite their slots rather than append. Without downstream suppression they will
 re-issue voices during resim.
 
-## 4. BK4RB Reference Design (From Strings And Hook Targets)
-
-- **Hook point:** `sSound__setStreamEntry`. Every BGM push is logged with its
-  frame (`bgm-note f= resim=`).
-- **Theme starts or stops that a rollback undid** are repaired after resim. If
-  there is a saved start, the theme is restarted; otherwise it is left silent.
-  Stray starts are stopped. Stream commands issued during resim that only repeat
-  existing ones are dropped (`resim_repeats_dropped`). Original commands that the
-  corrected timeline did not reissue are undone (`original_not_reissued`).
-- **Sound effects:** commands are frame-tagged in queues of 128 entries
-  (queue A/B). After resim, the commands from the replayed window are merged with
-  the originals (`qb-merge`), classifying each as `dup`, `new` or `missing`:
-  - A resim play that matches an original keeps the existing voice ("held voices
-    kept").
-  - Stop commands are remapped to the kept voice.
-  - Stale redirects are skipped.
-  - Originals with no match are stopped.
-  - Manager bytes are restored around the merge (`manager_bytes_restored`).
-
-## 5. Proposed Design And Hook Points
+## 4. Proposed Design And Hook Points
 
 ### A. BGM Follows The Corrected Simulation State
 

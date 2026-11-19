@@ -11,6 +11,7 @@
 #include "umvc3menu.h"
 #include "d3d9reset.h"
 #include "d3d9ex.h"
+#include "frame_pacing.h"
 #include "lag_diagnostics.h"
 #include <Windows.h>
 #include <algorithm>
@@ -457,6 +458,19 @@ void EscMenuImGui_DrawDisplaySettings()
         ImGui::SetTooltip("ON makes frame pacing consistent in exchange for adding input lag");
     if (vsyncSaveFailed)
         ImGui::TextUnformatted("Could not save VSync.");
+
+    // Only does anything with VSync off, where VSync is not pacing the frames.
+    bool evenPacing = FramePacing_IsHoldEnabled();
+    static bool evenPacingSaveFailed = false;
+    ImGui::BeginDisabled(vsync);
+    if (ImGui::Checkbox("Even frame pacing", &evenPacing))
+        evenPacingSaveFailed = !FramePacing_SetHoldEnabled(evenPacing);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("VSync off only. Shows every frame at the same point after it starts,\n"
+                          "so frames land evenly. Adds a millisecond or two of input lag.");
+    if (evenPacingSaveFailed)
+        ImGui::TextUnformatted("Could not save even pacing.");
 }
 
 bool EscMenuImGui_IsOpen()

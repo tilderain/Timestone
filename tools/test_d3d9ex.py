@@ -128,6 +128,8 @@ using IDirect3DBaseTexture9 = FakeTexture;
 using IDirect3DTexture9 = FakeTexture;
 using IDirect3DCubeTexture9 = FakeTexture;
 using IDirect3DVolumeTexture9 = FakeTexture;
+constexpr unsigned kForceImmediate = 0x100;
+struct RGNDATA;
 struct Device {
     HRESULT resetResult = S_OK, state = S_OK;
     unsigned resets = 0, latencySets = 0;
@@ -136,6 +138,11 @@ struct Device {
     }
     HRESULT SetMaximumFrameLatency(unsigned value) { assert(value == 1); ++latencySets; return S_OK; }
     HRESULT CheckDeviceState(HWND) { return state; }
+    HRESULT forcedResult = S_OK;
+    unsigned forcedPresents = 0;
+    HRESULT PresentEx(const RECT*, const RECT*, HWND, const RGNDATA*, unsigned flags) {
+        assert(flags == kForceImmediate); ++forcedPresents; return forcedResult;
+    }
     HRESULT TestCooperativeLevel() { return state; }
     HRESULT UpdateTexture(FakeTexture* cpu, FakeTexture* gpu) {
         assert(cpu != gpu && cpu->kind == gpu->kind && cpu->locked.empty());
@@ -193,7 +200,10 @@ auto originalTextureMap = NativeMap;
 auto originalTextureUnmap = NativeUnmap;
 enum class LagMetric { BackendPresent };
 struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
-void FramePacing_OnPresent(Device*) {}
+int64_t FramePacing_BeforePresent(Device*) { return 0; }
+void FramePacing_OnPresent(Device*, int64_t) {}
+bool immediatePresent = false, forceImmediateRefused = false;
+constexpr unsigned D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000u;
 '''
 
 CASES = r'''
@@ -252,6 +262,17 @@ int main() {
     try { PresentFrame(&device, nullptr, nullptr, nullptr, nullptr); }
     catch (const std::runtime_error&) { presentStopped = true; }
     assert(presentStopped);
+    // VSync off: presented with FORCEIMMEDIATE, and never again once refused.
+    presentResult = S_OK;
+    params.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+    D3D9Ex_Prepare(params);
+    assert(immediatePresent);
+    assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK && device.forcedPresents == 1);
+    assert(PresentFrame(&helper, nullptr, nullptr, nullptr, nullptr) == D3D_OK && helper.forcedPresents == 0);
+    device.forcedResult = D3DERR_INVALIDCALL;
+    assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK && device.forcedPresents == 2);
+    assert(forceImmediateRefused);
+    assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK && device.forcedPresents == 2);
 
     for (unsigned kind : {D3DRTYPE_TEXTURE, D3DRTYPE_CUBETEXTURE, D3DRTYPE_VOLUMETEXTURE}) {
         std::array<uint64_t, 16> object = {}, alias = {};

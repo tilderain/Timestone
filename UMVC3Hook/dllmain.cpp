@@ -709,11 +709,12 @@ static HRESULT WINAPI hkBackendPresent(IDirect3DDevice9* device, const RECT* sou
     const RECT* destination, HWND window, const RGNDATA* dirty)
 {
     HRESULT result;
+    const int64_t pacing = FramePacing_BeforePresent(device);
     {
         LagDiagnosticScope diagnostic(LagMetric::BackendPresent);
         result = oBackendPresent(device, source, destination, window, dirty);
     }
-    FramePacing_OnPresent(device);
+    FramePacing_OnPresent(device, pacing);
     return result;
 }
 WNDPROC oWndProc;

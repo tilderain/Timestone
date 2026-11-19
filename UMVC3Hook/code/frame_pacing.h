@@ -12,14 +12,38 @@
 
 struct IDirect3DDevice9;
 
-// After every Present on any device, from the thread that presented.
-void FramePacing_OnPresent(IDirect3DDevice9* device);
+// Waits until the performance counter reaches `targetQpc`, to the tick. Most
+// of the wait is a high-resolution timer sleep; only the last part, as long
+// as that timer has recently been seen to overshoot, is a busy spin.
+void FramePacing_WaitUntil(int64_t targetQpc);
+
+// The game thread, once the frame's pacing wait is over and its work begins.
+void FramePacing_OnFrameStart();
+
+// Around every Present on any device, from the thread that presents:
+// `token = FramePacing_BeforePresent(device); Present(...); FramePacing_OnPresent(device, token);`
+//
+// BeforePresent is also where even pacing happens. With VSync off a frame is
+// shown the moment its work is done, so frames that take a different time
+// land unevenly. With even pacing on, the game's frame waits here until a
+// fixed time after its start (the longest recent work plus a little): frames
+// then land one frame apart, each shown that much later than it could be.
+int64_t FramePacing_BeforePresent(IDirect3DDevice9* device);
+void FramePacing_OnPresent(IDirect3DDevice9* device, int64_t beforeToken);
+bool FramePacing_IsHoldEnabled();
+bool FramePacing_SetHoldEnabled(bool enabled); // false if it could not be saved
 
 struct FramePacingStats {
     bool valid;            // enough frames seen
     float averageMs;       // mean frame time over the last two seconds
     float worstMs;         // largest distance from 16.67 ms in that time
     uint32_t late;         // frames over 17.67 ms in that time
+    // Where unevenness comes from, over the same two seconds:
+    float startWorstMs;    // largest distance from 16.67 ms between frame starts
+    float workMinMs;       // frame start to the Present call: the frame's work
+    float workMaxMs;
+    float presentMaxMs;    // longest the Present call itself took
+    float holdMs;          // even pacing: frame start to Present, 0 when not holding
     bool displayValid;     // the swapchain reports present statistics
     float refreshHz;       // measured from those statistics
     uint32_t repeated;     // extra refreshes a frame was held for, last 10 s

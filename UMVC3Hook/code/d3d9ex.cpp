@@ -13,6 +13,12 @@ extern void HookLog(const char*, ...);
 
 namespace {
 bool enabled = false;
+// VSync off on the flip swapchain. An ordinary Present there still queues
+// each frame behind the last and blocks when the queue is full, which shows
+// as uneven frame times; FORCEIMMEDIATE replaces the queued frame instead.
+bool immediatePresent = false;
+constexpr DWORD kForceImmediate = 0x00000100; // D3DPRESENT_FORCEIMMEDIATE; not in these headers
+bool forceImmediateRefused = false;
 bool fellBack = false; // wanted, but the Ex device could not be created
 IDirect3DDevice9Ex* exDevice = nullptr; // Borrowed from the native renderer.
 HWND deviceWindow = nullptr;
@@ -274,13 +280,24 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
     HWND window, const RGNDATA* dirty)
 {
     HRESULT result;
+    const int64_t pacing = FramePacing_BeforePresent(device);
     {
         // This hook owns Present on an Ex device, so the backend timing that
         // dllmain would otherwise bind to the same function is taken here.
         LagDiagnosticScope diagnostic(LagMetric::BackendPresent);
-        result = originalPresent(device, src, dst, window, dirty);
+        if (device == exDevice && immediatePresent && !forceImmediateRefused) {
+            result = exDevice->PresentEx(src, dst, window, dirty, kForceImmediate);
+            if (result == D3DERR_INVALIDCALL) {
+                // Not accepted here: present the ordinary way from now on.
+                forceImmediateRefused = true;
+                HookLog("D3D9Ex: FORCEIMMEDIATE refused; using ordinary Present\n");
+                result = originalPresent(device, src, dst, window, dirty);
+            }
+        } else {
+            result = originalPresent(device, src, dst, window, dirty);
+        }
     }
-    FramePacing_OnPresent(device);
+    FramePacing_OnPresent(device, pacing);
     if (device != exDevice) return result;
     if (result == S_PRESENT_OCCLUDED) return D3D_OK;
     if (result == S_PRESENT_MODE_CHANGED) return D3DERR_DEVICELOST;
@@ -357,6 +374,10 @@ void D3D9Ex_Prepare(D3DPRESENT_PARAMETERS& p)
     p.MultiSampleType = D3DMULTISAMPLE_NONE;
     p.MultiSampleQuality = 0;
     p.Flags &= ~D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    immediatePresent = p.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE;
+    forceImmediateRefused = false;
+    HookLog("D3D9Ex: presentation interval=0x%08X force-immediate presents=%d\n",
+            (unsigned)p.PresentationInterval, immediatePresent ? 1 : 0);
 }
 
 HRESULT D3D9Ex_Create(UINT adapter, D3DDEVTYPE type, HWND window, DWORD behavior,

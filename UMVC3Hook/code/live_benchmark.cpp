@@ -751,7 +751,14 @@ void LiveBenchmark_Draw()
             ImGui::Separator();
             ImGui::Text("Frame time  %.2f ms", pacing.averageMs);
             ImGui::SameLine();
-            ImGui::TextDisabled("worst %+.2f, %u late / 2s", pacing.worstMs, pacing.late);
+            ImGui::TextDisabled("worst %.2f off, %u late / 2s", pacing.worstMs, pacing.late);
+            // Which part of the frame is uneven: when it starts, how long its
+            // work takes, or how long Present holds the thread.
+            ImGui::TextDisabled("start %.2f off  work %.1f-%.1f ms  present %.1f ms max",
+                                pacing.startWorstMs, pacing.workMinMs, pacing.workMaxMs,
+                                pacing.presentMaxMs);
+            if (pacing.holdMs > 0.0f)
+                ImGui::TextDisabled("even pacing: shown %.1f ms after frame start", pacing.holdMs);
             if (pacing.displayValid) {
                 if (pacing.repeated || pacing.dropped)
                     ImGui::Text("Display %.2f Hz  %u repeated, %u dropped / 10s",

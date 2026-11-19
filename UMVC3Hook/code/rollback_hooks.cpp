@@ -12,6 +12,7 @@
 #include "rollback_diagnostics.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
+#include "frame_pacing.h"
 #include "lag_diagnostics.h"
 #include "rollback_unit.h"
 #include "rollback_sound.h"
@@ -991,6 +992,33 @@ static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
     return oRChrCpuClassFunc(cpu, object);
 }
 
+// sMain::move paces a frame with a loop of Sleep(1) until its real counter
+// (+0x60) reaches the ideal one (+0x68): each frame then starts up to a
+// millisecond or so late, by a different amount every time (measured: frame
+// starts 15.7 to 17.7 ms apart). This waits out the same interval first, to
+// the tick (FramePacing_WaitUntil: a timer sleep, then a short spin). The
+// native loop then finds the time already up and does not sleep.
+static void PreciseFrameWait(uint64_t main)
+{
+    if (!*(uint8_t*)(main + 0x58)) return;            // mFrameWait: fixed frame timing only
+    const int64_t real = *(int64_t*)(main + 0x60);    // mRealCounter
+    const int64_t ideal = *(int64_t*)(main + 0x68);   // mIdealCounter
+    const int64_t previous = *(int64_t*)(main + 0x70); // mPrevCounter: QPC at the last update
+    const float fps = *(float*)(main + 0x50);         // mFps scales elapsed ticks into the counters
+    if (previous <= 0 || fps < 1.0f || ideal <= real) return;
+    static int64_t frequency = 0;
+    if (!frequency) {
+        LARGE_INTEGER value;
+        QueryPerformanceFrequency(&value);
+        frequency = value.QuadPart;
+    }
+    // Ticks until the native sum reaches the ideal counter, and a little
+    // over, so its float arithmetic cannot land just short and sleep again.
+    const int64_t remaining = (int64_t)((double)(ideal - real) / (double)fps) + frequency / 20000;
+    if (remaining > frequency / 20) return;           // more than 50 ms: not ordinary pacing
+    FramePacing_WaitUntil(previous + remaining);
+}
+
 static void __fastcall hkMainMove(uint64_t main)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::MainMove);
@@ -1028,9 +1056,11 @@ static void __fastcall hkMainMove(uint64_t main)
     const uint64_t benchmarkStart = LiveBenchmark_Now();
     {
         LagDiagnosticScope diagnostic(LagMetric::Pacing);
+        PreciseFrameWait(main);
         oMainMove(main);
     }
     LiveBenchmark_EndPacing(benchmarkStart);
+    FramePacing_OnFrameStart();
     if (Netplay_IsActive()) {
         int32_t frame = Controller_GetNetFrameCount();
         if (frame >= 0 && FrameStepper_IsBattleSynchronized())
