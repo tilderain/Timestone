@@ -18,6 +18,7 @@
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <Windows.h>
+#include <tlhelp32.h>
 #include <atomic>
 #include <algorithm>
 #include <array>
@@ -955,6 +956,55 @@ void LogThreadBacktrace(DWORD threadId, const char* label)
     }
 }
 
+// A game thread stuck inside Direct3D is usually waiting on one of DXVK's
+// worker threads (seen 2026-11-18 under Proton). Log where those are too, so a
+// stall report shows whether they are waiting or running. Threads are found by
+// the name DXVK gives them; on real Direct3D 9 there are none and nothing is
+// logged.
+void LogGraphicsThreadBacktraces()
+{
+    using GetDescription = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+    static GetDescription getDescription = nullptr;
+    static bool resolved = false;
+    if (!resolved) {
+        resolved = true;
+        for (const char* module : {"kernelbase.dll", "kernel32.dll"}) {
+            if (HMODULE handle = GetModuleHandleA(module))
+                getDescription = reinterpret_cast<GetDescription>(
+                    GetProcAddress(handle, "GetThreadDescription"));
+            if (getDescription) break;
+        }
+    }
+    if (!getDescription) return;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+    const DWORD process = GetCurrentProcessId();
+    THREADENTRY32 entry = {};
+    entry.dwSize = sizeof(entry);
+    int logged = 0;
+    for (BOOL more = Thread32First(snapshot, &entry); more && logged < 8;
+         more = Thread32Next(snapshot, &entry)) {
+        if (entry.th32OwnerProcessID != process) continue;
+        HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID);
+        if (!thread) continue;
+        PWSTR wide = nullptr;
+        char name[32] = "";
+        if (SUCCEEDED(getDescription(thread, &wide)) && wide) {
+            WideCharToMultiByte(CP_UTF8, 0, wide, -1, name, sizeof(name) - 1, nullptr, nullptr);
+            LocalFree(wide);
+        }
+        CloseHandle(thread);
+        if (strcmp(name, "dxvk-submit") != 0 && strcmp(name, "dxvk-cs") != 0 &&
+            strcmp(name, "dxvk-queue") != 0)
+            continue;
+        LogThreadBacktrace(entry.th32ThreadID, name);
+        ++logged;
+    }
+    CloseHandle(snapshot);
+    if (!logged) HookLog("D3D9: no DXVK worker threads found\n");
+}
+
 // How long after the first drawn frame the watchdog keeps looking for a stall
 // when the game never reports itself loaded (Launch Normally does not).
 constexpr ULONGLONG kLoadWatchMs = 180000;
@@ -972,6 +1022,7 @@ DWORD WINAPI StartupWatchdogThread(LPVOID)
             HookLog("D3D9: start-up has not reached its first drawn frame after %us\n",
                     elapsedSeconds);
             LogThreadBacktrace(g_gameThreadId.load(std::memory_order_relaxed), "game");
+            LogGraphicsThreadBacktraces();
             HookLogFlush();
         }
         if (elapsedSeconds % 5 != 0 ||
@@ -1017,6 +1068,7 @@ DWORD WINAPI StartupWatchdogThread(LPVOID)
         HookLog("D3D9: start-up stalled: no frame begun for %us "
                 "(%u frames drawn, game not loaded yet)\n", stalledSeconds, beat);
         LogThreadBacktrace(g_gameThreadId.load(std::memory_order_relaxed), "game");
+        LogGraphicsThreadBacktraces();
         HookLogFlush();
     }
     return 0;
@@ -1282,6 +1334,13 @@ void D3D9ResetDiagnostics_StartStartupWatchdog()
         return;
     }
     CloseHandle(thread);
+}
+
+// Called on the game thread at its first tick, before any frame is begun.
+void D3D9ResetDiagnostics_NoteGameThread()
+{
+    g_gameThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    D3D9ResetDiagnostics_StartStartupWatchdog();
 }
 
 void D3D9ResetDiagnostics_CompleteStartup()
