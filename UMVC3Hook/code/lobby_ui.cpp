@@ -118,6 +118,7 @@ const char* const kRoomMenuItems[] = {"TEAM SETUP", "LOBBY MUSIC", "INVITE FRIEN
 constexpr int kRoomMenuCount = 5;
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
 constexpr int kCharGridColumns = 10; // faces across in the team screen's character grid
+constexpr int kColorGridColumns = 8; // faces across in the team screen's color grid
 // The art in every select-screen face texture (128x128) is the same 120x84
 // window; the rest is transparent.
 constexpr Uv kFaceUv{4.0f / 128.0f, 42.0f / 128.0f, 124.0f / 128.0f, 126.0f / 128.0f};
@@ -354,6 +355,7 @@ void LobbyUi::GoTo(Screen screen)
     quickChatOpen_ = false;
     musicOpen_ = false;
     charPickerOpen_ = false;
+    colorPickerOpen_ = false;
     iconPickerOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
@@ -439,6 +441,7 @@ void LobbyUi::ReturnToRoom()
     quickChatOpen_ = false;
     musicOpen_ = false;
     charPickerOpen_ = false;
+    colorPickerOpen_ = false;
     iconPickerOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
@@ -1467,9 +1470,7 @@ void LobbyUi::StepTeamField(int delta)
         } else if (field == 1) {
             team.assists[member] = ((team.assists[member] + delta) % 3 + 3) % 3;
         } else {
-            const int colors = roster_.colorCount ? roster_.colorCount(team.chars[member]) : 1;
-            if (colors > 0)
-                team.colors[member] = ((team.colors[member] + delta) % colors + colors) % colors;
+            return; // colors are picked from their panel (confirm), not stepped
         }
         prefs_.presetIndex = -1; // edited by hand: no longer the saved preset
     } else {
@@ -1570,6 +1571,38 @@ void LobbyUi::UpdateCharPicker(const Input& input)
     CommitTeam();
 }
 
+// Every color of a team member's character at once. Directions move a cell
+// (left and right wrap around the ends), confirm puts the color on the slot.
+void LobbyUi::UpdateColorPicker(const Input& input)
+{
+    const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
+    const int count = roster_.colorCount ? roster_.colorCount(prefs_.team.chars[member]) : 1;
+    if (count <= 0 || input.cancel || input.menu) {
+        colorPickerOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
+    }
+    if (colorPickerCursor_ >= count) colorPickerCursor_ = count - 1;
+    int next = colorPickerCursor_;
+    if (input.left) next -= 1;
+    if (input.right) next += 1;
+    if (input.up) next -= kColorGridColumns;
+    if (input.down) next += kColorGridColumns;
+    if (next < 0) next = input.left ? count - 1 : colorPickerCursor_;
+    if (next >= count) next = input.right ? 0 : colorPickerCursor_;
+    if (next != colorPickerCursor_) {
+        colorPickerCursor_ = next;
+        Play(SFX_MOVE);
+    }
+    if (!input.confirm) return;
+    colorPickerOpen_ = false;
+    Play(SFX_CONFIRM);
+    if (colorPickerCursor_ == prefs_.team.colors[member]) return; // same color: nothing changes
+    prefs_.team.colors[member] = colorPickerCursor_;
+    prefs_.presetIndex = -1; // edited by hand: no longer the saved preset
+    CommitTeam();
+}
+
 void LobbyUi::UpdateTeam(const Input& input)
 {
     bool timedOut = false;
@@ -1592,6 +1625,13 @@ void LobbyUi::UpdateTeam(const Input& input)
             return;
         }
         charPickerOpen_ = false; // out of time: go with the team as it stands
+    }
+    if (colorPickerOpen_) {
+        if (!timedOut) {
+            UpdateColorPicker(input);
+            return;
+        }
+        colorPickerOpen_ = false;
     }
     if (iconPickerOpen_) {
         if (!timedOut) {
@@ -1635,6 +1675,20 @@ void LobbyUi::UpdateTeam(const Input& input)
             if (roster_.characterId(i) == prefs_.team.chars[member]) charPickerCursor_ = i;
         charPickerOpen_ = true;
         Play(SFX_CONFIRM);
+        return;
+    }
+    const bool colorRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowIcon &&
+                          (teamCursor_ - kTeamRowFirstSlot) % 3 == 2;
+    if (colorRow) {
+        const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
+        const int colors = roster_.colorCount ? roster_.colorCount(prefs_.team.chars[member]) : 1;
+        // One color leaves nothing to choose from.
+        if (colors > 1) {
+            const int current = prefs_.team.colors[member];
+            colorPickerCursor_ = current >= 0 && current < colors ? current : 0;
+            colorPickerOpen_ = true;
+            Play(SFX_CONFIRM);
+        }
         return;
     }
     if (teamCursor_ == kTeamRowIcon) {
@@ -1743,7 +1797,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_CONFIRM, "Select");
         add(BTN_DPAD, "Move");
         add(BTN_CANCEL, "Close");
-    } else if (screen_ == Screen::Team && charPickerOpen_) {
+    } else if (screen_ == Screen::Team && (charPickerOpen_ || colorPickerOpen_)) {
         add(BTN_CONFIRM, "Select");
         add(BTN_DPAD, "Move");
         add(BTN_CANCEL, "Close");
@@ -1751,8 +1805,12 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         const bool characterRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowIcon &&
                                   (teamCursor_ - kTeamRowFirstSlot) % 3 == 0;
         if (characterRow) add(BTN_CONFIRM, "Characters");
+        const bool colorRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowIcon &&
+                              (teamCursor_ - kTeamRowFirstSlot) % 3 == 2;
+        if (colorRow) add(BTN_CONFIRM, "Colors");
         if (teamCursor_ == kTeamRowIcon) add(BTN_CONFIRM, "Icons");
-        if (!characterRow && teamCursor_ != kTeamRowIcon && teamCursor_ != kTeamRowDone)
+        if (!characterRow && !colorRow && teamCursor_ != kTeamRowIcon &&
+            teamCursor_ != kTeamRowDone)
             add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Done");
     } else if (roomMenuOpen_ || slotMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
@@ -2724,6 +2782,10 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         DrawCharPicker(canvas);
         return "Choose a character.";
     }
+    if (colorPickerOpen_) {
+        DrawColorPicker(canvas);
+        return "Choose a color.";
+    }
     if (iconPickerOpen_) {
         DrawIconPicker(canvas);
         return "Choose the icon other players see.";
@@ -2781,6 +2843,54 @@ void LobbyUi::DrawCharPicker(Canvas& canvas) const
     const char* name = roster_.characterName ? roster_.characterName(highlighted) : "";
     p.TextFit(name ? name : "", x + w * 0.5f, y + h - 30.0f, 0.8f, w - 120.0f, A_MC,
               highlighted == prefs_.team.chars[member] ? kCyan : kText);
+}
+
+// The color grid, centred on the screen: the slot's character once per color,
+// labelled as the game's select screen labels them.
+void LobbyUi::DrawColorPicker(Canvas& canvas) const
+{
+    const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
+    const int32_t id = prefs_.team.chars[member];
+    const int count = roster_.colorCount ? roster_.colorCount(id) : 1;
+    if (count <= 0) return;
+    const Painter p(canvas, 1.0f, 0.0f);
+    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.55f});
+
+    const int columns = count < kColorGridColumns ? count : kColorGridColumns;
+    const int rows = (count + kColorGridColumns - 1) / kColorGridColumns;
+    const float cell = 116.0f, cellH = 116.0f, face = 100.0f;
+    const float w = columns * cell + 72.0f;
+    const float h = rows * cellH + 56.0f;
+    const float x = (kScreenW - w) * 0.5f, y = (kScreenH - h) * 0.5f - 20.0f;
+    // The panel texture is translucent; the team rows under it must not show.
+    p.Fill(x + 4.0f, y + 4.0f, w - 8.0f, h - 8.0f, Color{0.02f, 0.03f, 0.05f, 0.92f});
+    p.Box(TEX_PANEL_DARK, x, y, w, h);
+
+    const float gridX = x + (w - columns * cell) * 0.5f, gridY = y + 32.0f;
+    for (int color = 0; color < count; ++color) {
+        const float cx = gridX + (color % kColorGridColumns) * cell + cell * 0.5f;
+        const float top = gridY + (color / kColorGridColumns) * cellH;
+        const float cy = top + 44.0f;
+        const bool current = color == prefs_.team.colors[member];
+        const bool selected = color == colorPickerCursor_;
+        // Framed like the character grid: around the face, the label below it.
+        const float faceH = face * kFaceAspect;
+        if (selected) {
+            p.Box(TEX_ROW_SEL, cx - face * 0.5f - 9.0f, cy - faceH * 0.5f - 9.0f, face + 18.0f,
+                  faceH + 18.0f);
+        } else if (current) {
+            p.Box(TEX_ROW_SEL, cx - face * 0.5f - 4.0f, cy - faceH * 0.5f - 4.0f, face + 8.0f,
+                  faceH + 8.0f, WithAlpha(kCyan, 0.6f));
+        }
+        const float size = selected ? face + 8.0f : face;
+        p.Sprite(CharacterFace(id, color), cx, cy, size, size * kFaceAspect, kFaceUv, A_MC);
+        // The game names eight; any further installed color goes by its number.
+        char label[8];
+        if (color < 8) snprintf(label, sizeof(label), "%s", ColorLabel(color));
+        else snprintf(label, sizeof(label), "%d", color + 1);
+        p.Text(label, cx, top + cellH - 20.0f, 0.62f, A_MC,
+               selected ? kText : current ? kCyan : kDim);
+    }
 }
 
 // The icon grid, centred on the screen. Cell 0 is the Steam profile picture.

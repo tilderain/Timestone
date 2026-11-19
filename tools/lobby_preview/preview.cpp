@@ -627,6 +627,16 @@ int main(int argc, char** argv)
         Settle(ui, 2);
         ok &= Capture(ui, directory, "team_characters");
         ui.Update(Press(&Input::cancel));
+        ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::down));    // POINT color
+        ui.Update(Press(&Input::confirm)); // every color at once
+        ui.Update(Press(&Input::right));
+        ui.Update(Press(&Input::right));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_colors");
+        ui.Update(Press(&Input::cancel));
+        ui.Update(Press(&Input::up));
+        ui.Update(Press(&Input::up));      // back on the POINT character
         for (int i = 0; i < 6; ++i) ui.Update(Press(&Input::down)); // ANCHOR character
         ui.Update(Press(&Input::confirm));
         Settle(ui, 2);
