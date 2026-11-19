@@ -13,6 +13,8 @@ namespace lobby {
 // number rather than a table position: `cue | variant << 8`. Id 0 is the
 // default, the native lobby's own room track.
 constexpr int32_t kMusicDefault = 0;
+// Silence: no room music at all. Not a cue the game has.
+constexpr int32_t kMusicNone = 0xFF;
 constexpr int32_t kMusicCueLobbyRoom = 16;
 constexpr int32_t kMusicCueMainMenu = 13; // played as the two-layer menu theme
 
@@ -34,6 +36,7 @@ inline constexpr MusicTrack kMusicTracks[] = {
     // Menus and modes. Where the game plays a cue is noted in the doc; the
     // "B" entries are the second of a pair the BGM-style option picks from.
     {kMusicDefault, MusicGroup::Menu, "Online Lobby"},
+    {kMusicNone, MusicGroup::Menu, "None"},
     {MusicId(13), MusicGroup::Menu, "Main Menu"},
     {MusicId(4), MusicGroup::Menu, "Character Select"},
     {MusicId(5), MusicGroup::Menu, "Character Select B"},

@@ -32,6 +32,7 @@ struct UiPrefs {
     int presetIndex; // saved-roster preset in use, or -1 for a custom team
     int icon;        // lobby icon: kIconSteam or a character id (lobby_canvas.h)
     RoomSettings create;
+    bool muteMusic;  // in someone else's lobby: do not play its music
 };
 
 class LobbyUi {

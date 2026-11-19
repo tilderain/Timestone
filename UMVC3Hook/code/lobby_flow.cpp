@@ -71,6 +71,15 @@ constexpr uintptr_t MENU_FLOW_NAVIGATION = 0x1403E9D90;       // (menu, int32_t*
 constexpr uintptr_t MAINMENU_MOVE_READY_RETURN = 0x1403E7514; // in uMenuMain's move
 constexpr uintptr_t MAINMENU_INITIAL_SELECT_RETURN = 0x1403E7274;
 constexpr size_t MENU_CURSOR = 0x78;
+// What that state checks before it reads any input: a transition timer, a
+// child menu (gallery), the license screen laid over the menu, the screen
+// fade and the guide overlay.
+constexpr size_t MENU_TRANSITION_TIMER = 0x8C; // float, counts down
+constexpr size_t MENU_CHILD = 0x58;            // cUnit*
+constexpr size_t MENU_FADE_LIMIT = 0x80;       // float
+constexpr uintptr_t SLICENSE_GET_SCREEN = 0x14027CC80;      // live license screen or 0
+constexpr uintptr_t SMVC3GUIDE_BLOCKS_MENU_INPUT = 0x140282600;
+constexpr uintptr_t SGAMEUI_GET_FADE = 0x1402BBF40;         // float
 constexpr int32_t MAINMENU_ITEM_ONLINE = 1;
 constexpr uintptr_t UMENUMAIN_DTI = 0x140D6AE60;
 constexpr uintptr_t MTOBJECT_VT_GET_DTI = 0x20;
@@ -341,6 +350,7 @@ UiPrefs LoadPrefs()
         ? Rotation::WinnerLeaves : Rotation::WinnerStays;
     prefs.create.music = GetPrivateProfileIntA("Lobby", "RoomMusic", lobby::kMusicDefault, path);
     if (lobby::FindMusicTrack(prefs.create.music) < 0) prefs.create.music = lobby::kMusicDefault;
+    prefs.muteMusic = GetPrivateProfileIntA("Lobby", "MuteMusic", 0, path) != 0;
     return prefs;
 }
 
@@ -362,6 +372,7 @@ void SavePrefs(const UiPrefs& prefs)
         {"Lobby", "RoomSlots", std::to_string(prefs.create.slotCount)},
         {"Lobby", "RoomVisibility", std::to_string(static_cast<int>(prefs.create.visibility))},
         {"Lobby", "RoomMusic", std::to_string(prefs.create.music)},
+        {"Lobby", "MuteMusic", prefs.muteMusic ? "1" : "0"},
         {"Lobby", "RoomFirstTo", std::to_string(prefs.create.firstTo)},
         {"Lobby", "RoomRotation", std::to_string(static_cast<int>(prefs.create.rotation))},
     };
@@ -497,6 +508,15 @@ WantedBgm CurrentWantedBgm()
     const int32_t preview = !inRoom && g_ui ? g_ui->PreviewMusic() : -1;
     if (!inRoom && preview < 0) return {Bgm::MainMenu, lobby::kMusicDefault};
     const int32_t track = inRoom ? g_service->Room().music : preview;
+    if (track == lobby::kMusicNone) return {Bgm::None, lobby::kMusicDefault};
+    if (inRoom && g_ui && g_ui->Prefs().muteMusic) {
+        // A guest who muted the lobby's music; the host always hears their own.
+        const RoomState& room = g_service->Room();
+        bool isHost = false;
+        for (int i = 0; i < room.memberCount; ++i)
+            isHost |= room.members[i].isLocal && room.members[i].isHost;
+        if (!isHost) return {Bgm::None, lobby::kMusicDefault};
+    }
     if (lobby::MusicCue(track) == lobby::kMusicCueMainMenu)
         return {Bgm::MainMenu, lobby::kMusicDefault};
     return {Bgm::Room, track};
@@ -596,6 +616,13 @@ void __fastcall Hook_TitleInit(uint64_t area, uint64_t a, uint64_t b, uint64_t c
     if (!sound) return;
     using FadeOut = void(__fastcall*)(void*, int32_t);
     const WantedBgm wanted = CurrentWantedBgm();
+    if (wanted.bgm == Bgm::None) {
+        // The host chose no music for this room.
+        reinterpret_cast<FadeOut>(_addr(GSOUND_FADE_OUT_BGM))(sound, 2000);
+        g_bgm = Bgm::None;
+        HookLog("LobbyFlow: no music from aTitle::init (room has none)\n");
+        return;
+    }
     const bool inRoom = wanted.bgm == Bgm::Room;
     if (inRoom) {
         reinterpret_cast<FadeOut>(_addr(GSOUND_FADE_OUT_BGM))(sound, 2000);
@@ -732,6 +759,32 @@ bool IsReleasedMainMenu(void* menu)
     return getDti(menu) == reinterpret_cast<void*>(_addr(UMENUMAIN_DTI));
 }
 
+// Whether the menu's navigation state would act on a press this frame. It
+// runs every frame even with the license screen open on top of the menu, and
+// returns early itself; the hook must not take a decide the menu would ignore.
+bool MainMenuTakesInput(void* menu)
+{
+    const uint8_t* base = static_cast<const uint8_t*>(menu);
+    using GetInstance = void*(__fastcall*)();
+    if (*reinterpret_cast<const float*>(base + MENU_TRANSITION_TIMER) > 0.0f) return false;
+    if (*reinterpret_cast<const uint64_t*>(base + MENU_CHILD)) return false;
+    if (void* license = reinterpret_cast<GetInstance>(_addr(SLICENSE_GET_INSTANCE))()) {
+        using GetScreen = uint64_t(__fastcall*)(void*);
+        if (reinterpret_cast<GetScreen>(_addr(SLICENSE_GET_SCREEN))(license)) return false;
+    }
+    if (void* gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))()) {
+        using GetFade = float(__fastcall*)(void*);
+        if (*reinterpret_cast<const float*>(base + MENU_FADE_LIMIT) <=
+            reinterpret_cast<GetFade>(_addr(SGAMEUI_GET_FADE))(gameUi))
+            return false;
+    }
+    if (void* guide = reinterpret_cast<GetInstance>(_addr(SMVC3GUIDE_GET_INSTANCE))()) {
+        using Blocks = bool(__fastcall*)(void*);
+        if (reinterpret_cast<Blocks>(_addr(SMVC3GUIDE_BLOCKS_MENU_INPUT))(guide)) return false;
+    }
+    return true;
+}
+
 __attribute__((noinline)) bool __fastcall Hook_SessionReady(void* library)
 {
     if (g_releasedToMainMenu) {
@@ -754,7 +807,7 @@ uint64_t __fastcall Hook_MenuNavigation(void* menu, int32_t* out)
     // would start the native network entry.
     Input input = {};
     Native_ReadInput(input, false);
-    if (input.confirm &&
+    if (input.confirm && MainMenuTakesInput(menu) &&
         *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(menu) + MENU_CURSOR) ==
             MAINMENU_ITEM_ONLINE) {
         HookLog("LobbyFlow: Online chosen on the main menu\n");

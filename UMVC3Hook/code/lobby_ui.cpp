@@ -482,7 +482,16 @@ void LobbyUi::SyncWithService()
         GoTo(Screen::Room);
     } else if (!inRoom && wasInRoom_) {
         if (screen_ == Screen::Room || (screen_ == Screen::Team && teamReturn_ == Screen::Room)) {
-            GoTo(Screen::Top);
+            // Back to the lobby list, freshly searched, ready to pick another.
+            // An accepted invite is already moving us on: leave that alone.
+            if (service_.Busy() == RoomBusy::None) {
+                browseCursor_ = 0;
+                browseScroll_ = 0;
+                service_.Search();
+                GoTo(Screen::Browse);
+            } else {
+                GoTo(Screen::Top);
+            }
             // An error from the service (e.g. removed by the host) says more.
             // Nor is it closed when an accepted invite is moving us on.
             if (!leftByChoice_ && !notice_[0] && service_.Busy() != RoomBusy::Joining)
@@ -1021,9 +1030,21 @@ bool LobbyUi::UpdateHandshake(const Input& input)
         }
         const int delta = (input.right ? 1 : 0) - (input.left ? 1 : 0);
         if (delta != 0) {
-            const int count = kMaxDelayPick + 1;
-            delayCursor_ = ((delayCursor_ + delta) % count + count) % count;
-            Play(SFX_MOVE);
+            // Auto is not a stop of its own: it is the label on the delay the
+            // ping calls for, and the cursor steps up and down from there.
+            const Member* local = LocalMember();
+            const Member* other = local ? SeatOccupant(local->slot, 1 - local->side) : nullptr;
+            int autoDelay = other ? service_.AutoDelay(other->pingMs) : -1;
+            if (autoDelay < 0) autoDelay = 3; // ping not known yet
+            const int maxDelay = kMaxDelayPick - 1;
+            const int from = delayCursor_ > kDelayPickAuto ? delayCursor_ - 1 : autoDelay;
+            int to = from + delta;
+            if (to < 0) to = 0;
+            if (to > maxDelay) to = maxDelay;
+            if (to != from) {
+                delayCursor_ = to == autoDelay ? kDelayPickAuto : to + 1;
+                Play(SFX_MOVE);
+            }
         }
         if (input.confirm) {
             service_.AcceptMatch();
@@ -1252,9 +1273,11 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
         GoTo(Screen::Team);
         break;
     case 1: {
+        // The host picks the music; everyone else can only silence it.
         const Member* local = LocalMember();
         if (!local || !local->isHost) {
-            ShowNotice("Only the lobby host can change the music.");
+            prefs_.muteMusic = !prefs_.muteMusic;
+            prefsDirty_ = true;
             break;
         }
         const int current = FindMusicTrack(service_.Room().music);
@@ -2403,7 +2426,12 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
         help = "Take a seat, or line up for a setup that is full.";
 
     if (roomMenuOpen_) {
-        DrawListMenu(canvas, "LOBBY MENU", kRoomMenuItems, kRoomMenuCount, roomMenuCursor_);
+        // Guests get a mute toggle where the host has the music picker.
+        const char* items[kRoomMenuCount];
+        for (int i = 0; i < kRoomMenuCount; ++i) items[i] = kRoomMenuItems[i];
+        if (!local || !local->isHost)
+            items[1] = prefs_.muteMusic ? "UNMUTE LOBBY MUSIC" : "MUTE LOBBY MUSIC";
+        DrawListMenu(canvas, "LOBBY MENU", items, kRoomMenuCount, roomMenuCursor_);
     } else if (slotMenuOpen_) {
         char title[16];
         snprintf(title, sizeof(title), "SETUP %d", seatSlot_ + 1);
