@@ -65,7 +65,7 @@ enum Tex : uint16_t {
     TEX_SUBTITLES2,      // ga_room_subtit2 LOBBY art
     TEX_SEARCH_RESULTS,  // ga_room_word_a  SEARCH RESULTS art
     TEX_PING,            // ga_room_icon_c  six connection-strength bars
-    TEX_MEMBER_ICONS,    // ga_room_icon_d  host/member/empty/friend heads
+    TEX_MEMBER_ICONS,    // ga_room_icon_d  heads: host, member, empty, friend seat taken/free
     TEX_SLANT_ROW,       // ga_room_waku_b  tan parallelogram (9-slice)
     TEX_SLANT_SEL,       // ga_room_sel_a   yellow parallelogram (9-slice)
     TEX_INSET,           // ga_room_waku_d  dark rounded inset (9-slice)

@@ -124,7 +124,7 @@ constexpr Uv kFaceUv{4.0f / 128.0f, 42.0f / 128.0f, 124.0f / 128.0f, 126.0f / 12
 constexpr float kFaceAspect = 84.0f / 120.0f;
 
 const char* const kQuickChat[] = {
-    "Type a message...", "Good fight!", "One more?", "Nice!", "Hello!",
+    "Type a message...", "Great fight!", "One more?", "Nice!", "Hello.",
     "Good game.", "Be right back.", "Thanks for the games!",
 };
 constexpr int kQuickChatCount = 8;
