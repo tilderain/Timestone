@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <shellapi.h>
 #include <tlhelp32.h>
 #include <winver.h>
 
@@ -762,6 +763,37 @@ void WriteUnwindBacktrace(FILE* file, const CONTEXT* exceptionContext)
 #endif
 }
 
+// Runs on the crashing thread after the user dismisses the crash dialog, so
+// the launch must finish before the handler returns and the process dies.
+void OpenCrashLog(const char* crashLogPath)
+{
+    char path[MAX_PATH] = {};
+    const DWORD length = GetFullPathNameA(crashLogPath, MAX_PATH, path, nullptr);
+    if (length == 0 || length >= MAX_PATH)
+        return;
+
+    SHELLEXECUTEINFOA open = {};
+    open.cbSize = sizeof(open);
+    open.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    open.lpVerb = "open";
+    open.lpFile = path;
+    open.nShow = SW_SHOWNORMAL;
+    if (ShellExecuteExA(&open))
+        return;
+
+    // No usable .log association: fall back to Notepad directly.
+    char command[MAX_PATH + 32] = {};
+    std::snprintf(command, sizeof(command), "notepad.exe \"%s\"", path);
+    STARTUPINFOA startup = {};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process = {};
+    if (CreateProcessA(nullptr, command, nullptr, nullptr, FALSE, 0, nullptr,
+                       nullptr, &startup, &process)) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+}
+
 LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly, const char* reason = nullptr)
 {
     if (!info || !info->ExceptionRecord || !info->ContextRecord)
@@ -899,6 +931,7 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly, const char
             "The game just freaking crashed! Crash log available at %s", crashLogPath);
         MessageBoxA(nullptr, message, "UMVC3Hook Crash",
                     MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+        OpenCrashLog(crashLogPath);
     } else if (!reason) {
         // An abort may originate while HookLog owns its lock. The report has
         // already been written and appended using the nonblocking path above.
