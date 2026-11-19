@@ -74,6 +74,14 @@ constexpr uintptr_t SPAD_REDETECT_SLOT = 0x140514950;  // (this, slot, flags)
 constexpr uintptr_t SPAD_CANCEL_MASK = 0x140001A50;
 constexpr uintptr_t MENU_SE_DECIDE = 0x14032A7F0;  // system voice 9
 constexpr uintptr_t MENU_SE_CANCEL = 0x1403F78C0;  // system voice 10
+// The main menu family's cues (vtable +0x140 / +0x148, neither reads `this`):
+// an item decided (bank 1 voice 6 with bank 9 voice 8), and a menu closing
+// back to its parent (bank 1 voice 7). The mode change that closes a menu
+// (0x1403EABE0) plays bank 9 voice 1 just before the latter.
+constexpr uintptr_t MAINMENU_SE_DECIDE = 0x1403EA970;
+constexpr uintptr_t MAINMENU_SE_EXIT = 0x1403EA8B0;
+constexpr uint32_t kMenuExitBank = 9;
+constexpr uint32_t kMenuExitVoice = 1;
 // The cue aChrSelect__enterStageSelection (0x140366EF0) plays when character
 // select moves on to the stage: voice 0xA0 of sound bank 6.
 constexpr uintptr_t GSOUND_INSTANCE = 0x140003AA0;
@@ -1222,7 +1230,21 @@ void Native_PlaySfx(uint32_t sfxMask)
         HookLog("LobbyNative: match-found cue (stage select voice %s)\n", played ? "played" : "unavailable");
         return;
     }
-    if (sfxMask & SFX_CONFIRM) {
+    if (sfxMask & SFX_MENU_ENTER) {
+        Native<PlayVoid>(MAINMENU_SE_DECIDE)();
+    } else if (sfxMask & SFX_MENU_EXIT) {
+        using GetSound = void*(__fastcall*)();
+        using ResolveRef = void*(__fastcall*)(void*, void*, uint32_t);
+        using PlayVoice = void*(__fastcall*)(void*, void*, void*, uint32_t, uint32_t, float, uint32_t);
+        if (void* sound = Native<GetSound>(GSOUND_INSTANCE)()) {
+            alignas(16) uint8_t ref[32] = {};
+            alignas(16) uint8_t handle[32] = {};
+            void* bank = Native<ResolveRef>(GSOUND_RESOLVE_REF)(sound, ref, kMenuExitBank);
+            Native<PlayVoice>(GSOUND_PLAY_ORDINARY_VOICE)(sound, handle, bank, kMenuExitVoice, 0,
+                                                         1.0f, 0);
+        }
+        Native<PlayVoid>(MAINMENU_SE_EXIT)();
+    } else if (sfxMask & SFX_CONFIRM) {
         Native<PlayVoid>(MENU_SE_DECIDE)();
     } else if (sfxMask & SFX_CANCEL) {
         Native<PlayVoid>(MENU_SE_CANCEL)();

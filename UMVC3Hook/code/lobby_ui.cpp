@@ -342,6 +342,7 @@ void LobbyUi::PlayEntrance(uint32_t delayFrames)
 {
     screenFrame_ = 0;
     entranceDelay_ = delayFrames;
+    if (screen_ == Screen::Top) topCursor_ = 0; // always open on SEARCH LOBBY
 }
 
 void LobbyUi::GoTo(Screen screen)
@@ -587,8 +588,6 @@ void LobbyUi::Update(const Input& input)
             if (action == Confirm::LeaveRoom) {
                 leftByChoice_ = true;
                 service_.Leave();
-            } else if (action == Confirm::MainMenu) {
-                mainMenuRequested_ = true;
             } else if (action == Confirm::KickMember) {
                 service_.Kick(memberMenuId_);
             } else if (action == Confirm::Update) {
@@ -611,10 +610,8 @@ void LobbyUi::UpdateTop(const Input& input)
 {
     MoveCursor(topCursor_, kTopCount, input);
     if (input.cancel) {
-        // Backing out by accident is easy, so only this path asks first.
-        confirm_ = Confirm::MainMenu;
-        confirmCursor_ = 1;
-        Play(SFX_CANCEL);
+        mainMenuRequested_ = true;
+        Play(SFX_MENU_EXIT);
         return;
     }
     if (!input.confirm) return;
@@ -640,6 +637,7 @@ void LobbyUi::UpdateTop(const Input& input)
         break;
     default:
         mainMenuRequested_ = true;
+        Play(SFX_MENU_EXIT);
         break;
     }
 }
@@ -892,7 +890,7 @@ void LobbyUi::UpdateRoom(const Input& input)
             service_.LeaveQueue();
         } else {
             confirm_ = Confirm::LeaveRoom;
-            confirmCursor_ = 1;
+            confirmCursor_ = 0; // default to "Yes"
         }
         return;
     }
@@ -1293,7 +1291,7 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
         break;
     default:
         confirm_ = Confirm::LeaveRoom;
-        confirmCursor_ = 1;
+        confirmCursor_ = 0; // default to "Yes"
         break;
     }
 }
@@ -2841,8 +2839,6 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         message = notice_;
     else if (confirm_ == Confirm::LeaveRoom)
         message = "Leave this lobby?";
-    else if (confirm_ == Confirm::MainMenu)
-        message = "Return to the main menu?";
     else if (confirm_ == Confirm::Update)
         message = updateOffer_;
     char kick[160];

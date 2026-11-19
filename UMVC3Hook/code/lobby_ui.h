@@ -15,6 +15,10 @@ enum Sfx : uint32_t {
     // A match is waiting on the local player: the stage-select cue, and the
     // game window is brought to the front.
     SFX_MATCH_FOUND = 1u << 3,
+    // The main menu's own cues: an item decided on it, and a menu under it
+    // closing back to it. They win over the plain cues in the same frame.
+    SFX_MENU_ENTER = 1u << 4,
+    SFX_MENU_EXIT = 1u << 5,
 };
 
 // A Timestone update being downloaded, drawn as a modal with a progress bar.
@@ -81,7 +85,7 @@ public:
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
     enum class TextTarget : uint8_t { None, RoomName, Chat };
-    enum class Confirm : uint8_t { None, LeaveRoom, MainMenu, KickMember, Update };
+    enum class Confirm : uint8_t { None, LeaveRoom, KickMember, Update };
     // Pre-match steps shown as a modal once both seats of the local player's
     // match slot are taken. Each is answered by both players in turn.
     enum class Handshake : uint8_t {

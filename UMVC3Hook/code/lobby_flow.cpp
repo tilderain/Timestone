@@ -855,7 +855,7 @@ uint64_t __fastcall Hook_MenuNavigation(void* menu, int32_t* out)
         *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(menu) + MENU_CURSOR) ==
             MAINMENU_ITEM_ONLINE) {
         HookLog("LobbyFlow: Online chosen on the main menu\n");
-        Native_PlaySfx(SFX_CONFIRM);
+        Native_PlaySfx(SFX_MENU_ENTER);
         g_onlineChosen = true;
         StartBlack();
         return 1;
