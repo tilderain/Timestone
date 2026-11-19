@@ -2,8 +2,6 @@
 
 #include "d3d9ex.h"
 #include "mk10utils.h"
-#include "launchmenu_utils.h"
-#include "../IniSafe.h"
 
 #include <Windows.h>
 #include <d3d9.h>
@@ -48,10 +46,15 @@ LONGLONG g_lastStart = 0;   // previous frame start
 LONGLONG g_frameStart = 0;  // this frame's, until its Present
 
 // Even pacing (FramePacing_BeforePresent).
-constexpr float kHoldMarginMs = 0.25f; // over the longest recent work
+// The hold point is set from five seconds of work times: the third longest
+// of them (about the 99th percentile) plus a margin. One exceptional frame, a
+// rollback say, is late once and does not hold every frame after it back.
+constexpr int kHoldWindow = 300;
+constexpr float kHoldMarginMs = 0.5f;
+float g_holdWork[kHoldWindow] = {};
+int g_holdWorkCount = 0, g_holdWorkNext = 0;
 constexpr float kHoldLimitMs = 10.0f;  // never held further into the frame than this
-constexpr float kHoldEaseMs = 0.01f;   // most the hold comes down by in one frame
-std::atomic<int> g_holdEnabled{-1};    // -1: not read from the ini yet
+constexpr float kHoldEaseMs = 0.03f;   // most the hold comes down by in one frame
 float g_holdMs = 0.0f;                 // the hold in use, for display
 
 // TEMPORARY (2026-11-19): one summary line every two seconds while even
@@ -62,6 +65,10 @@ struct PacingLogWindow {
     int frames = 0, held = 0, exceeded = 0;
     float holdMin = 0.0f, holdMax = 0.0f, overMax = 0.0f;
 } g_log;
+// How late the two waits returned at worst (ms past their target): the hold
+// before Present, and whatever else used FramePacing_WaitUntil (frame start).
+float g_logHoldLate = 0.0f;
+std::atomic<float> g_logWaitLate{0.0f};
 
 constexpr DWORD kHighResolutionTimer = 0x00000002; // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 // 1 once a high-resolution timer has been created, 0 when one cannot be (or
@@ -79,18 +86,6 @@ bool PreciseTimerAvailable()
         g_preciseTimer.store(value, std::memory_order_relaxed);
         HookLog("FramePacing: high-resolution timer %s\n",
                 value ? "available" : "unavailable; waits use Sleep(1) and a spin of up to 2 ms");
-    }
-    return value != 0;
-}
-
-bool HoldSetting()
-{
-    int value = g_holdEnabled.load(std::memory_order_relaxed);
-    if (value < 0) {
-        char path[MAX_PATH] = {};
-        LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
-        value = !path[0] || GetPrivateProfileIntA("Display", "EvenPacing", 1, path) != 0;
-        g_holdEnabled.store(value, std::memory_order_relaxed);
     }
     return value != 0;
 }
@@ -216,6 +211,14 @@ void FramePacing_OnFrameStart()
     ReleaseSRWLockExclusive(&g_lock);
 }
 
+static void NoteWaitLate(LONGLONG now, LONGLONG target)
+{
+    if (!kPacingLog) return;
+    const float late = static_cast<float>((now - target) * g_qpcToMs);
+    if (late > g_logWaitLate.load(std::memory_order_relaxed))
+        g_logWaitLate.store(late, std::memory_order_relaxed);
+}
+
 void FramePacing_WaitUntil(int64_t targetQpc)
 {
     const double ticksPerMs = 1.0 / g_qpcToMs;
@@ -224,13 +227,15 @@ void FramePacing_WaitUntil(int64_t targetQpc)
     thread_local HANDLE timer = PreciseTimerAvailable()
         ? CreateWaitableTimerExW(nullptr, nullptr, kHighResolutionTimer, TIMER_ALL_ACCESS)
         : nullptr;
-    // How far past its due time a sleep has landed lately, in ms. The spin
-    // covers that much and no more: it starts wide and narrows as sleeps
-    // prove accurate, and widens at once when one overshoots. Once sleeps
-    // land within kNoSpinMs of their time there is no spin at all: the wait
-    // is the timer alone, late by at most about that much.
-    thread_local double overshootMs = timer ? 0.5 : 2.0;
-    constexpr double kLeastSpinMs = 0.15, kMostSpinMs = 2.0, kNoSpinMs = 0.2;
+    // The sleep is aimed kSpinMs short of the target and the rest is spun.
+    // A sleep alone was tried: it usually lands within 0.2 ms, but about
+    // once a minute it woke 1 to 2 ms late (once 4 ms), and each of those was
+    // a frame shown that late. One millisecond of spin brings all of those
+    // but the rarest under a millisecond late, for half the processor time
+    // two would take. `overshootMs` (how late sleeps have landed lately)
+    // only widens the spin on a system whose sleeps are worse than that.
+    thread_local double overshootMs = 0.0;
+    constexpr double kSpinMs = 1.0, kMostSpinMs = 4.0;
     // A thread the system treats as a game's is woken more promptly, which is
     // what lets the spin go.
     thread_local const bool boosted = BoostWaitingThread();
@@ -240,13 +245,13 @@ void FramePacing_WaitUntil(int64_t targetQpc)
     QueryPerformanceCounter(&now);
     for (;;) {
         const double remainingMs = (targetQpc - now.QuadPart) / ticksPerMs;
-        if (remainingMs <= 0.0) return;
-        double spinMs = 0.0;
-        if (!timer || overshootMs > kNoSpinMs) {
-            spinMs = overshootMs * 1.5 + 0.05;
-            if (spinMs < kLeastSpinMs) spinMs = kLeastSpinMs;
-            if (spinMs > kMostSpinMs) spinMs = kMostSpinMs;
+        if (remainingMs <= 0.0) {
+            NoteWaitLate(now.QuadPart, targetQpc);
+            return;
         }
+        double spinMs = overshootMs * 1.25;
+        if (spinMs < kSpinMs) spinMs = kSpinMs;
+        if (spinMs > kMostSpinMs) spinMs = kMostSpinMs;
         const double sleepMs = remainingMs - spinMs;
         if (sleepMs < 0.05 || (!timer && sleepMs < 1.0)) break; // the rest is spun
         const LONGLONG before = now.QuadPart;
@@ -257,7 +262,6 @@ void FramePacing_WaitUntil(int64_t targetQpc)
                 WaitForSingleObject(timer, 50) != WAIT_OBJECT_0) {
                 CloseHandle(timer);
                 timer = nullptr; // not usable here: Sleep from now on
-                overshootMs = 2.0;
                 if (g_preciseTimer.exchange(0, std::memory_order_relaxed) != 0)
                     HookLog("FramePacing: high-resolution timer stopped working; "
                             "waits use Sleep(1) and a spin of up to 2 ms\n");
@@ -269,30 +273,15 @@ void FramePacing_WaitUntil(int64_t targetQpc)
         QueryPerformanceCounter(&now);
         const double asked = timer ? sleepMs : 1.0;
         const double over = (now.QuadPart - before) / ticksPerMs - asked;
-        // Up at once, down slowly.
-        if (over > overshootMs) overshootMs = over;
-        else overshootMs += (over - overshootMs) * 0.02;
-        if (overshootMs < 0.0) overshootMs = 0.0;
+        // A typical figure, not the worst: it moves a tenth of the way to
+        // each new sample, so one late wake does not widen the spin.
+        overshootMs += ((over > 0.0 ? over : 0.0) - overshootMs) * 0.1;
     }
     do {
         YieldProcessor();
         QueryPerformanceCounter(&now);
     } while (now.QuadPart < targetQpc);
-}
-
-bool FramePacing_IsHoldEnabled()
-{
-    return HoldSetting();
-}
-
-bool FramePacing_SetHoldEnabled(bool enabled)
-{
-    char path[MAX_PATH] = {};
-    LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
-    if (!path[0] || !IniSafe_WriteString("Display", "EvenPacing", enabled ? "1" : "0", path))
-        return false;
-    g_holdEnabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
-    return true;
+    NoteWaitLate(now.QuadPart, targetQpc);
 }
 
 int64_t FramePacing_BeforePresent(IDirect3DDevice9* device)
@@ -308,17 +297,19 @@ int64_t FramePacing_BeforePresent(IDirect3DDevice9* device)
     if (start && counter.QuadPart >= start) {
         const float work = static_cast<float>((counter.QuadPart - start) * g_qpcToMs);
         // VSync paces the frame itself; with it on there is nothing to even out.
-        if (HoldSetting() && !IsLaunchVsyncEnabled() && g_work.count >= 30) {
-            float longest = 0.0f;
-            for (int i = 0; i < g_work.count; ++i)
-                if (g_work.values[i] > longest) longest = g_work.values[i];
-            float hold = longest + kHoldMarginMs;
+        if (!IsLaunchVsyncEnabled() && g_holdWorkCount >= 30) {
+            float top[3] = {}; // the three longest, longest first
+            for (int i = 0; i < g_holdWorkCount; ++i) {
+                const float value = g_holdWork[i];
+                if (value > top[0]) { top[2] = top[1]; top[1] = top[0]; top[0] = value; }
+                else if (value > top[1]) { top[2] = top[1]; top[1] = value; }
+                else if (value > top[2]) top[2] = value;
+            }
+            float hold = top[2] + kHoldMarginMs;
             if (hold > kHoldLimitMs) hold = kHoldLimitMs;
-            // The hold point moving is itself an uneven frame: when the
-            // longest recent frame left the two-second window the hold used
-            // to drop to the next longest in one step, and that frame landed
-            // early by the difference. It now rises at once (the frame that
-            // raised it was late anyway) and eases down, 0.6 ms a second.
+            // The hold point moving is itself an uneven frame, so it only
+            // moves gradually on the way down (1.8 ms a second); it rises at
+            // once, since the frames that raised it were late anyway.
             static float eased = 0.0f;
             if (hold >= eased) eased = hold;
             else eased = eased - hold > kHoldEaseMs ? eased - kHoldEaseMs : hold;
@@ -338,11 +329,18 @@ int64_t FramePacing_BeforePresent(IDirect3DDevice9* device)
             }
         }
         g_work.Add(work);
+        g_holdWork[g_holdWorkNext] = work;
+        g_holdWorkNext = (g_holdWorkNext + 1) % kHoldWindow;
+        if (g_holdWorkCount < kHoldWindow) ++g_holdWorkCount;
     }
     ReleaseSRWLockExclusive(&g_lock);
     if (!target) return counter.QuadPart;
     FramePacing_WaitUntil(target);
     QueryPerformanceCounter(&counter);
+    if (kPacingLog) {
+        const float late = static_cast<float>((counter.QuadPart - target) * g_qpcToMs);
+        if (late > g_logHoldLate) g_logHoldLate = late;
+    }
     return counter.QuadPart;
 }
 
@@ -384,13 +382,19 @@ void FramePacing_OnPresent(IDirect3DDevice9* device, int64_t beforeToken)
         for (int i = 0; i < g_intervals.count; ++i)
             if (g_intervals.values[i] < kTargetMs - 1.0) ++early;
         ReleaseSRWLockShared(&g_lock);
+        // wait_late / hold_late: the latest any wait, and the hold wait,
+        // returned past its target (a first wait entered late counts too).
+        const float waitLate = g_logWaitLate.exchange(0.0f, std::memory_order_relaxed);
+        const float holdLate = g_logHoldLate;
+        g_logHoldLate = 0.0f;
         HookLog("PACING 2s avg=%.2f worst=%.2f late=%u early=%d start_worst=%.2f work=%.2f-%.2f "
-                "present_max=%.2f hold=%.2f-%.2f held=%d exceeded=%d over_max=%.2f vsync=%d "
-                "even=%d timer=%d backend=\"%s\"\n",
+                "present_max=%.2f hold=%.2f-%.2f held=%d exceeded=%d over_max=%.2f "
+                "wait_late=%.2f hold_late=%.2f vsync=%d even=%d timer=%d backend=\"%s\"\n",
                 stats.averageMs, stats.worstMs, stats.late, early, stats.startWorstMs,
                 stats.workMinMs, stats.workMaxMs, stats.presentMaxMs, log.holdMin, log.holdMax,
-                log.held, log.exceeded, log.overMax, IsLaunchVsyncEnabled() ? 1 : 0,
-                HoldSetting() ? 1 : 0, PreciseTimerAvailable() ? 1 : 0, D3D9Ex_BackendName());
+                log.held, log.exceeded, log.overMax, waitLate, holdLate,
+                IsLaunchVsyncEnabled() ? 1 : 0,
+                IsLaunchVsyncEnabled() ? 0 : 1, PreciseTimerAvailable() ? 1 : 0, D3D9Ex_BackendName());
     }
 }
 
