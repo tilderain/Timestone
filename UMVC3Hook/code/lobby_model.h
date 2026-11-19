@@ -137,6 +137,9 @@ struct SearchResult {
     int slotCount;
     int pingMs;        // -1 when not yet estimated
     bool compatible;   // same Timestone protocol version
+    // For a lobby that is not: what to tell the player who picks it.
+    char versionNotice[160];
+    int8_t versionOrder; // its version is older (-1) or newer (1) than ours; 0 unknown
     bool friendLobby;
     bool friendsOnly;  // the host made it visible to friends only
     bool matchInProgress;

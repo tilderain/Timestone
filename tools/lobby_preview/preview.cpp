@@ -663,5 +663,16 @@ int main(int argc, char** argv)
         Settle(ui, 2);
         ok &= Capture(ui, directory, "notice");
     }
+    {   // A notice too long for one line: wrapped, never cut.
+        FakeService service;
+        LobbyUi ui(service, kRoster, DefaultPrefs());
+        Settle(ui);
+        ui.ShowNotice("This lobby is running a newer Timestone version.\n"
+                      "Lobby: 0.4.2    Yours: 0.3.21\nUpdate Timestone to join.\n"
+                      "A much longer line of text that could not possibly fit across the panel "
+                      "is broken at a space and carried on below instead of being cut short.");
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "notice_long");
+    }
     return ok ? 0 : 1;
 }

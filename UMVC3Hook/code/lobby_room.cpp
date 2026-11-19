@@ -674,6 +674,9 @@ void SteamRoomService::RefreshResults()
         const int estimate = SteamLobby_GetResultEstimatedPing(i);
         result.pingMs = estimate >= 0 ? estimate : -1;
         result.compatible = SteamLobby_IsLobbyVersionCompatible(result.id);
+        if (!result.compatible)
+            result.versionOrder = static_cast<int8_t>(SteamLobby_FormatVersionMismatch(
+                SteamLobby_GetResultProtocol(i), result.versionNotice, sizeof(result.versionNotice)));
         result.friendLobby = SteamLobby_IsFriendLobby(result.id);
         result.matchInProgress = SteamLobby_IsResultInMatch(i);
         const char* visibility = SteamRoom_GetLobbyData(result.id, kVisibilityKey);

@@ -215,7 +215,7 @@ private:
 
     Confirm confirm_ = Confirm::None;
     int confirmCursor_ = 1; // default to "No"
-    char notice_[256] = {};
+    char notice_[512] = {};
     char updateOffer_[192] = {}; // the Confirm::Update question
     bool updateAccepted_ = false;
     bool updateActive_ = false;  // progress modal shown

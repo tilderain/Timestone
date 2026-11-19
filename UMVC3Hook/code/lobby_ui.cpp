@@ -678,7 +678,8 @@ void LobbyUi::UpdateBrowse(const Input& input)
         const SearchResult& result = service_.Result(browseCursor_);
         if (!result.compatible) {
             Play(SFX_CANCEL);
-            ShowNotice("This lobby is running a different Timestone version.");
+            ShowNotice(result.versionNotice[0] ? result.versionNotice
+                           : "This lobby is running a different Timestone version.");
         } else if (result.members >= result.maxMembers) {
             Play(SFX_CANCEL);
             ShowNotice("LOBBY IS FULL");
@@ -1998,7 +1999,8 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
                result.members >= result.maxMembers ? kRed : kText);
 
         if (!result.compatible) {
-            p.Text("VERSION MISMATCH", 1066.0f, y, 0.5f, A_ML, kRed);
+            p.Text(result.versionOrder < 0 ? "OLD VERSION" : result.versionOrder > 0 ? "NEW VERSION"
+                                           : "VERSION MISMATCH", 1066.0f, y, 0.5f, A_ML, kRed);
         } else {
             DrawPing(r, 1066.0f, y - (result.matchInProgress ? 8.0f : 0.0f), result.pingMs);
             if (result.matchInProgress)
@@ -2959,33 +2961,77 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
     }
     if (!message) return false;
 
+    // The whole message is always shown: a line too wide for the panel is
+    // wrapped at a space (or mid-word when it has none), never cut short.
+    const float w = 720.0f;
+    constexpr float kMessageScale = 0.86f;
+    constexpr int kMaxLines = 12;
+    const float lineLimit = (w - 80.0f) / kMessageScale;
+    char wrapped[768];
+    size_t used = 0, lineStart = 0, lastSpace = 0;
+    bool haveSpace = false;
+    for (const char* c = message; *c && used + 2 < sizeof(wrapped); ++c) {
+        if (*c == '\n') {
+            wrapped[used++] = '\n';
+            lineStart = used;
+            haveSpace = false;
+            continue;
+        }
+        if (*c == ' ') {
+            lastSpace = used;
+            haveSpace = true;
+        }
+        wrapped[used++] = *c;
+        // Only measured at the end of a character, not inside a UTF-8 sequence.
+        if ((static_cast<unsigned char>(c[1]) & 0xC0) == 0x80) continue;
+        wrapped[used] = '\0';
+        if (TextWidth(wrapped + lineStart) <= lineLimit) continue;
+        if (haveSpace) {
+            wrapped[lastSpace] = '\n';
+            lineStart = lastSpace + 1;
+        } else {
+            // One unbroken run wider than the panel: break before this character.
+            size_t at = used - 1;
+            while (at > lineStart && (static_cast<unsigned char>(wrapped[at]) & 0xC0) == 0x80) --at;
+            if (at == lineStart) continue; // a single character; nothing to break
+            memmove(wrapped + at + 1, wrapped + at, used - at);
+            wrapped[at] = '\n';
+            ++used;
+            lineStart = at + 1;
+        }
+        haveSpace = false;
+    }
+    wrapped[used] = '\0';
+    message = wrapped;
+
     int lineCount = 1;
     for (const char* c = message; *c; ++c)
         if (*c == '\n') ++lineCount;
+    if (lineCount > kMaxLines) lineCount = kMaxLines;
     const bool asking = confirm_ != Confirm::None && !busy_[0] && !notice_[0];
 
     p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.6f});
     // A question grows by a line height for each line past two, so the
     // answers stay clear of the text.
-    const float w = 720.0f,
-                h = asking ? 210.0f + (lineCount > 2 ? (lineCount - 2) * 30.0f : 0.0f) : 170.0f;
+    const float h = asking ? 210.0f + (lineCount > 2 ? (lineCount - 2) * 30.0f : 0.0f)
+                           : 170.0f + (lineCount > 3 ? (lineCount - 3) * 30.0f : 0.0f);
     const float x = (kScreenW - w) * 0.5f, y = (kScreenH - h) * 0.5f - 12.0f;
     p.Box(TEX_PANEL_DARK, x, y, w, h);
     p.Sprite(TEX_YELLOW_BAR, x + 30.0f, y + 26.0f, w - 60.0f, 3.0f, Uv{0.1f, 0.2f, 0.9f, 0.8f}, A_TL);
 
-    // Break the message at newlines; each line is fitted to the panel.
-    char line[160];
+    // One line of the wrapped message at a time.
+    char line[256];
     const char* cursor = message;
     int lineIndex = 0;
     const float firstY = asking ? y + 76.0f - (lineCount > 1 ? 15.0f : 0.0f)
                                 : y + h * 0.5f - (lineCount - 1) * 15.0f;
-    while (*cursor && lineIndex < 5) {
+    while (*cursor && lineIndex < kMaxLines) {
         size_t length = 0;
         while (cursor[length] && cursor[length] != '\n') ++length;
         const size_t copy = length < sizeof(line) - 1 ? length : sizeof(line) - 1;
         memcpy(line, cursor, copy);
         line[copy] = '\0';
-        p.TextFit(line, kScreenW * 0.5f, firstY + lineIndex * 30.0f, 0.86f, w - 80.0f, A_MC);
+        p.Text(line, kScreenW * 0.5f, firstY + lineIndex * 30.0f, kMessageScale, A_MC);
         cursor += length;
         if (*cursor == '\n') ++cursor;
         ++lineIndex;

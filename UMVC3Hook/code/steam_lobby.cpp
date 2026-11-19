@@ -355,24 +355,7 @@ void SetStatusf(const char* format, uint64_t value)
 
 void SetVersionMismatch(const char* remoteProtocol)
 {
-    unsigned remoteMajor = 0, remoteMinor = 0, remotePatch = 0;
-    unsigned localMajor = 0, localMinor = 0, localPatch = 0;
-    bool parsedRemote = remoteProtocol &&
-        sscanf(remoteProtocol, "%u.%u.%u", &remoteMajor, &remoteMinor, &remotePatch) == 3;
-    bool parsedLocal = sscanf(kLobbyProtocol, "%u.%u.%u",
-                              &localMajor, &localMinor, &localPatch) == 3;
-    bool remoteOlder = !parsedRemote || (parsedLocal &&
-        (remoteMajor < localMajor ||
-         (remoteMajor == localMajor && remoteMinor < localMinor) ||
-         (remoteMajor == localMajor && remoteMinor == localMinor &&
-          remotePatch < localPatch)));
-    snprintf(g_versionMismatch, sizeof(g_versionMismatch),
-             "%s\n\nYour version: %s\nTheir version: %s",
-             remoteOlder
-                 ? "The other player is running an older version."
-                 : "Your version does not match, please update Timestone",
-             kLobbyProtocol,
-             remoteProtocol && remoteProtocol[0] ? remoteProtocol : "unknown");
+    SteamLobby_FormatVersionMismatch(remoteProtocol, g_versionMismatch, sizeof(g_versionMismatch));
     g_versionMismatchPending = true;
     SetStatus("Steam lobby version does not match");
 }
@@ -1545,6 +1528,36 @@ const char* SteamLobby_GetResultUsername(size_t index)
 {
     if (LocalLobby_Enabled()) return LocalLobby_GetResultUsername();
     return index < g_resultCount ? g_resultUsernames[index] : "";
+}
+
+int SteamLobby_FormatVersionMismatch(const char* lobbyProtocol, char* out, size_t outSize)
+{
+    if (!out || !outSize) return 0;
+    // The lobby's version is its host's text: only digits and dots are shown.
+    char theirs[16] = {};
+    size_t length = 0;
+    for (const char* c = lobbyProtocol ? lobbyProtocol : ""; *c && length + 1 < sizeof(theirs); ++c)
+        if ((*c >= '0' && *c <= '9') || *c == '.') theirs[length++] = *c;
+    unsigned a[3] = {}, b[3] = {};
+    int order = 0; // the lobby's version against ours
+    if (sscanf(theirs, "%u.%u.%u", &a[0], &a[1], &a[2]) == 3 &&
+        sscanf(kLobbyProtocol, "%u.%u.%u", &b[0], &b[1], &b[2]) == 3) {
+        for (int part = 0; part < 3 && !order; ++part)
+            order = a[part] < b[part] ? -1 : a[part] > b[part] ? 1 : 0;
+    }
+    // Which side is behind decides who has to update.
+    snprintf(out, outSize, "This lobby is running %s Timestone version.\nLobby: %s    Yours: %s%s",
+             order < 0 ? "an older" : order > 0 ? "a newer" : "a different",
+             theirs[0] ? theirs : "unknown", kLobbyProtocol,
+             order < 0 ? "\nThe host needs to update."
+                       : order > 0 ? "\nUpdate Timestone to join." : "");
+    return order;
+}
+
+const char* SteamLobby_GetResultProtocol(size_t index)
+{
+    if (LocalLobby_Enabled()) return kLobbyProtocol;
+    return index < g_resultCount ? g_resultProtocols[index] : "";
 }
 
 bool SteamLobby_ArePingEstimatesAvailable()

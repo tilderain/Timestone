@@ -43,6 +43,14 @@ uint64_t SteamLobby_GetResult(size_t index);
 int SteamLobby_GetResultEstimatedPing(size_t index);
 const char* SteamLobby_GetResultName(size_t index);
 const char* SteamLobby_GetResultUsername(size_t index);
+// The Timestone version a found lobby was made with (set by its host, so
+// untrusted text).
+const char* SteamLobby_GetResultProtocol(size_t index);
+// The notice for a lobby on another version: whether its is older or newer
+// than ours, both versions, and who has to update. Used wherever a join is
+// refused for it. Returns -1 if the lobby's version is the older, 1 if the
+// newer, 0 if that cannot be told.
+int SteamLobby_FormatVersionMismatch(const char* lobbyProtocol, char* out, size_t outSize);
 bool SteamLobby_ArePingEstimatesAvailable();
 bool SteamLobby_TakeResultsChanged();
 bool SteamLobby_TakeVersionMismatch(char* message, size_t messageSize);
