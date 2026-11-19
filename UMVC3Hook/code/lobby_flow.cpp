@@ -310,10 +310,15 @@ void SettingsPath(char* path, size_t size)
     LaunchMenuUtils::GetSettingsPath(path, size);
 }
 
+// Spectating: whether the names and feed state are drawn over the match.
+std::atomic<bool> g_spectatorOverlay{true};
+
 UiPrefs LoadPrefs()
 {
     char path[MAX_PATH] = {};
     SettingsPath(path, sizeof(path));
+    g_spectatorOverlay.store(GetPrivateProfileIntA("Lobby", "SpectatorOverlay", 1, path) != 0,
+                             std::memory_order_relaxed);
     g_rosterPrefs = ConnectRoster_Load(path, ConnectRoster{});
 
     UiPrefs prefs = {};
@@ -1245,7 +1250,7 @@ void UpdateSpectateJoin(bool cancelPressed)
         Spectate_Start(wanted);
         g_watchIdleTick = 0;
         g_watchLiveTick = 0;
-        g_ui->SetBusy("Joining the match as a spectator...\nCancel to stop.");
+        g_ui->SetBusy("Preparing to spectate...");
         SetPhase(Phase::WatchJoining);
         return;
     }
@@ -1730,7 +1735,10 @@ void LobbyFlow_DrawOverlay()
 
     // Watching: who is playing (and the set score), with the state of the
     // feed under it when there is something to say.
-    if (g_phase == Phase::InMatch && g_spectating) {
+    // F3 hides it, except the out-of-sync warning: the picture is wrong then.
+    const bool overlayShown = g_spectatorOverlay.load(std::memory_order_relaxed);
+    if (g_phase == Phase::InMatch && g_spectating &&
+        (overlayShown || Spectate_GetStatus().desynced)) {
         char line[sizeof(g_watchLine)];
         memcpy(line, g_watchLine, sizeof(line));
         line[sizeof(line) - 1] = '\0';
@@ -1748,7 +1756,8 @@ void LobbyFlow_DrawOverlay()
             draw->AddText(font, size, ImVec2(at.x + 2.0f, at.y + 2.0f), IM_COL32(0, 0, 0, 220), text);
             draw->AddText(font, size, at, color, text);
         };
-        centred(line, display.y * 0.03f, display.y * 0.012f, IM_COL32(255, 255, 255, 255));
+        if (overlayShown)
+            centred(line, display.y * 0.03f, display.y * 0.012f, IM_COL32(255, 255, 255, 255));
         centred(note, display.y * 0.022f, display.y * 0.047f,
                 status.desynced ? IM_COL32(255, 110, 90, 255) : IM_COL32(120, 220, 255, 255));
     }
@@ -2179,4 +2188,15 @@ bool LobbyFlow_WantsText()
 void LobbyFlow_OnChar(uint32_t utf16)
 {
     Native_OnChar(utf16);
+}
+
+void LobbyFlow_ToggleSpectatorOverlay()
+{
+    const bool shown = !g_spectatorOverlay.load(std::memory_order_relaxed);
+    g_spectatorOverlay.store(shown, std::memory_order_relaxed);
+    char path[MAX_PATH] = {};
+    LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
+    if (!path[0] || !IniSafe_WriteString("Lobby", "SpectatorOverlay", shown ? "1" : "0", path))
+        HookLog("LobbyFlow: failed to save the spectator overlay setting\n");
+    HookLog("LobbyFlow: spectator overlay %s\n", shown ? "shown" : "hidden");
 }

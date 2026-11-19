@@ -1768,6 +1768,12 @@ void FrameStepper_Process()
     }
     // Netplay settings hotkeys. These work regardless of training mode so both
     // sides can adjust them mid-match. A spectator has no settings to adjust.
+    if (Spectate_IsViewing())
+    {
+        // F3 is the HUD key for players; watching, it hides the overlay.
+        if (KeyPressed(VK_F3))
+            LobbyFlow_ToggleSpectatorOverlay();
+    }
     if (Netplay_IsActive() && !Spectate_IsViewing())
     {
         if (KeyPressed(VK_F3))

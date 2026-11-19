@@ -44,6 +44,10 @@ void LobbyFlow_OnBattleBootCommitted();
 // Called from the hooked sMvc3Main::move every frame.
 void LobbyFlow_GameTick();
 
+// Shows or hides the spectator's overlay (who is playing, feed state) and
+// saves the choice. Game thread.
+void LobbyFlow_ToggleSpectatorOverlay();
+
 // True from match launch until the player is back in the lobby.
 bool LobbyFlow_InRoomMatch();
 // Called from the result-phase hooks every frame the winner outro or result
