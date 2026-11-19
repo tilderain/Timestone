@@ -218,6 +218,9 @@ ULONGLONG g_feedLostTick = 0;    // watching: when the feed went away
 std::atomic<bool> g_watchOptOutRequested{false};
 char g_watchNames[2][kNameCapacity] = {};
 char g_watchLine[160] = {};
+// Spectating: who else watches, the setup's queue and where the feed comes
+// from, as text for the Esc menu. Written on the game thread each tick.
+SpectatorInfo g_watchInfo = {};
 
 MatchPairing g_pairing = {};
 ULONGLONG g_launchWaitTick = 0; // player 2: when player 1 was first seen fighting
@@ -1176,6 +1179,40 @@ void StopSpectating()
     g_watchIdleTick = 0;
     g_feedLostTick = 0;
     g_watchLine[0] = '\0';
+    g_watchInfo.valid = false;
+}
+
+void UpdateWatchInfo(const RoomState& room, int slot)
+{
+    SpectatorInfo info = {};
+    info.valid = true;
+    info.feedPing = -1;
+    const Member* local = nullptr;
+    for (int i = 0; i < room.memberCount; ++i)
+        if (room.members[i].isLocal) local = &room.members[i];
+    const auto put = [](SpectatorInfo::Person& person, const Member& member) {
+        snprintf(person.name, sizeof(person.name), "%s", member.name);
+        person.local = member.isLocal;
+    };
+    for (int i = 0; i < room.memberCount; ++i) {
+        const Member& member = room.members[i];
+        if (local && local->upstream && member.id == local->upstream) {
+            snprintf(info.feed, sizeof(info.feed), "%s", member.name);
+            info.feedPing = member.pingMs;
+        }
+        if (member.watchSlot == slot && info.watcherCount < SpectatorInfo::kMax)
+            put(info.watchers[info.watcherCount++], member);
+    }
+    // Front of the line first; the room derives each place.
+    for (int place = 1; place <= room.memberCount; ++place) {
+        for (int i = 0; i < room.memberCount; ++i) {
+            const Member& member = room.members[i];
+            if (member.queueSlot == slot && member.queuePos == place &&
+                info.queueCount < SpectatorInfo::kMax)
+                put(info.queue[info.queueCount++], member);
+        }
+    }
+    memcpy(&g_watchInfo, &info, sizeof(info));
 }
 
 // Who is being watched, for the overlay and the in-battle name plates.
@@ -1184,6 +1221,7 @@ void UpdateWatchText()
     const int slot = Spectate_Slot();
     if (!g_service || slot < 0) return;
     const RoomState& room = g_service->Room();
+    UpdateWatchInfo(room, slot);
     const Member* players[2] = {nullptr, nullptr};
     for (int i = 0; i < room.memberCount; ++i) {
         const Member& member = room.members[i];
@@ -2199,4 +2237,16 @@ void LobbyFlow_ToggleSpectatorOverlay()
     if (!path[0] || !IniSafe_WriteString("Lobby", "SpectatorOverlay", shown ? "1" : "0", path))
         HookLog("LobbyFlow: failed to save the spectator overlay setting\n");
     HookLog("LobbyFlow: spectator overlay %s\n", shown ? "shown" : "hidden");
+}
+
+SpectatorInfo LobbyFlow_GetSpectatorInfo()
+{
+    SpectatorInfo info;
+    memcpy(&info, &g_watchInfo, sizeof(info));
+    for (auto* person : {info.watchers, info.queue})
+        for (int i = 0; i < SpectatorInfo::kMax; ++i) person[i].name[sizeof(person[i].name) - 1] = '\0';
+    info.feed[sizeof(info.feed) - 1] = '\0';
+    if (info.watcherCount > SpectatorInfo::kMax) info.watcherCount = SpectatorInfo::kMax;
+    if (info.queueCount > SpectatorInfo::kMax) info.queueCount = SpectatorInfo::kMax;
+    return info;
 }

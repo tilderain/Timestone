@@ -44,6 +44,24 @@ void LobbyFlow_OnBattleBootCommitted();
 // Called from the hooked sMvc3Main::move every frame.
 void LobbyFlow_GameTick();
 
+// Spectating: who is watching, the setup's queue in order, and who the feed
+// comes from with the room's ping estimate to them (-1 when unknown).
+// `valid` is false when not watching.
+struct SpectatorInfo {
+    static constexpr int kMax = 8;
+    struct Person {
+        char name[64];
+        bool local;
+    };
+    bool valid;
+    char feed[64]; // empty until someone feeds us
+    int feedPing;
+    int watcherCount;
+    Person watchers[kMax];
+    int queueCount;
+    Person queue[kMax];
+};
+SpectatorInfo LobbyFlow_GetSpectatorInfo();
 // Shows or hides the spectator's overlay (who is playing, feed state) and
 // saves the choice. Game thread.
 void LobbyFlow_ToggleSpectatorOverlay();

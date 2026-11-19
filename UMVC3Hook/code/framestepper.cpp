@@ -31,6 +31,8 @@
 #include "lobby_flow.h"
 #include "spectate.h"
 
+extern void D3D9ResetDiagnostics_NoteGameThread();
+
 // Netplay debug info from controller.cpp
 extern "C" int32_t Controller_GetDelayFrames();
 extern "C" int32_t Controller_GetNetFrameCount();
@@ -648,6 +650,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
     if (firstMove) {
         BootTimer_Stamp("First sMvc3Main move");
         firstMove = false;
+        // Watch from the first game tick: a start-up can hang before its
+        // first frame is even begun (seen 2026-11-18).
+        D3D9ResetDiagnostics_NoteGameThread();
     }
 
     // Rollback_ReSimulate owns the input boundary while replaying frames.

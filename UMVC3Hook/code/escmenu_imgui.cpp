@@ -244,7 +244,89 @@ void EscMenuImGui_Draw()
         ImGui::TextDisabled("Capture complete. Log opened.");
     else
         ImGui::TextDisabled("Records for 15 seconds, then opens the log.");
+    const ImVec2 settingsPos = ImGui::GetWindowPos();
+    const ImVec2 settingsSize = ImGui::GetWindowSize();
     ImGui::End();
+
+    // Watching: who else is, the setup's queue and where the feed comes
+    // from, in a second panel under the settings.
+    const SpectatorInfo watch = LobbyFlow_IsSpectating() ? LobbyFlow_GetSpectatorInfo()
+                                                         : SpectatorInfo{};
+    if (watch.valid) {
+        const ImVec4 gold(0.90f, 0.81f, 0.48f, 1.0f);
+        const ImVec4 dim(0.62f, 0.60f, 0.50f, 1.0f);
+        ImGui::SetNextWindowPos(ImVec2(settingsPos.x, settingsPos.y + settingsSize.y + 8.0f),
+                                ImGuiCond_Always);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(settingsSize.x, 0.0f),
+                                            ImVec2(settingsSize.x, FLT_MAX));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 5.0f));
+        ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.58f, 0.54f, 0.39f, 0.45f));
+        ImGui::Begin("Spectating##EscMenu", nullptr,
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
+        // A gold heading with its count against the right edge.
+        const auto rightText = [](const ImVec4& color, const char* text) {
+            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(text).x);
+            ImGui::TextColored(color, "%s", text);
+        };
+        const auto heading = [&](const char* title, int count) {
+            ImGui::TextColored(gold, "%s", title);
+            if (count >= 0) {
+                char number[8];
+                snprintf(number, sizeof(number), "%d", count);
+                rightText(dim, number);
+            }
+            ImGui::Separator();
+        };
+        const auto person = [&](const SpectatorInfo::Person& who, int place) {
+            ImGui::Indent(6.0f);
+            if (place > 0) {
+                ImGui::TextColored(dim, "%d", place);
+                ImGui::SameLine(34.0f);
+            }
+            if (who.local) ImGui::TextColored(gold, "%s", who.name);
+            else ImGui::TextUnformatted(who.name);
+            if (who.local) rightText(dim, "you");
+            ImGui::Unindent(6.0f);
+        };
+        const auto nobody = [&]() {
+            ImGui::Indent(6.0f);
+            ImGui::TextColored(dim, "Nobody");
+            ImGui::Unindent(6.0f);
+        };
+
+        heading("RECEIVING FROM", -1);
+        ImGui::Indent(6.0f);
+        if (watch.feed[0]) {
+            ImGui::TextUnformatted(watch.feed);
+            if (watch.feedPing >= 0) {
+                char ping[16];
+                snprintf(ping, sizeof(ping), "%d ms", watch.feedPing);
+                const ImVec4 color = watch.feedPing < 100 ? ImVec4(0.55f, 0.86f, 0.50f, 1.0f)
+                                   : watch.feedPing < 200 ? ImVec4(0.93f, 0.80f, 0.40f, 1.0f)
+                                                          : ImVec4(0.93f, 0.47f, 0.40f, 1.0f);
+                rightText(color, ping);
+            }
+        } else {
+            ImGui::TextColored(dim, "Nobody yet");
+        }
+        ImGui::Unindent(6.0f);
+
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        heading("WATCHING", watch.watcherCount);
+        for (int i = 0; i < watch.watcherCount; ++i) person(watch.watchers[i], 0);
+        if (!watch.watcherCount) nobody();
+
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        heading("IN QUEUE", watch.queueCount);
+        for (int i = 0; i < watch.queueCount; ++i) person(watch.queue[i], i + 1);
+        if (!watch.queueCount) nobody();
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+    }
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(9);
 
