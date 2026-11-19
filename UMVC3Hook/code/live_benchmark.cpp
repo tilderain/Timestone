@@ -11,6 +11,8 @@
 #include "steam_lobby.h"
 #include "LaunchMenu_settings.h"
 #include "controller.h"
+#include "frame_pacing.h"
+#include "d3d9ex.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -673,6 +675,25 @@ void LiveBenchmark_Draw()
         } else if (snapshot.connected) {
             ImGui::Separator();
             ImGui::TextDisabled("Frame advantage  N/A");
+        }
+        // Frame pacing (frame_pacing.cpp): how evenly frames are presented,
+        // and what the display did with them where the backend can tell.
+        const FramePacingStats pacing = FramePacing_Get();
+        if (pacing.valid) {
+            ImGui::Separator();
+            ImGui::Text("Frame time  %.2f ms", pacing.averageMs);
+            ImGui::SameLine();
+            ImGui::TextDisabled("worst %+.2f, %u late / 2s", pacing.worstMs, pacing.late);
+            if (pacing.displayValid) {
+                if (pacing.repeated || pacing.dropped)
+                    ImGui::Text("Display %.2f Hz  %u repeated, %u dropped / 10s",
+                                pacing.refreshHz, pacing.repeated, pacing.dropped);
+                else
+                    ImGui::TextDisabled("Display %.2f Hz  no repeated or dropped frames / 10s",
+                                        pacing.refreshHz);
+            } else {
+                ImGui::TextDisabled("Display  N/A (%s)", D3D9Ex_BackendName());
+            }
         }
         ImGui::Separator();
         ImGui::TextDisabled("Samples %u / %u  |  0: show both for 8s",

@@ -193,6 +193,7 @@ auto originalTextureMap = NativeMap;
 auto originalTextureUnmap = NativeUnmap;
 enum class LagMetric { BackendPresent };
 struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
+void FramePacing_OnPresent(Device*) {}
 '''
 
 CASES = r'''

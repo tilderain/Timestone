@@ -3,6 +3,7 @@
 #include "mk10utils.h"
 #include "launchmenu_utils.h"
 #include "lag_diagnostics.h"
+#include "frame_pacing.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <atomic>
 #include <cstdint>
@@ -279,6 +280,7 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
         LagDiagnosticScope diagnostic(LagMetric::BackendPresent);
         result = originalPresent(device, src, dst, window, dirty);
     }
+    FramePacing_OnPresent(device);
     if (device != exDevice) return result;
     if (result == S_PRESENT_OCCLUDED) return D3D_OK;
     if (result == S_PRESENT_MODE_CHANGED) return D3DERR_DEVICELOST;

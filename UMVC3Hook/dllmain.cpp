@@ -33,6 +33,7 @@
 #include "code/d3d9reset.h"
 #include "code/shader_constants.h"
 #include "code/d3d9ex.h"
+#include "code/frame_pacing.h"
 #include "code/exception.h"
 #include "code/mk10utils.h"
 #include <Windows.h>
@@ -707,8 +708,13 @@ static BackendPresentFn oBackendPresent = nullptr;
 static HRESULT WINAPI hkBackendPresent(IDirect3DDevice9* device, const RECT* source,
     const RECT* destination, HWND window, const RGNDATA* dirty)
 {
-    LagDiagnosticScope diagnostic(LagMetric::BackendPresent);
-    return oBackendPresent(device, source, destination, window, dirty);
+    HRESULT result;
+    {
+        LagDiagnosticScope diagnostic(LagMetric::BackendPresent);
+        result = oBackendPresent(device, source, destination, window, dirty);
+    }
+    FramePacing_OnPresent(device);
+    return result;
 }
 WNDPROC oWndProc;
 static HWND window = NULL;
