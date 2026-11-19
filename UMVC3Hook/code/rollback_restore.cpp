@@ -162,7 +162,7 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     // Camera center, overlook, and runtime tracking state.
     {0x430, 0x20},
     {0x450, 0x40},
-    // Runtime state and camera tuning; leave height-target pointer +0x4C8 live.
+    // Runtime state and camera tuning; +0x4C8 is a character reference, restored below.
     {0x490, 0x38},
     {0x4D8, 0xA4},
     // Camera option flags and Maya active/request flags at +0x588/+0x589.
@@ -666,10 +666,19 @@ void Rollback_RestoreSnapshot(int32_t frame)
                          slot.actionSideCamera.motionParent);
         restoreCharacter((void**)(camera + 0x3D0),
                          slot.actionSideCamera.requestParent);
-        // Restore +0x4D0 only as a roster reference; its precise role is unresolved.
-        uint64_t target = 0;
-        std::memcpy(&target, saved + 0x4D0, sizeof(target));
-        *(uint64_t*)(camera + 0x4D0) = isTeamCharacter(target) ? target : 0;
+        // Two retained character references, each rewound only as a roster
+        // reference (null otherwise):
+        //  +0x4C8 the preferred tracked character, which picks whose height
+        //         the camera follows (1400199C0). An animation command sets it
+        //         with camera option flag 0x20 (140101C39); the flags at +0xB0
+        //         are rewound above, so it has to come back with them.
+        //  +0x4D0 the retained airborne-hitstun character (140019EF0).
+        for (uint32_t field : {0x4C8u, 0x4D0u}) {
+            if ((size_t)field + sizeof(uint64_t) > copySize) continue;
+            uint64_t target = 0;
+            std::memcpy(&target, saved + field, sizeof(target));
+            *(uint64_t*)(camera + field) = isTeamCharacter(target) ? target : 0;
+        }
     };
 
     auto traceRestoreState = [frame, team0, team1, &teamCharacters, teamCharacterCount](
