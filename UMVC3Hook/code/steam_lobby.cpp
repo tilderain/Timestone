@@ -773,6 +773,54 @@ void PumpLobbyMembers()
     StartPeerConnection(remote);
 }
 
+// A room outlives its creator: Steam hands the lobby to another member, and
+// only the owner can write lobby data. The browser shows the host from the
+// "username" attribute and estimates ping from "location", both written when
+// the room was made, so the member who becomes the owner rewrites them.
+void PumpRoomOwner()
+{
+    static uint64_t trackedLobby = 0;
+    static uint64_t trackedOwner = 0;
+    if (!g_roomMode || !g_lobbyId || !g_matchmaking) {
+        trackedLobby = 0;
+        trackedOwner = 0;
+        return;
+    }
+    const uint64_t owner = g_api.GetLobbyOwner(g_matchmaking, g_lobbyId);
+    if (!owner) return;
+    if (trackedLobby != g_lobbyId) {
+        // Just entered: whoever owns it now has already published itself.
+        trackedLobby = g_lobbyId;
+        trackedOwner = owner;
+        return;
+    }
+    if (owner == trackedOwner) return;
+    trackedOwner = owner;
+    if (owner != g_localSteamId) return;
+
+    const char* persona = g_friends ? g_api.GetPersonaName(g_friends) : nullptr;
+    const char* username = persona && persona[0] ? persona : g_localUsername;
+    if (!username[0]) return;
+    // A room that was never named carries "<host>'s Lobby"; keep that true.
+    char previous[128] = {};
+    char name[128] = {};
+    const char* value = g_api.GetLobbyData(g_matchmaking, g_lobbyId, "username");
+    snprintf(previous, sizeof(previous), "%s", value ? value : "");
+    value = g_api.GetLobbyData(g_matchmaking, g_lobbyId, "name");
+    snprintf(name, sizeof(name), "%s", value ? value : "");
+    char fallback[160];
+    snprintf(fallback, sizeof(fallback), "%s's Lobby", previous);
+    if (!name[0] || (previous[0] && !strcmp(name, fallback))) {
+        snprintf(fallback, sizeof(fallback), "%.110s's Lobby", username);
+        g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", fallback);
+    }
+    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "username", username);
+    // The lobby's ping location is the owner's; publish this member's again.
+    g_pingLocationPublished = false;
+    g_nextPingLocationAttempt = 0;
+    HookLog("SteamLobby: now the lobby host; host name updated\n");
+}
+
 void PumpPingLocation()
 {
     if (!g_lobbyId || g_pingLocationPublished || !g_networkingUtils)
@@ -1313,6 +1361,7 @@ void SteamLobby_Pump()
 
     PumpQueuedJoinRequest();
 
+    PumpRoomOwner();
     PumpPingLocation();
     RefreshResultPings();
     PumpLobbyMembers();
