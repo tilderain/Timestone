@@ -239,13 +239,16 @@ struct AutomaticNetplaySettings {
 static AutomaticNetplaySettings GetAutomaticNetplaySettings(enet_uint32 pingMs)
 {
     const int32_t rollback = kNetplayRollbackFrames;
-    if (pingMs < 24)  return {0, rollback};
-    if (pingMs < 40)  return {1, rollback};
-    if (pingMs < 80)  return {2, rollback};
-    if (pingMs < 175) return {3, rollback};
-    if (pingMs < 240) return {4, rollback};
-    if (pingMs < 300) return {5, rollback};
-    return {6, rollback};
+    // Rollback depth is about the one-way trip in frames (ping / 33.3 ms), plus
+    // a frame of jitter, minus the delay. The steps keep that under 3 frames
+    // up to 120 ms and let it rise to about 5 from 240 ms, rather than pay
+    // more delay.
+    if (pingMs < 50)  return {0, rollback};
+    if (pingMs < 90)  return {1, rollback};
+    if (pingMs < 120) return {2, rollback};
+    if (pingMs < 240) return {3, rollback};
+    if (pingMs < 300) return {4, rollback};
+    return {5, rollback};
 }
 
 static AutomaticNetplaySettings ApplyAutomaticNetplaySettings(enet_uint32 pingMs)
