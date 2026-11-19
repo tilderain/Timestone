@@ -598,6 +598,12 @@ static bool SpectatorFrameStart(void* sMvc3Main)
         break;
     }
     g_spectatorHoldSince = 0;
+    if (fastForward < 0) {
+        // Behind the feed: this frame starts a frame time late (the pacing
+        // wait in the tick below takes it), so the last picture is shown twice.
+        Rollback_DelayNextFrame(1);
+        fastForward = 0;
+    }
         // Whole native ticks, just not paced and not drawn; as many as fit
         // in the time one drawn frame can spare.
     // Catching up. In the fight, the rollback path itself: snapshot the frame

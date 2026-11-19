@@ -63,7 +63,8 @@ uint32_t Spectate_PlayGameId();
 
 enum class SpectateStep : uint8_t {
     Hold,    // nothing to simulate yet
-    Play,    // simulate this frame (after `fastForward` frames without drawing)
+    Play,    // simulate this frame (after `fastForward` frames without drawing;
+             // -1: one frame time later than usual, the last picture standing)
     Restart, // the game was restarted: do the same (Spectate_GetRestart)
     Leave,   // the match is over
 };

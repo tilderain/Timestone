@@ -19,9 +19,18 @@ namespace {
 // Catch-up runs frames without drawing them (Rollback_FastForward). Off, a
 // spectator still works but stays as far behind as its loading took.
 constexpr bool kFastForward = true;
-constexpr int kResumeBuffer = 30;   // frames wanted before playing on after running dry
-constexpr int kFastForwardStart = 90;  // further behind than this: catch up...
-constexpr int kFastForwardTarget = 45; // ...to this
+constexpr int kResumeBuffer = 60;   // frames wanted before a game's first frame is played
+// Once a game is playing it is never stopped to refill. A feed that falls
+// behind (the players' game running under 60, or a late batch) is followed by
+// playing a little slower instead: now and then one frame is shown for two
+// frame times, more often the emptier the buffer. Each pair is the smoothed
+// buffer level under which it applies and how many frames are played between
+// those repeats.
+constexpr struct { int below, every; } kSlowDown[] = {{10, 3}, {25, 8}, {45, 30}};
+// A spectator plays a second behind what it has received: that much of a
+// gap in the feed passes without the picture changing pace.
+constexpr int kFastForwardStart = 120; // further behind than this: catch up...
+constexpr int kFastForwardTarget = 60; // ...to this
 constexpr int kFastForwardPerTick = 8;
 constexpr int kChecksumInterval = 60;
 // How many spectators one member feeds. A fighting player's link competes
@@ -32,7 +41,10 @@ constexpr int kViewerChildren = 2;
 // near it; the live feed is a few hundred bytes a second.
 constexpr int kPlayerBudget = 700;
 constexpr int kViewerBudget = 12000;
-constexpr int kFlushFrames = 12; // live frames batched into one message
+// Live frames batched into one message. Smaller batches reach a spectator
+// more evenly (its buffer level swings by a batch), for a few more messages
+// a second: each is about thirty bytes.
+constexpr int kFlushFrames = 6;
 constexpr int kMaxLinks = 8;
 constexpr ULONGLONG kConnectTimeoutMs = 12000;
 constexpr ULONGLONG kAvoidFailedMs = 8000;
@@ -226,6 +238,8 @@ int g_slot = -1;
 uint32_t g_playGame = 0; // game being simulated
 uint32_t g_lastDone = 0; // newest game finished with or given up on
 bool g_buffering = true;
+double g_smoothedBuffer = 0.0; // the buffer level with the feed's batches evened out
+int g_playedSinceRepeat = 0;
 bool g_restartPending = false;
 WireConfig g_restartConfig = {};
 uint32_t g_restartSeed = 0;
@@ -876,8 +890,13 @@ SpectateStep Spectate_Next(int32_t frame, int32_t actionStep, int32_t* fastForwa
             g_statWaiting = true;
             return SpectateStep::Hold;
         }
+        if (g_buffering) {
+            g_smoothedBuffer = available;
+            g_playedSinceRepeat = 0;
+        }
         g_buffering = false;
         g_statWaiting = false;
+        g_smoothedBuffer += (available - g_smoothedBuffer) * 0.05;
         static bool catching = false;
         const bool wasCatching = catching;
         catching = false;
@@ -894,12 +913,40 @@ SpectateStep Spectate_Next(int32_t frame, int32_t actionStep, int32_t* fastForwa
         if (catching != wasCatching)
             HookLog("Spectate: %s at frame %d (%d frames buffered)\n",
                     catching ? "catching up" : "caught up", frame, available);
+        // Falling behind the feed: this frame is played one frame time late.
+        // Not once the game is over, when what is left is all there will be.
+        if (!catching && fastForward && game->finish == FINISH_NONE) {
+            ++g_playedSinceRepeat;
+            for (const auto& step : kSlowDown) {
+                if (g_smoothedBuffer >= step.below) continue;
+                if (g_playedSinceRepeat >= step.every) {
+                    g_playedSinceRepeat = 0;
+                    *fastForward = -1;
+                    // At most a line every ten seconds: how much of this
+                    // there has been says how far under 60 the feed runs.
+                    static ULONGLONG reportAt = 0;
+                    static int repeats = 0;
+                    ++repeats;
+                    const ULONGLONG now = GetTickCount64();
+                    if (now >= reportAt) {
+                        HookLog("Spectate: behind the feed; %d frames repeated since the last "
+                                "report (%d buffered at frame %d)\n", repeats, available, frame);
+                        repeats = 0;
+                        reportAt = now + 10000;
+                    }
+                }
+                break;
+            }
+        }
         return SpectateStep::Play;
     }
     if (game->finish == FINISH_RESTART) return restartInto(game->next, game->finishSeed);
     if (game->finish == FINISH_END) return SpectateStep::Leave;
     if (const Game* newer = OldestAfter(game->id)) return restartInto(newer->config, 0);
-    g_buffering = true;
+    // Nothing left to play: the picture stands until the next frame arrives
+    // and goes on at once, without waiting for a reserve to build up. The
+    // slow-down above rebuilds it while playing.
+    g_smoothedBuffer = 0.0;
     g_statWaiting = true;
     return SpectateStep::Hold;
 }

@@ -1019,6 +1019,13 @@ static void PreciseFrameWait(uint64_t main)
     FramePacing_WaitUntil(previous + remaining);
 }
 
+// Whole frame times to add before the next paced frame starts.
+static int g_delayFrames = 0;
+void Rollback_DelayNextFrame(int frames)
+{
+    if (frames > 0) g_delayFrames += frames;
+}
+
 static void __fastcall hkMainMove(uint64_t main)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::MainMove);
@@ -1052,6 +1059,17 @@ static void __fastcall hkMainMove(uint64_t main)
             }
             *(int64_t*)(main + 0x68) += (int64_t)((double)stretch * (double)ticksPerFrame);
         }
+    }
+    if (g_delayFrames > 0) {
+        // The ideal counter moves one second's worth of ticks per frame
+        // (see the time sync note above): a frame's worth more is one frame
+        // time more to wait, and the frames after it keep the new schedule.
+        if (*(uint8_t*)(main + 0x58)) {
+            LARGE_INTEGER frequency;
+            QueryPerformanceFrequency(&frequency);
+            *(int64_t*)(main + 0x68) += (int64_t)g_delayFrames * frequency.QuadPart;
+        }
+        g_delayFrames = 0;
     }
     const uint64_t benchmarkStart = LiveBenchmark_Now();
     {

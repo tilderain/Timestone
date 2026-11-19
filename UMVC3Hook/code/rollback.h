@@ -85,6 +85,9 @@ bool Rollback_CanReSimulate();
 // frame runs, exactly as a drawn one, and nothing is presented. A spectator
 // catches up with a match this way (several ticks per drawn frame).
 void Rollback_SetUndrawnLiveTicks(bool enabled);
+// The next paced frame starts this many whole frame times later than it
+// would have: the picture before it stays up that much longer.
+void Rollback_DelayNextFrame(int frames);
 
 // Release rollback slot storage and reset tracking; preserve snapdump history.
 void Rollback_FreeSnapshots();
