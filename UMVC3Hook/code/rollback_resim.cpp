@@ -160,7 +160,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     g_resimReentranceDepth = 0;
 
     LagDiagnosticScope diagnostic(LagMetric::Correction);
-    const uint64_t benchmarkStart = LiveBenchmark_BeginResim();
+    const uint64_t benchmarkStart = LiveBenchmark_BeginResim(endFrame - startFrame, endFrame);
     RollbackProfile profile;
     Profile_BeginRollback(profile, startFrame, endFrame);
     const uint64_t profileStart = Profile_Now();

@@ -36,15 +36,21 @@ struct Costs {
 struct Packet {
     uint32_t type = PACKET_BENCHMARK;
     uint32_t magic = Magic;
-    uint32_t version = 2;
+    uint32_t version = 3;
     uint32_t kind = Summary;
     uint32_t generation = 0;
     uint32_t sequence = 0;
     uint32_t flags = 0;
     Costs costs[Metrics] = {};
-    uint32_t recentLive = 0, recentRollback = 0;
+    uint32_t recentLive = 0;
+    // The newest correction measured together with the frame it delayed:
+    // the correction's own time, and that frame's ordinary tick.
+    uint32_t recentRollback = 0, rollbackGame = 0;
+    // Corrections since the last report and the frames they replayed.
+    uint32_t corrections = 0, replayedFrames = 0;
+    Costs paired = {}; // correction + tick, per measured pair
 };
-static_assert(sizeof(Packet) == 156 && sizeof(Packet) <= 256);
+static_assert(sizeof(Packet) == 168 && sizeof(Packet) <= 256);
 
 struct Samples {
     uint64_t ticks[Window] = {};
@@ -109,9 +115,17 @@ uint32_t RecentCost(const Samples& samples)
 
 Samples g_samples[Metrics]; // Owned solely by the game thread.
 Samples g_pending[(size_t)LiveBenchmarkMetric::Live];
-bool g_active = false, g_corrected = false;
+bool g_active = false;
+bool g_eligible = false; // this frame may be sampled (gates and battle state allow it)
 bool g_resimSampling = false;
 uint64_t g_nextResimSample = 0;
+// A sampled correction is paired with the ordinary tick that follows it in
+// the same frame: together they are what that frame really cost.
+Samples g_pairedSamples;
+uint64_t g_pairStart = 0;      // when the sampled correction began
+uint64_t g_pairCorrection = 0; // its time up to the ordinary tick
+int32_t g_pairFrame = -1;
+uint32_t g_corrections = 0, g_replayedFrames = 0;
 bool g_connected = false;
 uint32_t g_generation = 0, g_flags = 0, g_sequence = 0, g_showSequence = 0;
 uint32_t g_peerSequence = 0, g_peerShowSequence = 0;
@@ -180,7 +194,12 @@ void Clear()
 {
     LagDiagnostics_Event(LagEvent::BenchmarkReset);
     for (auto& samples : g_samples) samples = {};
+    g_pairedSamples = {};
+    g_pairStart = g_pairCorrection = 0;
+    g_pairFrame = -1;
+    g_corrections = g_replayedFrames = 0;
     g_active = false;
+    g_eligible = false;
     g_resimSampling = false;
     g_nextResimSample = 0;
     g_lastFrame = -1;
@@ -202,17 +221,22 @@ void Clear()
 bool Valid(const Packet& packet)
 {
     if (packet.type != PACKET_BENCHMARK || packet.magic != Magic ||
-        packet.version != 2 || packet.generation != g_generation ||
+        packet.version != 3 || packet.generation != g_generation ||
         (packet.kind != Summary && packet.kind != Show) ||
         (packet.flags & ~0x1f07u) || (packet.flags >> 8) > 16)
         return false;
-    for (const auto& c : packet.costs) {
+    if (packet.corrections > packet.replayedFrames ||
+        (!packet.corrections && packet.replayedFrames)) return false;
+    for (size_t i = 0; i <= Metrics; ++i) {
+        const auto& c = i == Metrics ? packet.paired : packet.costs[i];
         if (c.count > Window) return false;
         if (!c.count) {
             if (c.minimum || c.median || c.p95 || c.maximum) return false;
         } else if (!c.minimum || c.minimum > c.median || c.median > c.p95 ||
                    c.p95 > c.maximum) return false;
     }
+    if (packet.paired.count ? (!packet.recentRollback || !packet.rollbackGame) :
+        (packet.recentRollback || packet.rollbackGame)) return false;
     return true;
 }
 
@@ -240,19 +264,6 @@ ImVec4 HealthColor(FrameHealth health)
     return ImVec4(0.64f, 0.63f, 0.57f, 1.0f);
 }
 
-uint64_t RollbackCost(const Packet& packet, uint32_t Costs::*field)
-{
-    const uint32_t depth = packet.flags >> 8;
-    const auto& restore = Cost(packet, LiveBenchmarkMetric::Restore);
-    const auto& tick = Cost(packet, LiveBenchmarkMetric::Headless);
-    const auto& save = Cost(packet, LiveBenchmarkMetric::Save);
-    const bool correctedSaves = (packet.flags & 1) != 0;
-    if (!depth || !restore.count || !tick.count || (correctedSaves && !save.count))
-        return 0;
-    const uint64_t perTick = (uint64_t)(tick.*field) + (correctedSaves ? save.*field : 0);
-    return (uint64_t)(restore.*field) + depth * perTick;
-}
-
 ImVec4 CapacityColor(double percent, bool fresh)
 {
     if (!fresh) return HealthColor(FrameHealth::NoData);
@@ -272,39 +283,33 @@ void DrawCapacityBar(double percent, const ImVec4& color)
         ImVec2(targetX, end.y + 1), ImGui::GetColorU32(ImGuiCol_Text));
 }
 
+// `cost` sets the headline and bar; `detail`, `minimum` and `maximum` are
+// the lines under it. All in microseconds.
 void DrawCapacityValues(uint64_t cost, uint64_t detail, uint64_t minimum, uint64_t maximum,
-                        uint32_t depth, bool resim, bool fresh, bool expanded, size_t side)
+                        bool resim, bool fresh, bool expanded, size_t side)
 {
     // Render-thread cache: numerical text changes with samples, not display frames.
     struct Display {
         uint64_t cost = 0, detail = 0, minimum = 0, maximum = 0;
-        uint32_t depth = 0;
         double percent = 0;
         char headline[64]{}, timing[64]{}, range[64]{};
     };
     static Display cached[2][2];
     auto& display = cached[resim][side];
     if (display.cost != cost || display.detail != detail || display.minimum != minimum ||
-        display.maximum != maximum || display.depth != depth) {
+        display.maximum != maximum) {
         display.cost = cost;
         display.detail = detail;
         display.minimum = minimum;
         display.maximum = maximum;
-        display.depth = depth;
-        display.percent = resim ? 1666700.0 / cost : (1000000.0 / cost) / 60.0 * 100.0;
-        const double fps = resim ? display.percent * 60.0 / 100.0 : 1000000.0 / cost;
+        const double fps = 1000000.0 / cost;
+        display.percent = fps / 60.0 * 100.0;
         std::snprintf(display.headline, sizeof(display.headline), "%.0f%% (%.0f FPS)",
                       display.percent, fps);
-        if (resim) {
-            std::snprintf(display.timing, sizeof(display.timing), "%uf: %.1f ms est.",
-                          depth, detail / 1000.0);
-            std::snprintf(display.range, sizeof(display.range), "Low:%.0f%%  High:%.0f%%",
-                          1666700.0 / maximum, 1666700.0 / minimum);
-        } else {
-            std::snprintf(display.timing, sizeof(display.timing), "Slow: %.1f ms", detail / 1000.0);
-            std::snprintf(display.range, sizeof(display.range), "Low:%.0f  High:%.0f",
-                          1000000.0 / maximum, 1000000.0 / minimum);
-        }
+        std::snprintf(display.timing, sizeof(display.timing), resim ? "Total: %.1f ms" : "p95: %.1f ms",
+                      detail / 1000.0);
+        std::snprintf(display.range, sizeof(display.range), "Low:%.1f ms  High:%.1f ms",
+                      minimum / 1000.0, maximum / 1000.0);
     }
     const ImVec4 color = CapacityColor(display.percent, fresh);
     ImGui::TextColored(color, "%s", display.headline);
@@ -321,19 +326,18 @@ void DrawResim(const Packet& packet, bool available, bool fresh, bool expanded =
         ImGui::TextDisabled("N/A");
         return;
     }
-    const uint32_t depth = packet.flags >> 8;
-    if (!depth) {
+    if (!(packet.flags >> 8)) {
         ImGui::TextDisabled("Off");
         return;
     }
-    const uint64_t cost = packet.recentRollback ? packet.recentRollback :
-        RollbackCost(packet, &Costs::p95);
-    if (!cost) {
+    if (!packet.paired.count) {
         ImGui::TextDisabled("Waiting resim");
         return;
     }
-    DrawCapacityValues(cost, cost, RollbackCost(packet, &Costs::minimum),
-        RollbackCost(packet, &Costs::maximum), depth, true, fresh, expanded, side);
+    // A measured frame: the correction and the tick it ran in front of.
+    const uint64_t cost = (uint64_t)packet.rollbackGame + packet.recentRollback;
+    DrawCapacityValues(cost, cost, packet.paired.minimum, packet.paired.maximum,
+                       true, fresh, expanded, side);
 }
 
 void DrawRate(const Costs& cost, bool available, bool fresh, uint32_t recent = 0,
@@ -344,7 +348,7 @@ void DrawRate(const Costs& cost, bool available, bool fresh, uint32_t recent = 0
         return;
     }
     DrawCapacityValues(recent ? recent : cost.p95, cost.p95, cost.minimum, cost.maximum,
-                       0, false, fresh, expanded, side);
+                       false, fresh, expanded, side);
 }
 
 void Assessment(const Packet& packet, bool fresh)
@@ -354,14 +358,12 @@ void Assessment(const Packet& packet, bool fresh)
     static const char* labels[] = {"NO RECENT DATA", "CHECKING", "Good", "Stutter", "SLOW"};
     ImGui::TextColored(HealthColor(health), "%s", labels[(size_t)health]);
     if (health != FrameHealth::Smooth) return;
-    const auto& clean = Cost(packet, LiveBenchmarkMetric::CleanLive);
-    const uint64_t cost = RollbackCost(packet, &Costs::p95);
     if (!(packet.flags >> 8)) {
         ImGui::TextDisabled("Rollback: off");
-    } else if (clean.count < 2 || !cost) {
+    } else if (!packet.paired.count) {
         ImGui::TextDisabled("Rollback: untested");
     } else {
-        const uint64_t estimate = (uint64_t)clean.p95 + cost;
+        const uint64_t estimate = (uint64_t)packet.rollbackGame + packet.recentRollback;
         ImGui::TextColored(estimate <= 16667 ? ImVec4(0.57f, 0.81f, 0.65f, 1.0f)
                                            : ImVec4(0.88f, 0.76f, 0.49f, 1.0f),
             "%s", estimate <= 16667 ? "Rollback: good" : "Rollback: may lag");
@@ -369,28 +371,47 @@ void Assessment(const Packet& packet, bool fresh)
 }
 } // namespace
 
-uint64_t LiveBenchmark_BeginFrame(int32_t frame)
+void LiveBenchmark_BeginFrame(int32_t frame)
 {
     LagDiagnosticScope diagnostic(LagMetric::BenchmarkBegin);
     g_active = false;
-    if (!HasSamplingRequest()) return 0;
+    g_eligible = false;
+    g_pairStart = g_pairCorrection = 0;
+    if (!HasSamplingRequest()) return;
     if (g_lastFrame >= 0 && frame != g_lastFrame) Clear();
     const uint64_t now = GetTickCount64();
-    if (!SamplingRequested(now)) return 0;
-    if (now < g_nextSample) return 0;
+    if (!SamplingRequested(now)) return;
     if (frame < 0 || FrameStepper_IsMatchRestartPending() ||
-        (Netplay_IsActive() && !FrameStepper_IsDesyncCheckReady())) return 0;
+        (Netplay_IsActive() && !FrameStepper_IsDesyncCheckReady())) return;
     const uint64_t action = ((uint64_t(__fastcall*)())_addr(0x140001A90))();
     if (!action || *(int32_t*)(action + 0xD8) < 3 ||
-        *(int32_t*)(action + 0xD8) == 12) return 0;
-    g_nextSample = now + SampleIntervalMs;
+        *(int32_t*)(action + 0xD8) == 12) return;
+    g_eligible = true;
     g_frame = frame;
-    g_corrected = false;
     g_pacing = 0;
     for (auto& samples : g_pending) samples.count = samples.next = 0;
+    if (now < g_nextSample) return; // unless a sampled correction turns up (BeginNative)
+    g_nextSample = now + SampleIntervalMs;
     g_active = true;
     LagDiagnostics_Event(LagEvent::LiveSample);
-    return Counter();
+}
+
+uint64_t LiveBenchmark_BeginNative()
+{
+    if (!g_eligible) return 0;
+    const bool paired = g_pairStart && g_pairFrame == g_frame;
+    if (!g_active && !paired) return 0;
+    if (!g_active) {
+        // The frame after a sampled correction is measured too, due or not.
+        g_nextSample = GetTickCount64() + SampleIntervalMs;
+        g_active = true;
+        LagDiagnostics_Event(LagEvent::LiveSample);
+    }
+    const uint64_t start = Counter();
+    // Everything the correction put in front of this tick, including the
+    // input resolve and snapshot save that follow the replay.
+    g_pairCorrection = paired ? start - g_pairStart : 0;
+    return start;
 }
 
 uint64_t LiveBenchmark_Now()
@@ -398,22 +419,29 @@ uint64_t LiveBenchmark_Now()
     return g_active || g_resimSampling ? Counter() : 0;
 }
 
-uint64_t LiveBenchmark_BeginResim()
+uint64_t LiveBenchmark_BeginResim(int32_t frames, int32_t endFrame)
 {
-    g_corrected = true;
     g_resimSampling = false;
-    if (!HasSamplingRequest()) return 0;
+    // Never pair only part of a frame containing several corrections.
+    g_pairStart = 0;
+    if (frames <= 0 || !HasSamplingRequest()) return 0;
     const uint64_t now = GetTickCount64();
-    g_resimSampling = SamplingRequested(now) && now >= g_nextResimSample;
+    if (!SamplingRequested(now)) return 0;
+    ++g_corrections;
+    g_replayedFrames += (uint32_t)frames;
+    g_resimSampling = now >= g_nextResimSample;
     if (!g_resimSampling) return 0;
     g_nextResimSample = now + SampleIntervalMs;
     LagDiagnostics_Event(LagEvent::CorrectionSample);
-    return Counter();
+    g_pairFrame = endFrame;
+    g_pairStart = Counter();
+    return g_pairStart;
 }
 
 void LiveBenchmark_EndResim(uint64_t start)
 {
-    LiveBenchmark_Record(LiveBenchmarkMetric::Correction, start);
+    if (start && g_resimSampling)
+        g_samples[(size_t)LiveBenchmarkMetric::Correction].Add(Counter() - start);
     g_resimSampling = false;
 }
 
@@ -425,7 +453,6 @@ void LiveBenchmark_Record(LiveBenchmarkMetric metric, uint64_t start)
     // Resim is sampled independently of the once-per-second live frame.
     if (g_resimSampling) g_samples[index].Add(Counter() - start);
     else g_pending[index].Add(Counter() - start);
-    if (metric == LiveBenchmarkMetric::Correction) g_corrected = true;
 }
 
 void LiveBenchmark_EndPacing(uint64_t start)
@@ -436,7 +463,10 @@ void LiveBenchmark_EndPacing(uint64_t start)
 void LiveBenchmark_EndFrame(uint64_t start, int32_t frame)
 {
     LagDiagnosticScope diagnostic(LagMetric::BenchmarkEnd);
+    const uint64_t correction = g_pairCorrection;
+    g_pairStart = g_pairCorrection = 0;
     if (!start) {
+        g_active = false;
         g_lastFrame = frame;
         return;
     }
@@ -457,20 +487,38 @@ void LiveBenchmark_EndFrame(uint64_t start, int32_t frame)
         for (size_t j = 0; j < pending.count; ++j)
             g_samples[i].Add(pending.ticks[(pending.next + Window - pending.count + j) % Window]);
     }
-    g_samples[(size_t)LiveBenchmarkMetric::Live].Add(elapsed - g_pacing);
-    if (!g_corrected)
-        g_samples[(size_t)LiveBenchmarkMetric::CleanLive].Add(elapsed - g_pacing);
+    // The ordinary tick and draw alone: corrections and snapshot saves ran
+    // before `start`.
+    const uint64_t tick = elapsed - g_pacing;
+    g_samples[(size_t)LiveBenchmarkMetric::Live].Add(tick);
     Packet packet;
     packet.generation = g_generation;
     packet.sequence = ++g_sequence;
     packet.flags = g_flags;
+    packet.corrections = g_corrections;
+    packet.replayedFrames = g_replayedFrames;
+    g_corrections = g_replayedFrames = 0;
     for (size_t i = 0; i < Metrics; ++i) packet.costs[i] = Summarize(g_samples[i]);
     packet.recentLive = RecentCost(g_samples[(size_t)LiveBenchmarkMetric::Live]);
-    Packet recent = packet;
-    for (size_t i = 0; i < Metrics; ++i)
-        recent.costs[i].p95 = RecentCost(g_samples[i]);
-    packet.recentRollback = (uint32_t)std::min<uint64_t>(UINT32_MAX,
-        RollbackCost(recent, &Costs::p95));
+    const auto microseconds = [](uint64_t ticks) {
+        return (uint32_t)std::clamp((double)ticks * 1000000.0 / (double)Frequency(),
+                                    1.0, 4294967295.0);
+    };
+    if (correction) {
+        g_pairedSamples.Add(correction + tick);
+        packet.paired = Summarize(g_pairedSamples);
+        packet.recentRollback = microseconds(correction);
+        packet.rollbackGame = microseconds(tick);
+    } else if (g_pairedSamples.count) {
+        packet.paired = g_local.paired;
+        packet.recentRollback = g_local.recentRollback;
+        packet.rollbackGame = g_local.rollbackGame;
+    }
+    // A quiet interval is not a new correction result: keep the last count.
+    if (!packet.corrections && g_local.corrections) {
+        packet.corrections = g_local.corrections;
+        packet.replayedFrames = g_local.replayedFrames;
+    }
     g_local = packet;
     g_localTime = GetTickCount64();
     Publish();
@@ -595,6 +643,23 @@ void LiveBenchmark_Draw()
     const float width = std::min(420.0f, std::max(240.0f, display.x - 56.0f));
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width);
     ImGui::TextUnformatted("PC PERFORMANCE");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width);
+        ImGui::TextUnformatted(
+            "Press 0 to summon the performance chart midmatch. "
+            "The Game bar shows how long the regular game takes to run. "
+            "If that's red, you can't even run Mahvel, What are you doing??\n\n"
+            "The Rollback bar is how long the game takes to run, PLUS rollback. "
+            "The more red it is, the fewer rollback frames your PC can handle across long distances! "
+            "Expect it to turn red during projectile-heavy gameplay, but if it's red and your FPS is low, "
+            "crank up the input delay.\n\n"
+            "Performance will be improved over time. Please check back later if it's low!!");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
     static bool expanded = false;
     ImGui::SameLine(width - 70.0f);
     if (ImGui::SmallButton(expanded ? "Collapse" : "Expand")) expanded = !expanded;
@@ -631,8 +696,11 @@ void LiveBenchmark_Draw()
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             const bool live = metric == LiveBenchmarkMetric::Live;
-            ImGui::TextUnformatted(live ? "Game+Draw" : "Rollback");
-            if (live && expanded) ImGui::TextDisabled("16.7 ms limit");
+            ImGui::TextUnformatted(live ? "Game" : "Rollback");
+            if (live && expanded) ImGui::TextDisabled("16.7 ms");
+            // Average depth of the corrections in the last report.
+            if (!live) ImGui::TextDisabled("%u frames", local.corrections ?
+                (uint32_t)(((uint64_t)local.replayedFrames + local.corrections - 1) / local.corrections) : 0u);
             for (int side = 0; side < 2; ++side) {
                 ImGui::TableNextColumn();
                 const auto& packet = side ? peer : local;
@@ -647,7 +715,7 @@ void LiveBenchmark_Draw()
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::TextDisabled(metric == LiveBenchmarkMetric::Save ? "Save" :
-                metric == LiveBenchmarkMetric::Restore ? "Restore" : "Rollback");
+                metric == LiveBenchmarkMetric::Restore ? "Restore" : "Resim");
             for (int side = 0; side < 2; ++side) {
                 ImGui::TableNextColumn();
                 const auto& cost = Cost(side ? peer : local, metric);

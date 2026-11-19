@@ -207,8 +207,7 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         return;
     }
     LagDiagnosticScope diagnostic(LagMetric::MainHook);
-    const uint64_t benchmarkStart = g_isResimulating ? 0 :
-        LiveBenchmark_BeginFrame(Controller_GetNetFrameCount());
+    if (!g_isResimulating) LiveBenchmark_BeginFrame(Controller_GetNetFrameCount());
     // Discard previous memory checks; native allocations may have changed.
     Rollback_SetMainInstance(main);
 
@@ -306,10 +305,13 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     curFrame = Controller_GetNetFrameCount();
 
     Rollback_FreezeWatchdogHeartbeat("native-main-move", curFrame);
+    // Only the ordinary tick and draw: correction and snapshot work is above.
+    const uint64_t benchmarkStart = LiveBenchmark_BeginNative();
     {
         LagDiagnosticScope diagnostic(LagMetric::Native);
         original(main);
     }
+    LiveBenchmark_EndFrame(benchmarkStart, Controller_GetNetFrameCount());
     Rollback_FreezeWatchdogHeartbeat("native-main-complete", curFrame);
 
     if (TraceLifecycleFrame(curFrame)) {
@@ -318,8 +320,6 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         HookLog("TICKTRACE phase=exit frame=%d resim=0 replay=%d main=0x%llX\n",
                 curFrame, replayFrame, main);
     }
-
-    LiveBenchmark_EndFrame(benchmarkStart, Controller_GetNetFrameCount());
 }
 
 static bool g_undrawnLiveTicks = false;
