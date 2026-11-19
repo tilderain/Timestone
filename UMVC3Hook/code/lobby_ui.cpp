@@ -2759,10 +2759,10 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
             p.TextFit(value, valueX, y, header ? 0.8f : 0.7f, kValueTextWidth, A_MC,
                       selected ? kText : valueColor);
         }
-        // Characters and the icon are picked from a grid, not stepped.
+        // Characters, colors and the icon are picked from a grid, not stepped.
         const bool gridRow = row == kTeamRowIcon ||
                              (row >= kTeamRowFirstSlot && row < kTeamRowIcon &&
-                              (row - kTeamRowFirstSlot) % 3 == 0);
+                              (row - kTeamRowFirstSlot) % 3 != 1);
         if (selected && !gridRow) {
             DrawValueArrows(p, frame_, valueX, y, arrowSpan);
         }
