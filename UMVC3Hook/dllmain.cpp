@@ -285,6 +285,11 @@ static void HookLogStartStartupFlusher()
 		CloseHandle(thread);
 }
 
+bool HookLog_IsGameLoaded()
+{
+	return g_hookLogGameLoaded.load(std::memory_order_acquire);
+}
+
 void HookLog_MarkGameLoaded()
 {
 	if (g_hookLogGameLoaded.exchange(true, std::memory_order_acq_rel))

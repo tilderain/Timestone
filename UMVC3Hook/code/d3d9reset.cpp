@@ -27,6 +27,7 @@
 
 extern void HookLog(const char* fmt, ...);
 extern void HookLogFlush();
+extern bool HookLog_IsGameLoaded();
 // Window policy remains with the window-management code in dllmain.cpp.
 extern void PrepareD3D9PresentationParameters(D3DPRESENT_PARAMETERS*, const char*);
 extern void PrepareD3D9NativeCreate(HWND, D3DPRESENT_PARAMETERS*);
@@ -119,6 +120,8 @@ std::atomic<bool> g_pendingChanges { false };
 
 // Game thread, recorded at the first BeginFrame, for the start-up watchdog.
 std::atomic<DWORD> g_gameThreadId { 0 };
+// Frames begun on the game thread; the start-up watchdog reads it as a heartbeat.
+std::atomic<uint32_t> g_gameFrameHeartbeat { 0 };
 
 [[noreturn]] void FailTransition(HRESULT result, const char* operation, bool showMessage = true)
 {
@@ -160,6 +163,7 @@ void* NativeRenderer()
 void __fastcall HookBeginFrame(void* render)
 {
     LagDiagnosticScope diagnostic(LagMetric::RenderBegin);
+    g_gameFrameHeartbeat.fetch_add(1, std::memory_order_relaxed);
     // BeginFrame runs on the game thread in every launch mode, after startup.
     static bool gameplayExecutionSettingsApplied = false;
     if (!gameplayExecutionSettingsApplied) {
@@ -951,6 +955,10 @@ void LogThreadBacktrace(DWORD threadId, const char* label)
     }
 }
 
+// How long after the first drawn frame the watchdog keeps looking for a stall
+// when the game never reports itself loaded (Launch Normally does not).
+constexpr ULONGLONG kLoadWatchMs = 180000;
+
 DWORD WINAPI StartupWatchdogThread(LPVOID)
 {
     unsigned elapsedSeconds = 0;
@@ -985,6 +993,31 @@ DWORD WINAPI StartupWatchdogThread(LPVOID)
             ReadCounter(&g_forwardedAppResetCalls),
             ReadCounter(&g_deviceResetCalls), static_cast<unsigned>(g_phase.load()),
             g_nativeReady.load(), static_cast<unsigned>(g_job.state.load()), g_transitions.load());
+    }
+
+    // Second stage: frames are being drawn, but the game has not loaded yet.
+    // A start-up can still hang here (seen 2026-11-18: the game thread never
+    // returned from an early Present). Report a game thread that stops
+    // beginning frames, with where it is, after 10 s and again after 30 s.
+    const ULONGLONG stageStart = GetTickCount64();
+    uint32_t lastBeat = g_gameFrameHeartbeat.load(std::memory_order_relaxed);
+    unsigned stalledSeconds = 0;
+    while (!HookLog_IsGameLoaded() && GetTickCount64() - stageStart < kLoadWatchMs) {
+        Sleep(1000);
+        const uint32_t beat = g_gameFrameHeartbeat.load(std::memory_order_relaxed);
+        if (beat != lastBeat) {
+            if (stalledSeconds >= 10)
+                HookLog("D3D9: game thread is drawing frames again after %us\n", stalledSeconds);
+            lastBeat = beat;
+            stalledSeconds = 0;
+            continue;
+        }
+        ++stalledSeconds;
+        if (stalledSeconds != 10 && stalledSeconds != 30) continue;
+        HookLog("D3D9: start-up stalled: no frame begun for %us "
+                "(%u frames drawn, game not loaded yet)\n", stalledSeconds, beat);
+        LogThreadBacktrace(g_gameThreadId.load(std::memory_order_relaxed), "game");
+        HookLogFlush();
     }
     return 0;
 }
