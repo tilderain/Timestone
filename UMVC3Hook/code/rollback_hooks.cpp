@@ -13,6 +13,7 @@
 #include "rollback_profile.h"
 #include "live_benchmark.h"
 #include "frame_pacing.h"
+#include "load_diag.h"
 #include "lag_diagnostics.h"
 #include "rollback_unit.h"
 #include "rollback_sound.h"
@@ -1079,6 +1080,7 @@ static void __fastcall hkMainMove(uint64_t main)
     }
     LiveBenchmark_EndPacing(benchmarkStart);
     FramePacing_OnFrameStart();
+    LoadDiag_Tick();
     if (Netplay_IsActive()) {
         int32_t frame = Controller_GetNetFrameCount();
         if (frame >= 0 && FrameStepper_IsBattleSynchronized())
@@ -1365,6 +1367,7 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_SMAIN_MOVE, (void*)&hkMainMove, (void**)&oMainMove,
                "Rollback: hooked sMain__move",
                "Rollback: failed to hook sMain__move (%d)\n");
+    LoadDiag_Install();
     EnableHook(FN_MENU_OPTION_KBD_MOVE, (void*)&hkMenuOptionKbdMove,
                (void**)&oMenuOptionKbdMove,
                "Rollback: guarded stale keyboard menu move",

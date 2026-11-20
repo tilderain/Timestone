@@ -120,6 +120,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/lobby_flow.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
 	$(SRCDIR)/code/online_rewards.cpp \
+	$(SRCDIR)/code/load_diag.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \
 	$(SRCDIR)/imgui/imgui_draw.cpp \
