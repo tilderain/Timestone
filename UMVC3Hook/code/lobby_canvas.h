@@ -95,6 +95,11 @@ enum Tex : uint16_t {
     // CharacterFace.
     TEX_FACE_FIRST,
     TEX_FACE_LAST = TEX_FACE_FIRST + 50 * 8 - 1,
+    // The "next battle" screen's player 1 cards, 512x256 with the character's
+    // name in the art: one per character (id 1..50) and color (0..7), each in
+    // a small archive of its own. See CharacterBanner.
+    TEX_BANNER_FIRST,
+    TEX_BANNER_LAST = TEX_BANNER_FIRST + 50 * 8 - 1,
     TEX_COUNT,
 };
 
@@ -104,6 +109,7 @@ enum Archive : uint8_t {
     ARC_MAINMENU, // ui\mnmain   - resident while the title area is alive
     ARC_LICENSE,  // ui\lic      - requested by the lobby when a portrait is first drawn
     ARC_LOOSE,    // a file of its own on disk, read when first drawn
+    ARC_BANNER,   // ui\res\arc\chr\l<id>_<color>, requested when first drawn
 };
 
 struct TexInfo {
@@ -128,6 +134,16 @@ Tex CharacterIcon(int32_t characterId);
 // colors past the eight that have art show the first. The default player
 // icon for anything else.
 Tex CharacterFace(int32_t characterId, int color);
+
+// The same character and color as the wide card the game shows before a
+// battle. The art is the 448x176 window kBannerUv of the texture. It is not
+// drawn until its archive has loaded.
+Tex CharacterBanner(int32_t characterId, int color);
+constexpr Uv kBannerUv{32.0f / 512.0f, 40.0f / 256.0f, 480.0f / 512.0f, 216.0f / 256.0f};
+constexpr float kBannerAspect = 176.0f / 448.0f; // height over width
+// Character id and color of a banner texture.
+constexpr int32_t BannerCharacter(Tex tex) { return (tex - TEX_BANNER_FIRST) / 8 + 1; }
+constexpr int BannerColor(Tex tex) { return (tex - TEX_BANNER_FIRST) % 8; }
 
 // A player's lobby icon as published to the room: kIconSteam for their Steam
 // profile picture, otherwise a license icon's number + 1.

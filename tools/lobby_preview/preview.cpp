@@ -9,6 +9,7 @@
 #include "lobby_canvas.h"
 #include "lobby_model.h"
 #include "lobby_ui.h"
+#include "assist_names.h"
 
 #include <cstdio>
 #include <cstring>
@@ -107,27 +108,32 @@ const char* const kNames[] = {
 int CharacterCount() { return 50; }
 int32_t CharacterId(int index) { return index + 1; }
 const char* CharacterName(int32_t id) { return id >= 1 && id <= 50 ? kNames[id] : "?"; }
-const char* AssistName(int32_t, int assist)
+const char* AssistName(int32_t id, int assist)
 {
-    // The last is the longest name in the game, to show it is never cut.
-    static const char* const names[] = {"Shoryuken", "Hadoken", "ROLLING BUCKLER (ROLLING SLIDE)"};
-    return names[assist % 3];
+    return id >= 1 && id <= 50 ? kAssistMoveNames[id].names[assist % 3] : "";
 }
 int ColorCount(int32_t) { return 8; }
 int PresetCount() { return 3; }
+// The game's reserve units; the third is left without a usable team.
+Team g_reserveUnits[3] = {
+    {{28, 35, 3}, {1, 2, 0}, {0, 1, 2}},
+    {{13, 7, 21}, {0, 0, 1}, {0, 0, 0}},
+    {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+};
 bool Preset(int index, Team* team)
 {
-    static const Team presets[3] = {
-        {{28, 35, 3}, {1, 2, 0}, {0, 1, 2}},
-        {{13, 7, 21}, {0, 0, 1}, {0, 0, 0}},
-        {{15, 35, 21}, {2, 1, 0}, {3, 0, 0}},
-    };
+    if (index < 0 || index >= 3 || g_reserveUnits[index].chars[0] == 0) return false;
+    *team = g_reserveUnits[index];
+    return true;
+}
+bool SetPreset(int index, const Team& team)
+{
     if (index < 0 || index >= 3) return false;
-    *team = presets[index];
+    g_reserveUnits[index] = team;
     return true;
 }
 const RosterSource kRoster = {CharacterCount, CharacterId, CharacterName, AssistName,
-                              ColorCount, PresetCount, Preset};
+                              ColorCount, PresetCount, Preset, SetPreset};
 
 class FakeService final : public RoomService {
 public:
@@ -348,8 +354,21 @@ SearchResult MakeResult(uint64_t id, const char* name, const char* host, int mem
 UiPrefs DefaultPrefs()
 {
     UiPrefs prefs = {};
-    Preset(0, &prefs.team);
-    prefs.presetIndex = 0;
+    // Presets 1, 2, 4 and 7 hold teams; the rest are free.
+    const struct { int slot; const char* name; Team team; } presets[] = {
+        {0, "PRESET 1", {{28, 35, 3}, {1, 2, 0}, {0, 1, 2}}},
+        {1, "ZERO MAY CRY", {{13, 7, 22}, {0, 0, 1}, {1, 0, 3}}},
+        {3, "MORRIDOOM", {{15, 35, 22}, {2, 1, 1}, {2, 0, 3}}},
+        {6, "a long name to be cut", {{46, 10, 50}, {0, 2, 1}, {0, 0, 1}}},
+    };
+    for (const auto& preset : presets) {
+        prefs.presets[preset.slot].used = true;
+        prefs.presets[preset.slot].team = preset.team;
+        snprintf(prefs.presets[preset.slot].name, sizeof(prefs.presets[preset.slot].name), "%s",
+                 preset.name);
+    }
+    prefs.slot = 0;
+    prefs.team = prefs.presets[0].team;
     snprintf(prefs.create.name, sizeof(prefs.create.name), "tilderain's Lobby");
     prefs.create.maxMembers = 8;
     prefs.create.slotCount = 2;
@@ -596,13 +615,19 @@ int main(int argc, char** argv)
             ok &= Capture(ui, directory, "match_delay_wait");
             service.room.members[1].delayPick = kDelayPickAuto;
             Settle(ui, 3);
+            ok &= Capture(ui, directory, "match_entry"); // START with the team in use
+            ui.Update(Press(&Input::right));
+            ui.Update(Press(&Input::right));             // two teams on
+            Settle(ui, 3);
+            ok &= Capture(ui, directory, "match_entry_next");
             ui.Update(Press(&Input::down));
             Settle(ui, 3);
-            ok &= Capture(ui, directory, "match_entry");
+            ok &= Capture(ui, directory, "match_entry_select");
             ui.Update(Press(&Input::confirm)); // CHARACTER SELECT
             Settle(ui, 20);
             ok &= Capture(ui, directory, "match_team");
-            ui.Update(Press(&Input::up)); // wrap to START
+            ui.Update(Press(&Input::up));
+            ui.Update(Press(&Input::up)); // past PRESET, wrapping to START
             ui.Update(Press(&Input::confirm));
             Settle(ui, 4);
             ok &= Capture(ui, directory, "match_wait_start");
@@ -619,6 +644,35 @@ int main(int argc, char** argv)
         ui.Update(Press(&Input::down));
         ui.Update(Press(&Input::confirm));
         Settle(ui);
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_preset_row");
+        ui.Update(Press(&Input::confirm)); // every team slot
+        for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_presets");
+        ui.Update(Press(&Input::actionX)); // rename
+        {
+            Input typing = {};
+            typing.backspace = true;
+            for (int i = 0; i < 4; ++i) ui.Update(typing);
+            typing.backspace = false;
+            typing.typed = " TEAM";
+            ui.Update(typing);
+        }
+        Settle(ui, 25);
+        ok &= Capture(ui, directory, "team_presets_rename");
+        ui.Update(Press(&Input::confirm));
+        ui.Update(Press(&Input::actionY)); // delete
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_presets_delete");
+        ui.Update(Press(&Input::cancel));
+        for (int i = 0; i < 2; ++i) ui.Update(Press(&Input::down)); // a free slot
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_presets_free");
+        for (int i = 0; i < 5; ++i) ui.Update(Press(&Input::down)); // reserve unit A
+        ui.Update(Press(&Input::confirm));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_reserve");
         ui.Update(Press(&Input::down));
         Settle(ui, 2);
         ok &= Capture(ui, directory, "team");

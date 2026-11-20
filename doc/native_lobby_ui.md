@@ -472,9 +472,12 @@ clients derive the same step (`LobbyUi::HandshakeStep`):
    timeout only runs from then. Until the first measurement arrives (a second
    or two into the ready-up prompt) the estimate is shown. A connection that
    fails stands the local player up, so the pair is not retried every frame.
-3. **Start immediately / character select** (30 s, then start). Character
-   select opens the team screen (90 s) whose last row is START. Either way
-   the player ends up `ready`; when both are, the match is started as before.
+3. **Start / character select** (30 s, then start). The START row names the
+   team it starts with and left / right go through the player's teams (see
+   Team presets); the team is shown under it as the three "next battle"
+   cards with the assists named. Character select opens the team screen
+   whose last row is START. Either way the player ends up `ready`; when both
+   are, the match is started as before.
 
 Cancel at any step gives the seat up. The service forgets a player's answers
 whenever the opposite seat empties or changes hands, and after every match,
@@ -877,6 +880,57 @@ Press Start, so it runs that step itself (`PumpBootSavedataLoad`).
 - `sBattleSetting__restoreBackupAndInit` (`0x14024DE40`) writes
   `sBattleSetting+0x58C` into `CtrlType`. The battle boot puts the player's
   own `CtrlType` there first, so the save keeps it.
+
+## Team presets
+
+The team in use always belongs to a slot (`UiPrefs::slot`); there is no
+unsaved "custom" team. Slots 0..9 are the player's own presets, kept in
+`Timestone.ini` (`[LobbyPresets] NameN`, and `TeamN` as nine numbers:
+character, assist, color for each member; an empty `TeamN` is a free slot).
+Slots 10..12 are the game's reserve units A..C. `[Lobby] TeamSlot` is the slot
+in use. On the first run the team so far becomes preset 1; the old
+`[Lobby] Preset` (a reserve unit) is still read when `TeamSlot` is missing.
+
+- Confirm on the team screen's PRESET row lists all thirteen slots (the row
+  itself does not step; the start prompt's START row does). In the list confirm uses a slot (a free
+  one first takes a copy of the team in use), X renames a preset and Y deletes
+  it after a question. Names are typed on the keyboard, like the room name.
+- Editing a character, assist or color writes straight into the slot
+  (`LobbyUi::StoreTeam`).
+- A reserve unit is written into the live license profile
+  (`RosterSetPreset`: `sLicense+0x40`, tables `+0xB8` / `+0xDC` / `+0x100`),
+  where the license screen edits them too. A color the install cannot load
+  reads as color 1 and is only written back if the player edits the unit.
+- No team holds a character twice, as in the game's own team editor
+  (`0x1404214E0`; the game does not check stored teams). Picking a character
+  already on the team makes the two members trade places, and a team read
+  from the ini with a repeat has the later one replaced (`LoadPrefs`).
+- The save file follows once the team screen is closed and no match is being
+  agreed (`PumpReserveSave`): `sGameConfig__spawnSavePreMenuIfDirty`
+  (`0x140253B80`) called as the gallery menu calls it (mode 1, reserve the
+  save). It spawns the pre-menu in its save states (`0x20`, `0x21`), which
+  pack the live state (`0x14021BA70` copies the `0x690`-byte license profile
+  into the payload at `+0x20`) and write `savedata.bin`; on success it goes
+  to `0x39` and ends. The pre-menu clears "savedata loaded" (`+0x4ADEC`) when
+  built and sets it when the save is through, and `aTitle__init` resets every
+  setting when it finds that byte clear, so the lobby does not leave for the
+  main menu while the save runs and sets the byte again should the pre-menu
+  end without doing so. **Unverified in game.**
+
+### The cards
+
+`ui\res\res_stgm\stgm_p\p_<Name><NN>_BM_HQ_NOMIP_typeB` (Japanese) and
+`..._typeB_other` (every other language): 512x256, format `0x2A`, the art in
+the window x 32..479, y 40..215, with the character's name in it. These are
+player 1's cards on the "next battle" screen (`0x140414500`); player 2's are
+`stgm_q\q_..._BM_NOMIP`, DXT1, which the lobby does not use. Each character
+and color has an archive of its own, `ui\res\arc\chr\l%04d_%02d` (`s...` for
+the `q_` set), which the game requests asynchronously
+(`sGameUI__loadNextBattlePreviewArchives` `0x1402BDEC0`). The backend does the
+same the first time a card is drawn (`BannerArchiveReady`), keeps the handle
+until its units are released, and creates the texture once the archive's state
+word (`cResource+0x54`) has bit 0 (loaded) or bit 4 set. The name is composed
+with `0x1404552A0` mode 2. A dark plate holds the card's place until it arrives. **Unverified in game.**
 
 ## Player icons and Steam profile pictures
 

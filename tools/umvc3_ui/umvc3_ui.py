@@ -193,6 +193,21 @@ def extract(game_dir, cache):
                 counts['png'] += 1
             except ValueError as error:
                 print('skip %s: %s' % (name, error))
+    # The "next battle" cards the pre-match prompt shows: one archive per
+    # character and color, holding the Japanese art and "_other" for every
+    # other language. The cache keeps the latter under the plain name.
+    cards = os.path.join(ui_dir, 'res', 'arc', 'chr')
+    if os.path.isdir(cards):
+        for archive in sorted(glob.glob(os.path.join(cards, 'l[0-9]*.arc'))):
+            for name, _type_hash, payload in arc_extract(archive, (TYPE_TEX,)):
+                base = name.replace('\\', '/').split('/')[-1]
+                if not base.endswith('_typeB_other'):
+                    continue
+                try:
+                    tex_decode(payload).save(os.path.join(cache, base[:-len('_typeB_other')] + '.png'))
+                    counts['png'] += 1
+                except ValueError as error:
+                    print('skip %s: %s' % (name, error))
     print('extracted %(png)d textures, %(sdl)d layouts, %(fsd)d font metric tables' % counts,
           'to', os.path.abspath(cache))
 

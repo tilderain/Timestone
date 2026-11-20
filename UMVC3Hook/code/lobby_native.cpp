@@ -38,7 +38,8 @@ constexpr uintptr_t CRESOURCE_RELEASE_REF = 0x14050D5A0;
 constexpr uintptr_t SGAMEUI_GET_INSTANCE = 0x140001AC0;
 constexpr uintptr_t SGAMEUI_LOAD_NETROOM_ARCHIVE = 0x1402BDE30;
 constexpr uintptr_t SGAMEUI_NETROOM_ARCHIVE_STATUS = 0x1402BCEF0; // 0 ready, 1 loading, -1 none
-// (mode, base, out[0x104], appendTypeTag): mode 3 yields "<base>_typeD[_<lang>]".
+// (mode, base, out[0x104], appendTypeTag): mode 3 yields "<base>_typeD[_<lang>]",
+// mode 2 "<base>_typeB[_other]".
 constexpr uintptr_t COMPOSE_LOCALIZED_NAME = 0x1404552A0;
 // (unused context, path, uUiScheduler** out, moveLine): loads an rScheduler,
 // constructs a uUiScheduler for it and adds it to sUnit.
@@ -302,6 +303,44 @@ void RequestLicenseArchive()
             g_licenseArchive);
 }
 
+// The wide character cards (ARC_BANNER) come in an archive per character and
+// color, which the game loads for its "next battle" screen as
+// sGameUI__loadNextBattlePreviewArchives (0x1402BDEC0) does: sResource::create
+// with the archive DTI and the asynchronous flag. A handle is kept for each
+// one asked for until the lobby's units are released.
+void* g_bannerArchives[TEX_BANNER_LAST - TEX_BANNER_FIRST + 1] = {};
+constexpr size_t CRESOURCE_STATE = 0x54;       // bit 0 loaded, bit 4 load failed
+constexpr uint32_t kResourceSettled = 0x11;
+
+// True once the card's archive has been read (or has failed to).
+bool BannerArchiveReady(Tex tex)
+{
+    void*& archive = g_bannerArchives[tex - TEX_BANNER_FIRST];
+    if (!archive) {
+        using GetInstance = void*(__fastcall*)();
+        using Create = void*(__fastcall*)(void*, void*, const char*, uint32_t);
+        void* resources = Native<GetInstance>(SRESOURCE_GET_INSTANCE)();
+        if (!resources) return false;
+        char path[64];
+        snprintf(path, sizeof(path), "ui\\res\\arc\\chr\\l%04d_%02d",
+                 static_cast<int>(BannerCharacter(tex)), BannerColor(tex));
+        const Create create = *reinterpret_cast<Create*>(
+            *reinterpret_cast<uint8_t**>(resources) + SRESOURCE_VT_CREATE);
+        archive = create(resources, reinterpret_cast<void*>(_addr(RARCHIVE_DTI)), path, 2);
+        if (!archive) return false;
+    }
+    return (Field<uint32_t>(archive, CRESOURCE_STATE) & kResourceSettled) != 0;
+}
+
+void ReleaseBannerArchives()
+{
+    using Release = void(__fastcall*)(void*);
+    for (void*& archive : g_bannerArchives) {
+        if (archive) Native<Release>(CRESOURCE_RELEASE_REF)(archive);
+        archive = nullptr;
+    }
+}
+
 constexpr int kLooseLoadsPerFrame = 4;
 uint32_t g_looseLoadFrame = 0;
 int g_looseLoads = 0;
@@ -314,6 +353,8 @@ void* GetTexture(Tex tex)
 
     const TexInfo& info = GetTexInfo(tex);
     if (info.archive == ARC_LICENSE) RequestLicenseArchive();
+    // Asked every frame while it loads: nothing is read from disk here.
+    if (info.archive == ARC_BANNER && !BannerArchiveReady(tex)) return nullptr;
     if (info.archive == ARC_LOOSE) {
         // These are read from disk on the spot (sResource__createFromDTIPath
         // 0x140516D70, flag bit 0), so only a few are taken per frame; the
@@ -326,9 +367,11 @@ void* GetTexture(Tex tex)
         ++g_looseLoads;
     }
     char path[0x108] = {};
-    if (info.localized) {
+    if (info.localized || info.archive == ARC_BANNER) {
+        // The cards are "typeB" art: one for Japanese, "_other" for the rest.
         using Compose = void(__fastcall*)(int, const char*, char*, char);
-        Native<Compose>(COMPOSE_LOCALIZED_NAME)(3, info.path, path, 1);
+        Native<Compose>(COMPOSE_LOCALIZED_NAME)(info.archive == ARC_BANNER ? 2 : 3, info.path,
+                                                path, 1);
     } else {
         snprintf(path, sizeof(path), "%s", info.path);
     }
@@ -995,6 +1038,7 @@ void Native_Shutdown()
         if (texture) Native<Release>(CRESOURCE_RELEASE_REF)(texture);
         texture = nullptr;
     }
+    ReleaseBannerArchives();
     HookLog("LobbyNative: shut down (%u clones killed)\n", static_cast<unsigned>(killed));
     ResetState();
 }
@@ -1008,6 +1052,7 @@ void Native_Invalidate()
         if (texture) Native<Release>(CRESOURCE_RELEASE_REF)(texture);
         texture = nullptr;
     }
+    ReleaseBannerArchives();
     ResetState();
 }
 

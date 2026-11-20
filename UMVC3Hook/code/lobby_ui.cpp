@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 // The plugin's build passes its version; the offline preview tool does not.
 #ifndef UMVC3HOOK_VERSION
@@ -351,6 +352,16 @@ LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs
     for (int choice : kFirstToChoices) knownFormat |= choice == prefs_.create.firstTo;
     if (!knownFormat) prefs_.create.firstTo = 1;
     if (prefs_.create.rotation != Rotation::WinnerLeaves) prefs_.create.rotation = Rotation::WinnerStays;
+    // The team in use always belongs to a slot. (A reserve unit is checked
+    // once the game's profile can be read: RefreshPreset.)
+    if (prefs_.slot < 0 || prefs_.slot >= kTeamSlots ||
+        (prefs_.slot < kTeamPresets && !prefs_.presets[prefs_.slot].used)) {
+        prefs_.slot = 0;
+        for (int i = kTeamPresets - 1; i >= 0; --i)
+            if (prefs_.presets[i].used) prefs_.slot = i;
+        if (prefs_.presets[prefs_.slot].used) prefs_.team = prefs_.presets[prefs_.slot].team;
+        else StoreTeam();
+    }
 }
 
 void LobbyUi::PlayEntrance(uint32_t delayFrames)
@@ -371,6 +382,7 @@ void LobbyUi::GoTo(Screen screen)
     charPickerOpen_ = false;
     colorPickerOpen_ = false;
     iconPickerOpen_ = false;
+    presetListOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
     chatFocus_ = false;
@@ -457,6 +469,7 @@ void LobbyUi::ReturnToRoom()
     charPickerOpen_ = false;
     colorPickerOpen_ = false;
     iconPickerOpen_ = false;
+    presetListOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
     chatFocus_ = false;
@@ -590,6 +603,16 @@ void LobbyUi::Update(const Input& input)
         }
         return;
     }
+    if (teamForMatch_ &&
+        (textTarget_ == TextTarget::PresetName || confirm_ == Confirm::DeletePreset)) {
+        // A team being named or deleted while the opponent waits: the clock
+        // still runs, and at its end the match starts with the team as it is.
+        ++entryFrames_;
+        if (++handshakeFrames_ >= kTeamTimeout) {
+            if (textTarget_ != TextTarget::None) EndText(false);
+            confirm_ = Confirm::None;
+        }
+    }
     if (textTarget_ != TextTarget::None) {
         UpdateText(input);
         return;
@@ -613,6 +636,8 @@ void LobbyUi::Update(const Input& input)
                 service_.Kick(memberMenuId_);
             } else if (action == Confirm::Update) {
                 updateAccepted_ = true;
+            } else if (action == Confirm::DeletePreset) {
+                DeletePreset(presetListCursor_);
             }
         }
         return;
@@ -1078,6 +1103,8 @@ bool LobbyUi::UpdateHandshake(const Input& input)
             handshakeCursor_ ^= 1;
             Play(SFX_MOVE);
         }
+        // START carries the team it starts with: left and right change it.
+        if (handshakeCursor_ == 0 && input.left != input.right) StepSlot(input.right ? 1 : -1);
         if (handshakeFrames_ >= kEntryTimeout || (input.confirm && handshakeCursor_ == 0)) {
             service_.SetReady(true);
             Play(SFX_CONFIRM);
@@ -1390,7 +1417,9 @@ void LobbyUi::UpdateQuickChat(const Input& input)
 void LobbyUi::BeginText(TextTarget target, const char* initial)
 {
     textTarget_ = target;
-    textCapacity_ = target == TextTarget::RoomName ? 40 : kChatCapacity - 1;
+    textCapacity_ = target == TextTarget::RoomName ? 40
+                  : target == TextTarget::PresetName ? kPresetNameCapacity - 1
+                  : kChatCapacity - 1;
     snprintf(text_, sizeof(text_), "%s", initial ? initial : "");
     if (strlen(text_) > textCapacity_) text_[0] = '\0';
 }
@@ -1408,6 +1437,12 @@ void LobbyUi::EndText(bool accept)
         }
     } else if (target == TextTarget::Chat && text_[0]) {
         service_.SendChat(text_);
+    } else if (target == TextTarget::PresetName && text_[0] &&
+               presetListCursor_ >= 0 && presetListCursor_ < kTeamPresets) {
+        TeamPreset& preset = prefs_.presets[presetListCursor_];
+        snprintf(preset.name, sizeof(preset.name), "%.*s",
+                 static_cast<int>(sizeof(preset.name) - 1), text_);
+        prefsDirty_ = true;
     }
 }
 
@@ -1436,13 +1471,112 @@ void LobbyUi::UpdateText(const Input& input)
     }
 }
 
+bool LobbyUi::EditingTeam() const
+{
+    return screen_ == Screen::Team || HandshakeStep() != Handshake::None;
+}
+
+bool LobbyUi::SlotTeam(int slot, Team* team) const
+{
+    if (slot < 0 || slot >= kTeamSlots) return false;
+    if (slot < kTeamPresets) {
+        if (!prefs_.presets[slot].used) return false;
+        *team = prefs_.presets[slot].team;
+        return true;
+    }
+    const int unit = slot - kTeamPresets;
+    return roster_.presetCount && roster_.preset && unit < roster_.presetCount() &&
+           roster_.preset(unit, team);
+}
+
+bool LobbyUi::SlotUsed(int slot) const
+{
+    Team team;
+    return SlotTeam(slot, &team);
+}
+
+void LobbyUi::SlotName(int slot, char* out, size_t size) const
+{
+    if (slot >= 0 && slot < kTeamPresets)
+        snprintf(out, size, "%s", prefs_.presets[slot].name);
+    else
+        snprintf(out, size, "RESERVE UNIT %c", 'A' + (slot - kTeamPresets) % kReserveUnits);
+}
+
+// The nearest slot holding a team in that direction, wrapping; `from` itself
+// when there is no other.
+int LobbyUi::NextUsedSlot(int from, int delta) const
+{
+    for (int step = 1; step < kTeamSlots; ++step) {
+        const int slot = ((from + delta * step) % kTeamSlots + kTeamSlots) % kTeamSlots;
+        if (SlotUsed(slot)) return slot;
+    }
+    return from;
+}
+
+void LobbyUi::SelectSlot(int slot)
+{
+    Team team;
+    if (!SlotTeam(slot, &team)) return;
+    prefs_.team = team;
+    prefs_.slot = slot;
+    CommitTeam();
+}
+
+void LobbyUi::StepSlot(int delta)
+{
+    const int next = NextUsedSlot(prefs_.slot, delta);
+    if (next == prefs_.slot) return;
+    SelectSlot(next);
+    Play(SFX_MOVE);
+}
+
+// An edit to the team in use belongs to its slot: there is no unsaved team.
+void LobbyUi::StoreTeam()
+{
+    if (prefs_.slot >= 0 && prefs_.slot < kTeamPresets) {
+        TeamPreset& preset = prefs_.presets[prefs_.slot];
+        preset.team = prefs_.team;
+        if (!preset.used) {
+            preset.used = true;
+            snprintf(preset.name, sizeof(preset.name), "PRESET %d", prefs_.slot + 1);
+        }
+    } else if (roster_.setPreset) {
+        roster_.setPreset(prefs_.slot - kTeamPresets, prefs_.team);
+    }
+    prefsDirty_ = true;
+}
+
+void LobbyUi::DeletePreset(int slot)
+{
+    if (slot < 0 || slot >= kTeamPresets || !prefs_.presets[slot].used) return;
+    if (slot == prefs_.slot) {
+        // The team in use moves on to the next one first.
+        const int next = NextUsedSlot(slot, 1);
+        if (next == slot) {
+            ShowNotice("This is your only team.\nIt cannot be deleted.");
+            return;
+        }
+        SelectSlot(next);
+    }
+    prefs_.presets[slot] = TeamPreset{};
+    prefsDirty_ = true;
+}
+
 void LobbyUi::RefreshPreset()
 {
-    if (prefs_.presetIndex < 0) return;
+    if (prefs_.slot < kTeamPresets) return;
     Team team;
-    if (!roster_.preset || !roster_.preset(prefs_.presetIndex, &team)) {
-        prefs_.presetIndex = -1; // keep the team, as a custom one
-        prefsDirty_ = true;
+    if (!SlotTeam(prefs_.slot, &team)) {
+        // The reserve unit holds no team any more: carry on with another,
+        // or keep the team as the first preset.
+        const int next = NextUsedSlot(prefs_.slot, 1);
+        if (next != prefs_.slot) {
+            SelectSlot(next);
+            return;
+        }
+        prefs_.slot = 0;
+        StoreTeam();
         return;
     }
     bool same = true;
@@ -1455,16 +1589,51 @@ void LobbyUi::RefreshPreset()
     CommitTeam();
 }
 
-void LobbyUi::ApplyPreset(int index)
+// Every team slot at once: confirm uses one (a free slot first takes a copy
+// of the team in use), X renames a preset and Y deletes it.
+void LobbyUi::UpdatePresetList(const Input& input)
 {
-    Team team;
-    if (index >= 0 && roster_.preset && roster_.preset(index, &team)) {
-        prefs_.team = team;
-        prefs_.presetIndex = index;
-    } else {
-        prefs_.presetIndex = -1;
+    if (input.cancel || input.menu) {
+        presetListOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
     }
-    prefsDirty_ = true;
+    const int rows = kTeamPresets + (roster_.presetCount ? roster_.presetCount() : 0);
+    if (presetListCursor_ >= rows) presetListCursor_ = rows - 1;
+    MoveCursor(presetListCursor_, rows, input);
+    const int slot = presetListCursor_;
+    const bool preset = slot < kTeamPresets;
+    if (input.confirm) {
+        if (!SlotUsed(slot)) {
+            bool made = false;
+            if (preset) {
+                TeamPreset& fresh = prefs_.presets[slot];
+                fresh.used = true;
+                fresh.team = prefs_.team;
+                snprintf(fresh.name, sizeof(fresh.name), "PRESET %d", slot + 1);
+                made = true;
+            } else if (roster_.setPreset) {
+                made = roster_.setPreset(slot - kTeamPresets, prefs_.team);
+            }
+            if (!made) {
+                ShowNotice("A reserve unit cannot hold\nthe same character twice.");
+                return;
+            }
+        }
+        SelectSlot(slot);
+        presetListOpen_ = false;
+        Play(SFX_CONFIRM);
+        return;
+    }
+    if (!preset || !prefs_.presets[slot].used) return;
+    if (input.actionX) {
+        BeginText(TextTarget::PresetName, prefs_.presets[slot].name);
+        Play(SFX_CONFIRM);
+    } else if (input.actionY) {
+        confirm_ = Confirm::DeletePreset;
+        confirmCursor_ = 1;
+        Play(SFX_CONFIRM);
+    }
 }
 
 void LobbyUi::CommitTeam()
@@ -1476,12 +1645,7 @@ void LobbyUi::CommitTeam()
 void LobbyUi::StepTeamField(int delta)
 {
     if (teamCursor_ == kTeamRowPreset) {
-        const int presets = roster_.presetCount ? roster_.presetCount() : 0;
-        // Cycle CUSTOM (-1), RESERVE UNIT A..C.
-        int index = prefs_.presetIndex + delta;
-        if (index < -1) index = presets - 1;
-        if (index >= presets) index = -1;
-        ApplyPreset(index);
+        return; // teams are picked from their list (confirm), not stepped
     } else if (teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowIcon) {
         const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
         const int field = (teamCursor_ - kTeamRowFirstSlot) % 3;
@@ -1493,7 +1657,7 @@ void LobbyUi::StepTeamField(int delta)
         } else {
             return; // colors are picked from their panel (confirm), not stepped
         }
-        prefs_.presetIndex = -1; // edited by hand: no longer the saved preset
+        StoreTeam();
     } else {
         return; // the icon row opens its grid on confirm
     }
@@ -1587,8 +1751,20 @@ void LobbyUi::UpdateCharPicker(const Input& input)
     const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
     const int32_t id = roster_.characterId(charPickerCursor_);
     if (id == prefs_.team.chars[member]) return; // same character: the team stays as it was
-    SetTeamCharacter(member, id);
-    prefs_.presetIndex = -1; // edited by hand: no longer the saved preset
+    Team& team = prefs_.team;
+    int other = -1;
+    for (int i = 0; i < 3; ++i)
+        if (i != member && team.chars[i] == id) other = i;
+    if (other >= 0) {
+        // A team never holds a character twice (the game's own team editor
+        // does not allow it either): the two members trade places instead.
+        std::swap(team.chars[member], team.chars[other]);
+        std::swap(team.assists[member], team.assists[other]);
+        std::swap(team.colors[member], team.colors[other]);
+    } else {
+        SetTeamCharacter(member, id);
+    }
+    StoreTeam();
     CommitTeam();
 }
 
@@ -1620,7 +1796,7 @@ void LobbyUi::UpdateColorPicker(const Input& input)
     Play(SFX_CONFIRM);
     if (colorPickerCursor_ == prefs_.team.colors[member]) return; // same color: nothing changes
     prefs_.team.colors[member] = colorPickerCursor_;
-    prefs_.presetIndex = -1; // edited by hand: no longer the saved preset
+    StoreTeam();
     CommitTeam();
 }
 
@@ -1661,6 +1837,13 @@ void LobbyUi::UpdateTeam(const Input& input)
         }
         iconPickerOpen_ = false;
     }
+    if (presetListOpen_) {
+        if (!timedOut) {
+            UpdatePresetList(input);
+            return;
+        }
+        presetListOpen_ = false;
+    }
     MoveCursor(teamCursor_, kTeamRows, input);
     const int delta = (input.right ? 1 : 0) - (input.left ? 1 : 0);
     if (delta != 0) StepTeamField(delta);
@@ -1686,6 +1869,12 @@ void LobbyUi::UpdateTeam(const Input& input)
         return;
     }
     if (!input.confirm) return;
+    if (teamCursor_ == kTeamRowPreset) {
+        presetListCursor_ = prefs_.slot;
+        presetListOpen_ = true;
+        Play(SFX_CONFIRM);
+        return;
+    }
     const bool characterRow = teamCursor_ >= kTeamRowFirstSlot && teamCursor_ < kTeamRowIcon &&
                               (teamCursor_ - kTeamRowFirstSlot) % 3 == 0;
     const int count = roster_.characterCount ? roster_.characterCount() : 0;
@@ -1792,7 +1981,11 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         if (confirm_ != Confirm::None) add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Room && HandshakeStep() != Handshake::None) {
         const Handshake step = HandshakeStep();
-        if (step == Handshake::Entry) add(BTN_CONFIRM, "Select");
+        if (step == Handshake::Entry) {
+            add(BTN_CONFIRM, "Select");
+            if (handshakeCursor_ == 0 && NextUsedSlot(prefs_.slot, 1) != prefs_.slot)
+                add(BTN_DPAD, "Team");
+        }
         if (step == Handshake::Delay) {
             add(BTN_CONFIRM, "Ready");
             add(BTN_DPAD, "Change");
@@ -1814,6 +2007,14 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_CONFIRM, "Select");
         if (createCursor_ != CREATE_MUSIC) add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Back");
+    } else if (screen_ == Screen::Team && presetListOpen_) {
+        const bool used = SlotUsed(presetListCursor_);
+        add(BTN_CONFIRM, used ? "Use" : "New");
+        if (used && presetListCursor_ < kTeamPresets) {
+            add(BTN_X, "Rename");
+            add(BTN_Y, "Delete");
+        }
+        add(BTN_CANCEL, "Close");
     } else if (screen_ == Screen::Team && iconPickerOpen_) {
         add(BTN_CONFIRM, "Select");
         add(BTN_DPAD, "Move");
@@ -1830,8 +2031,9 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
                               (teamCursor_ - kTeamRowFirstSlot) % 3 == 2;
         if (colorRow) add(BTN_CONFIRM, "Colors");
         if (teamCursor_ == kTeamRowIcon) add(BTN_CONFIRM, "Icons");
+        if (teamCursor_ == kTeamRowPreset) add(BTN_CONFIRM, "Teams");
         if (!characterRow && !colorRow && teamCursor_ != kTeamRowIcon &&
-            teamCursor_ != kTeamRowDone)
+            teamCursor_ != kTeamRowPreset && teamCursor_ != kTeamRowDone)
             add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Done");
     } else if (roomMenuOpen_ || slotMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
@@ -1895,8 +2097,9 @@ void LobbyUi::DrawTeamCard(Canvas& canvas, float x, float y, float w) const
     p.Box(TEX_PANEL_DARK, x, y, w, 300.0f);
     p.Sprite(IconTex(0, prefs_.icon), x + 34.0f, y + 58.0f, 56.0f, 56.0f, kFullUv, A_ML);
     p.TextFit(service_.LocalName(), x + 104.0f, y + 46.0f, 0.95f, w - 130.0f, A_ML);
-    p.Text(prefs_.presetIndex >= 0 ? "RESERVE UNIT" : "CUSTOM TEAM", x + 104.0f, y + 74.0f, 0.62f,
-           A_ML, kYellow);
+    char slotName[kPresetNameCapacity];
+    SlotName(prefs_.slot, slotName, sizeof(slotName));
+    p.TextFit(slotName, x + 104.0f, y + 74.0f, 0.62f, w - 130.0f, A_ML, kYellow);
     p.Sprite(TEX_LINE, x + 28.0f, y + 100.0f, w - 56.0f, 3.0f, Uv{0.1f, 0.55f, 0.9f, 0.95f}, A_TL,
              WithAlpha(kCyan, 0.8f));
     // The team as its select-screen faces, each in the color it is set to.
@@ -2627,6 +2830,42 @@ void LobbyUi::DrawMusicMenu(Canvas& canvas) const
     p.Text(position, x + w - 48.0f, y + h - 30.0f, 0.62f, A_MR, kDim);
 }
 
+// A team as the wide cards the game shows before a battle, three across `w`,
+// each with its assist named underneath.
+constexpr float kBannerGap = 0.0f; // the cards touch: each has its own black edge
+float TeamBannerHeight(float w) { return (w - 2.0f * kBannerGap) / 3.0f * kBannerAspect; }
+
+// Names the player typed are drawn in the heading font only when it has
+// every character: it is a Latin display face.
+Font HeadingFontFor(const char* text)
+{
+    for (const char* c = text; *c; ++c)
+        if (static_cast<unsigned char>(*c) >= 0x7F) return FONT_BODY;
+    return FONT_HEADING;
+}
+
+void LobbyUi::DrawTeamBanners(Canvas& canvas, float x, float y, float w) const
+{
+    const Painter p(canvas, 1.0f, 0.0f);
+    const float cardW = (w - 2.0f * kBannerGap) / 3.0f, cardH = TeamBannerHeight(w);
+    for (int i = 0; i < 3; ++i) {
+        const float cardX = x + i * (cardW + kBannerGap);
+        const int32_t character = prefs_.team.chars[i];
+        const int color = prefs_.team.colors[i];
+        // The card's archive is read in the background the first time it is
+        // wanted; until it is in, its place is a dark plate.
+        p.Fill(cardX, y, cardW, cardH, Color{0.0f, 0.0f, 0.0f, 0.6f});
+        p.Sprite(CharacterBanner(character, color), cardX, y, cardW, cardH, kBannerUv, A_TL);
+        const char* move = roster_.assistName
+            ? roster_.assistName(character, prefs_.team.assists[i]) : "";
+        char assist[96];
+        snprintf(assist, sizeof(assist), "%s  %s", kAssistLetters[prefs_.team.assists[i] % 3],
+                 move ? move : "");
+        p.TextShrink(assist, cardX + cardW * 0.5f, y + cardH + 16.0f, 0.56f, cardW - 8.0f, A_MC,
+                     kDim);
+    }
+}
+
 // The pre-match prompt: one panel whose body changes with the step.
 void LobbyUi::DrawHandshake(Canvas& canvas) const
 {
@@ -2637,7 +2876,8 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
 
     const Painter p(canvas, 1.0f, 0.0f);
     p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.6f});
-    const float w = 760.0f, h = 300.0f;
+    // The start choice shows the team it starts with, so it is taller.
+    const float w = 760.0f, h = step == Handshake::Entry ? 404.0f : 300.0f;
     const float x = (kScreenW - w) * 0.5f, y = (kScreenH - h) * 0.5f - 12.0f;
     const float cx = x + w * 0.5f;
     p.Box(TEX_PANEL_DARK, x, y, w, h);
@@ -2691,22 +2931,41 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
         if (step == Handshake::Delay) limit = kDelayTimeout;
         break;
     }
-    case Handshake::Entry:
-        option("START IMMEDIATELY", cx, y + 124.0f, 420.0f, handshakeCursor_ == 0);
-        option("CHARACTER SELECT", cx, y + 178.0f, 420.0f, handshakeCursor_ == 1);
-        p.Text(handshakeCursor_ == 0 ? "Go into battle with your current team."
-                                     : "Choose your team for this match first.",
-               cx, y + 228.0f, 0.62f, A_MC, kDim);
+    case Handshake::Entry: {
+        // START and the team it starts with on one row: left and right go
+        // through the player's teams, and the three cards follow.
+        const float rowW = w - 80.0f, rowY = y + 116.0f;
+        const bool start = handshakeCursor_ == 0;
+        if (start)
+            p.Box(TEX_ROW_SEL, cx - rowW * 0.5f, rowY - 24.0f, rowW, 48.0f,
+                  WithAlpha(kWhite, SelectionPulse(frame_)));
+        p.Text("START", cx - rowW * 0.5f + 34.0f, rowY, 0.4f, A_ML, start ? kText : kDim,
+               FONT_HEADING);
+        char name[kPresetNameCapacity];
+        SlotName(prefs_.slot, name, sizeof(name));
+        const float valueX = cx + 70.0f, arrowSpan = rowW * 0.5f - 90.0f;
+        const Font nameFont = HeadingFontFor(name);
+        p.TextFit(name, valueX, rowY, nameFont == FONT_HEADING ? 0.4f : 0.9f,
+                  2.0f * (arrowSpan - 28.0f), A_MC, start ? kYellow : kDim, nameFont);
+        if (start && NextUsedSlot(prefs_.slot, 1) != prefs_.slot)
+            DrawValueArrows(p, frame_, valueX, rowY, arrowSpan);
+        const float cardsY = y + 152.0f, cardsW = w - 80.0f;
+        DrawTeamBanners(canvas, x + 40.0f, cardsY, cardsW);
+        const float selectY = cardsY + TeamBannerHeight(cardsW) + 64.0f;
+        option("CHARACTER SELECT", cx, selectY, rowW, !start);
+        p.Text(start ? "Go into battle with this team." : "Choose or edit your team first.", cx,
+               selectY + 44.0f, 0.62f, A_MC, kDim);
         {
             // Both picks are in: the delay the match will run at.
             const int mine = delayValue(local->delayPick), theirs = delayValue(other->delayPick);
             if (mine >= 0 && theirs >= 0) {
                 snprintf(line, sizeof(line), "Input delay: %d", mine > theirs ? mine : theirs);
-                p.Text(line, cx, y + 262.0f, 0.62f, A_MC, kCyan);
+                p.Text(line, cx, selectY + 74.0f, 0.62f, A_MC, kCyan);
             }
         }
         limit = kEntryTimeout;
         break;
+    }
     default:
         p.Text("Ready", cx, y + 130.0f, 0.9f, A_MC, kGreen);
         p.Text("Waiting for opponent.", cx, y + 172.0f, 0.74f, A_MC, kDim);
@@ -2751,11 +3010,8 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         Color valueColor = kText;
 
         if (row == kTeamRowPreset) {
-            label = "TEAM";
-            if (prefs_.presetIndex >= 0)
-                snprintf(value, sizeof(value), "RESERVE UNIT %c", 'A' + prefs_.presetIndex);
-            else
-                snprintf(value, sizeof(value), "CUSTOM");
+            label = "PRESET";
+            SlotName(prefs_.slot, value, sizeof(value));
             valueColor = kYellow;
         } else if (row == kTeamRowIcon) {
             label = "ICON";
@@ -2808,8 +3064,9 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
             p.TextFit(value, valueX, y, header ? 0.8f : 0.7f, kValueTextWidth, A_MC,
                       selected ? kText : valueColor);
         }
-        // Characters, colors and the icon are picked from a grid, not stepped.
-        const bool gridRow = row == kTeamRowIcon ||
+        // Teams, characters, colors and the icon are picked from a list or
+        // grid, not stepped.
+        const bool gridRow = row == kTeamRowIcon || row == kTeamRowPreset ||
                              (row >= kTeamRowFirstSlot && row < kTeamRowIcon &&
                               (row - kTeamRowFirstSlot) % 3 != 1);
         if (selected && !gridRow) {
@@ -2818,35 +3075,104 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
     }
 
     DrawTeamCard(canvas, 752.0f, 126.0f, 470.0f);
-    if (teamForMatch_) {
-        char clock[64];
+    if (teamForMatch_) p.Label("YOUR OPPONENT IS WAITING", 764.0f, 452.0f, 0.62f, A_ML, kYellow);
+    // Opened against an opponent: the seconds left before the match starts
+    // with the team as it stands, in the title row's right corner. Drawn
+    // after the lists and grids so it stays in sight over them.
+    const auto matchClock = [&](const char* help) {
+        if (!teamForMatch_) return help;
         const uint32_t left = handshakeFrames_ < kTeamTimeout
             ? (kTeamTimeout - handshakeFrames_ + 59) / 60 : 0;
-        snprintf(clock, sizeof(clock), "The match starts in %u", left);
-        p.Label("YOUR OPPONENT IS WAITING", 764.0f, 452.0f, 0.62f, A_ML, kYellow);
-        p.Label(clock, 764.0f, 476.0f, 0.56f, A_ML, kDim);
-    }
+        char clock[16];
+        snprintf(clock, sizeof(clock), "%u", left);
+        const Painter fixed = p.Fixed();
+        fixed.Label("MATCH STARTS IN", 1150.0f, 70.0f, 0.62f, A_MR, kDim);
+        fixed.Text(clock, 1224.0f, 70.0f, 0.62f, A_MR, left <= 10 ? kRed : kYellow, FONT_HEADING);
+        return help;
+    };
 
+    if (presetListOpen_) {
+        DrawPresetList(canvas);
+        if (textTarget_ == TextTarget::PresetName) return matchClock("Type a name, then confirm.");
+        return matchClock(SlotUsed(presetListCursor_)
+                              ? "Choose the team to use and edit."
+                              : "A free slot starts as a copy of your team.");
+    }
     if (charPickerOpen_) {
         DrawCharPicker(canvas);
-        return "Choose a character.";
+        return matchClock("Choose a character.");
     }
     if (colorPickerOpen_) {
         DrawColorPicker(canvas);
-        return "Choose a color.";
+        return matchClock("Choose a color.");
     }
     if (iconPickerOpen_) {
         DrawIconPicker(canvas);
-        return "Choose the icon other players see.";
+        return matchClock("Choose the icon other players see.");
     }
 
     const char* help = teamForMatch_ ? "Choose your team, then select START."
                                      : "Edit your team.";
     if (teamCursor_ == kTeamRowPreset)
-        help = "Use one of your reserve units, or build a custom team.";
+        help = "Choose the team to use, or add, rename and delete teams.";
     else if (teamCursor_ == kTeamRowIcon)
         help = "Your Steam profile picture, or one of the game's icons.";
-    return help;
+    return matchClock(help);
+}
+
+// Every team slot: the ten presets, then the game's reserve units under a
+// rule, each with its name and its three faces.
+void LobbyUi::DrawPresetList(Canvas& canvas) const
+{
+    const Painter p(canvas, 1.0f, 0.0f);
+    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.55f});
+    const int reserve = roster_.presetCount ? roster_.presetCount() : 0;
+    const int rows = kTeamPresets + reserve;
+    const float rowH = 38.0f, reserveGap = reserve > 0 ? 14.0f : 0.0f;
+    const float w = 860.0f, h = 84.0f + rows * rowH + reserveGap + 18.0f;
+    const float x = (kScreenW - w) * 0.5f, y = (kFooterY - h) * 0.5f;
+    // The panel texture is translucent; the team rows under it must not show.
+    p.Fill(x + 4.0f, y + 4.0f, w - 8.0f, h - 8.0f, Color{0.02f, 0.03f, 0.05f, 0.92f});
+    p.Box(TEX_PANEL_DARK, x, y, w, h);
+    p.Text("TEAM PRESETS", x + w * 0.5f, y + 36.0f, 0.38f, A_MC, kYellow, FONT_HEADING);
+
+    for (int slot = 0; slot < rows; ++slot) {
+        const bool unit = slot >= kTeamPresets;
+        const float rowY = y + 84.0f + slot * rowH + (unit ? reserveGap : 0.0f);
+        if (slot == kTeamPresets)
+            p.Sprite(TEX_YELLOW_BAR, x + 30.0f, rowY - rowH * 0.5f - reserveGap * 0.5f - 1.0f,
+                     w - 60.0f, 2.0f, Uv{0.1f, 0.2f, 0.9f, 0.8f}, A_TL, WithAlpha(kWhite, 0.5f));
+        const bool selected = slot == presetListCursor_;
+        if (selected)
+            p.Box(TEX_ROW_SEL, x + 22.0f, rowY - 20.0f, w - 44.0f, 40.0f,
+                  WithAlpha(kWhite, SelectionPulse(frame_)));
+        // No slot number: a preset's default name already carries it.
+        const float nameX = x + 56.0f, nameW = 500.0f;
+        if (selected && textTarget_ == TextTarget::PresetName) {
+            // The caret blinks just past the name being typed.
+            char fitted[sizeof(text_)];
+            FitText(fitted, sizeof(fitted), text_, nameW, 0.74f);
+            p.Text(fitted, nameX, rowY, 0.74f, A_ML, kCyan);
+            if ((frame_ / 20) % 2)
+                p.Text("_", nameX + TextWidth(fitted) * 0.74f + 2.0f, rowY, 0.74f, A_ML, kCyan);
+        }
+        Team team;
+        if (!SlotTeam(slot, &team)) {
+            p.Text("- EMPTY -", nameX, rowY, 0.66f, A_ML, kFaint);
+            continue;
+        }
+        if (!(selected && textTarget_ == TextTarget::PresetName)) {
+            char name[kPresetNameCapacity];
+            SlotName(slot, name, sizeof(name));
+            // The team in use is the one in cyan.
+            p.TextFit(name, nameX, rowY, 0.74f, nameW, A_ML,
+                      selected ? kText : slot == prefs_.slot ? kCyan : kDim);
+        }
+        const float face = 48.0f;
+        for (int i = 0; i < 3; ++i)
+            p.Sprite(CharacterFace(team.chars[i], team.colors[i]), x + 600.0f + i * 76.0f,
+                     rowY - face * kFaceAspect * 0.5f, face, face * kFaceAspect, kFaceUv, A_TC);
+    }
 }
 
 // The character grid, centred on the screen: every character's face, the
@@ -3001,6 +3327,12 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
     else if (confirm_ == Confirm::Update)
         message = updateOffer_;
     char kick[160];
+    if (!message && confirm_ == Confirm::DeletePreset) {
+        snprintf(kick, sizeof(kick), "Delete %.*s?", kPresetNameCapacity,
+                 presetListCursor_ >= 0 && presetListCursor_ < kTeamPresets
+                     ? prefs_.presets[presetListCursor_].name : "");
+        message = kick;
+    }
     if (!message && confirm_ == Confirm::KickMember) {
         snprintf(kick, sizeof(kick), "Kick %.40s?\nThey will not be able to rejoin this lobby.",
                  memberMenuName_);

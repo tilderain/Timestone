@@ -29,6 +29,20 @@ struct Team {
     int32_t colors[3];  // zero-based archive variant
 };
 
+// The teams a player keeps: ten of their own, named, in Timestone.ini, and
+// the game's three reserve units, which live in its save. A slot index runs
+// over both: 0..9 the presets, 10..12 reserve units A..C.
+constexpr int kTeamPresets = 10;
+constexpr int kReserveUnits = 3;
+constexpr int kTeamSlots = kTeamPresets + kReserveUnits;
+constexpr int kPresetNameCapacity = 24;
+
+struct TeamPreset {
+    bool used;
+    char name[kPresetNameCapacity];
+    Team team;
+};
+
 // Input delay choices offered before a match. A pick is stored as an index:
 // kDelayPickNone until chosen, kDelayPickAuto to follow the measured ping,
 // otherwise delay frames + 1.
@@ -235,8 +249,12 @@ struct RosterSource {
     const char* (*characterName)(int32_t id);
     const char* (*assistName)(int32_t id, int assist);
     int (*colorCount)(int32_t id);
+    // The game's reserve units, 0..presetCount-1. `preset` fails for one
+    // that holds no usable team.
     int (*presetCount)();
     bool (*preset)(int index, Team* team);
+    // Puts a team in a reserve unit; the provider sees to the game's save.
+    bool (*setPreset)(int index, const Team& team);
 };
 
 // One frame of menu input, already merged across pads and keyboard.

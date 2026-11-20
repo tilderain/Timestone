@@ -33,6 +33,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 extern void HookLog(const char* fmt, ...);
 extern void HookLogFlush();
@@ -128,6 +129,15 @@ constexpr uintptr_t SGAMECONFIG_IS_STORAGE_ENABLED = 0x140253360;  // (config) -
 constexpr uintptr_t SGAMECONFIG_SET_STORAGE_ENABLED = 0x14032CE00; // (config, bool)
 constexpr uintptr_t SGAMECONFIG_IS_SAVEDATA_LOADED = 0x140216F30;  // (config) -> bool
 constexpr size_t SGAMECONFIG_PREMENU = 0x4ADF0;                    // uUiPreMenu*
+// What a menu calls once it has changed something the save holds (the
+// gallery, 0x14037EF81: mode 1, reserve the save, 0). It spawns the same
+// pre-menu in its save states (0x20 on), which packs the live state, the
+// license profile with the reserve units included, and writes savedata.bin.
+// The pre-menu clears "savedata loaded" when built and sets it again when the
+// save has gone through.
+constexpr uintptr_t SGAMECONFIG_SPAWN_SAVE_PREMENU = 0x140253B80;  // (config, mode, reserve, 0)
+constexpr size_t SGAMECONFIG_SAVEDATA_LOADED = 0x4ADEC;            // uint8
+constexpr int32_t kPreMenuSaveMode = 1;
 constexpr size_t PREMENU_STATE = 0x60;
 constexpr uintptr_t PREMENU_CANCEL_MESSAGE = 0x14032C760;          // (premenu)
 // After a good load the pre-menu checks native matchmaking (0x14032B5A0) and,
@@ -202,9 +212,13 @@ constexpr uint32_t kEntranceFadeDelay = 8; // frames of the 250 ms fade to sit o
 std::unique_ptr<SteamRoomService> g_service;
 std::unique_ptr<LobbyUi> g_ui;
 ConnectRoster g_rosterPrefs;
-SavedRoster g_presets[3] = {};
-size_t g_presetCount = 0;
+SavedRoster g_presets[lobby::kReserveUnits] = {};
+bool g_presetValid[lobby::kReserveUnits] = {};
 bool g_presetsLoaded = false;
+bool g_licenseFound = false;
+// A reserve unit was changed in the lobby and the game's save is owed.
+bool g_reserveSavePending = false;
+bool g_reserveSaveRunning = false;
 
 // Watching someone's match instead of playing one (game thread, except the
 // text the overlay copies).
@@ -282,22 +296,29 @@ constexpr size_t PROFILE_PRESET_CHARS = 0xB8;   // int32_t[3][3]
 constexpr size_t PROFILE_PRESET_ASSISTS = 0xDC;
 constexpr size_t PROFILE_PRESET_COLORS = 0x100;
 
+uint8_t* LicenseProfile()
+{
+    using GetInstance = void*(__fastcall*)();
+    uint8_t* license = static_cast<uint8_t*>(
+        reinterpret_cast<GetInstance>(_addr(SLICENSE_GET_INSTANCE))());
+    return license ? license + SLICENSE_PROFILE : nullptr;
+}
+
 void LoadPresets()
 {
     if (g_presetsLoaded) return;
     g_presetsLoaded = true;
-    g_presetCount = 0;
-    using GetInstance = void*(__fastcall*)();
-    const uint8_t* license = static_cast<const uint8_t*>(
-        reinterpret_cast<GetInstance>(_addr(SLICENSE_GET_INSTANCE))());
-    if (!license) return;
-    const uint8_t* profile = license + SLICENSE_PROFILE;
+    memset(g_presetValid, 0, sizeof(g_presetValid));
+    const uint8_t* profile = LicenseProfile();
+    g_licenseFound = profile != nullptr;
+    if (!profile) return;
     const auto table = [profile](size_t offset, size_t index) {
         int32_t value = 0;
         memcpy(&value, profile + offset + index * sizeof(int32_t), sizeof(value));
         return value;
     };
-    for (size_t preset = 0; preset < 3; ++preset) {
+    unsigned usable = 0;
+    for (size_t preset = 0; preset < lobby::kReserveUnits; ++preset) {
         SavedRoster roster = {};
         bool valid = true;
         for (size_t slot = 0; slot < 3; ++slot) {
@@ -305,40 +326,80 @@ void LoadPresets()
             roster.chars[slot] = table(PROFILE_PRESET_CHARS, index);
             roster.assists[slot] = table(PROFILE_PRESET_ASSISTS, index);
             roster.colors[slot] = table(PROFILE_PRESET_COLORS, index);
-            valid &= roster.chars[slot] >= 1 && roster.chars[slot] <= 51;
+            valid &= roster.chars[slot] >= 1 && roster.chars[slot] <= 50;
             valid &= roster.assists[slot] >= 0 && roster.assists[slot] <= 2;
             valid &= roster.colors[slot] >= 0 && roster.colors[slot] <= 8;
         }
-        if (valid) g_presets[g_presetCount++] = roster;
+        g_presets[preset] = roster;
+        g_presetValid[preset] = valid;
+        usable += valid;
     }
-    HookLog("LobbyFlow: read %u reserve units from the live profile\n",
-            static_cast<unsigned>(g_presetCount));
+    HookLog("LobbyFlow: read %u reserve units from the live profile\n", usable);
 }
 
 int RosterPresetCount()
 {
     LoadPresets();
-    return static_cast<int>(g_presetCount);
+    return g_licenseFound ? lobby::kReserveUnits : 0;
 }
 
 bool RosterPreset(int index, Team* team)
 {
     LoadPresets();
-    if (!team || index < 0 || static_cast<size_t>(index) >= g_presetCount) return false;
+    if (!team || index < 0 || index >= lobby::kReserveUnits || !g_presetValid[index]) return false;
     for (int i = 0; i < 3; ++i) {
         team->chars[i] = g_presets[index].chars[i];
         team->assists[i] = g_presets[index].assists[i];
         team->colors[i] = g_presets[index].colors[i];
-        if (team->chars[i] < 1 || team->chars[i] > 50) return false;
         // A reserve unit may hold a color this install cannot load.
         if (!ChrColors_Available(team->chars[i], team->colors[i])) team->colors[i] = 0;
     }
     return true;
 }
 
+// Writes a team into a reserve unit of the live profile, where the license
+// screen edits them too. The save file follows from PumpReserveSave: the
+// profile is the block sGameConfig__packLiveStateIntoSavePayload
+// (0x14024F210) copies into the save at +0x20.
+bool RosterSetPreset(int index, const Team& team)
+{
+    LoadPresets();
+    uint8_t* profile = LicenseProfile();
+    if (!profile || index < 0 || index >= lobby::kReserveUnits) return false;
+    for (int i = 0; i < 3; ++i) {
+        if (team.chars[i] < 1 || team.chars[i] > 50 || team.assists[i] < 0 ||
+            team.assists[i] > 2 || team.colors[i] < 0 || team.colors[i] > 7)
+            return false;
+        // The game's own team editor never puts a character in twice.
+        for (int j = 0; j < i; ++j)
+            if (team.chars[j] == team.chars[i]) return false;
+    }
+    SavedRoster& roster = g_presets[index];
+    bool changed = !g_presetValid[index];
+    for (int i = 0; i < 3; ++i)
+        changed |= roster.chars[i] != team.chars[i] || roster.assists[i] != team.assists[i] ||
+                   roster.colors[i] != team.colors[i];
+    if (!changed) return true;
+    for (int i = 0; i < 3; ++i) {
+        roster.chars[i] = team.chars[i];
+        roster.assists[i] = team.assists[i];
+        roster.colors[i] = team.colors[i];
+        const size_t at = (static_cast<size_t>(index) * 3 + i) * sizeof(int32_t);
+        memcpy(profile + PROFILE_PRESET_CHARS + at, &team.chars[i], sizeof(int32_t));
+        memcpy(profile + PROFILE_PRESET_ASSISTS + at, &team.assists[i], sizeof(int32_t));
+        memcpy(profile + PROFILE_PRESET_COLORS + at, &team.colors[i], sizeof(int32_t));
+    }
+    g_presetValid[index] = true;
+    g_reserveSavePending = true;
+    HookLog("LobbyFlow: reserve unit %c set to %d/%d/%d\n", 'A' + index, team.chars[0],
+            team.chars[1], team.chars[2]);
+    return true;
+}
+
 const RosterSource kRosterSource = {
     RosterCharacterCount, RosterCharacterId, RosterCharacterName, RosterAssistName,
     RosterColorCount,     RosterPresetCount, RosterPreset,
+    RosterSetPreset,
 };
 
 // ---------------------------------------------------------------------------
@@ -351,6 +412,24 @@ void SettingsPath(char* path, size_t size)
 
 // Spectating: whether the names and feed state are drawn over the match.
 std::atomic<bool> g_spectatorOverlay{true};
+
+// A team read from the ini may hold a character twice (teams could before
+// presets existed, and the file can be edited): the later one becomes the
+// first character not on the team, in its first color.
+void RemoveDuplicateCharacters(Team& team)
+{
+    for (int i = 1; i < 3; ++i) {
+        bool repeated = false;
+        for (int j = 0; j < i; ++j) repeated |= team.chars[j] == team.chars[i];
+        if (!repeated) continue;
+        for (int32_t id = 1; id <= 50; ++id) {
+            if (id == team.chars[0] || id == team.chars[1] || id == team.chars[2]) continue;
+            team.chars[i] = id;
+            team.colors[i] = 0;
+            break;
+        }
+    }
+}
 
 UiPrefs LoadPrefs()
 {
@@ -378,8 +457,61 @@ UiPrefs LoadPrefs()
             prefs.team.colors[i] = 0;
     }
 
-    prefs.presetIndex = GetPrivateProfileIntA("Lobby", "Preset", -1, path);
-    if (prefs.presetIndex < -1 || prefs.presetIndex > 2) prefs.presetIndex = -1;
+    RemoveDuplicateCharacters(prefs.team);
+
+    // The player's own teams: [LobbyPresets] NameN, and TeamN as nine numbers
+    // (character, assist, color for each member). An empty TeamN is a free slot.
+    for (int i = 0; i < lobby::kTeamPresets; ++i) {
+        lobby::TeamPreset& preset = prefs.presets[i];
+        char key[16], text[96] = {};
+        snprintf(key, sizeof(key), "Team%d", i + 1);
+        GetPrivateProfileStringA("LobbyPresets", key, "", text, sizeof(text), path);
+        int v[9] = {};
+        if (sscanf(text, "%d,%d,%d,%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                   &v[6], &v[7], &v[8]) != 9)
+            continue;
+        bool usable = true;
+        for (int m = 0; m < 3; ++m) {
+            preset.team.chars[m] = v[m * 3];
+            preset.team.assists[m] = v[m * 3 + 1];
+            preset.team.colors[m] = v[m * 3 + 2];
+            usable &= preset.team.chars[m] >= 1 && preset.team.chars[m] <= 50 &&
+                      preset.team.assists[m] >= 0 && preset.team.assists[m] <= 2;
+            if (usable && !ChrColors_Available(preset.team.chars[m], preset.team.colors[m]))
+                preset.team.colors[m] = 0;
+        }
+        if (!usable) continue;
+        RemoveDuplicateCharacters(preset.team);
+        preset.used = true;
+        snprintf(key, sizeof(key), "Name%d", i + 1);
+        GetPrivateProfileStringA("LobbyPresets", key, "", preset.name, sizeof(preset.name), path);
+        if (!preset.name[0]) snprintf(preset.name, sizeof(preset.name), "PRESET %d", i + 1);
+    }
+    // The team in use: one of those, or a reserve unit (kTeamPresets + 0..2).
+    // Before there were presets, [Lobby] Preset named a reserve unit or -1.
+    prefs.slot = GetPrivateProfileIntA("Lobby", "TeamSlot", -1, path);
+    if (prefs.slot < 0 || prefs.slot >= lobby::kTeamSlots) {
+        const int reserve = GetPrivateProfileIntA("Lobby", "Preset", -1, path);
+        prefs.slot = reserve >= 0 && reserve < lobby::kReserveUnits ? lobby::kTeamPresets + reserve
+                                                                    : -1;
+    }
+    if (prefs.slot >= 0 && prefs.slot < lobby::kTeamPresets && !prefs.presets[prefs.slot].used)
+        prefs.slot = -1;
+    if (prefs.slot < 0) {
+        // No team chosen yet: the first preset, made from the team so far if
+        // there is none.
+        for (int i = 0; i < lobby::kTeamPresets && prefs.slot < 0; ++i)
+            if (prefs.presets[i].used) prefs.slot = i;
+        if (prefs.slot < 0) {
+            prefs.slot = 0;
+            prefs.presets[0].used = true;
+            prefs.presets[0].team = prefs.team;
+            snprintf(prefs.presets[0].name, sizeof(prefs.presets[0].name), "PRESET 1");
+        }
+    }
+    // A reserve unit's team is read from the game once the lobby shows
+    // (LobbyUi::RefreshPreset); until then the team last used stands.
+    if (prefs.slot < lobby::kTeamPresets) prefs.team = prefs.presets[prefs.slot].team;
     prefs.icon = GetPrivateProfileIntA("Lobby", "Icon", lobby::kIconSteam, path);
     if (prefs.icon < lobby::kIconSteam || prefs.icon > lobby::kIconMax) prefs.icon = lobby::kIconSteam;
     GetPrivateProfileStringA("Lobby", "RoomName", "", prefs.create.name,
@@ -408,8 +540,8 @@ void SavePrefs(const UiPrefs& prefs)
         g_rosterPrefs.colors[i] = prefs.team.colors[i];
     }
     ConnectRoster_Save(path, g_rosterPrefs);
-    const IniSafe_Entry entries[] = {
-        {"Lobby", "Preset", std::to_string(prefs.presetIndex)},
+    std::vector<IniSafe_Entry> entries = {
+        {"Lobby", "TeamSlot", std::to_string(prefs.slot)},
         {"Lobby", "Icon", std::to_string(prefs.icon)},
         {"Lobby", "RoomName", prefs.create.name},
         {"Lobby", "RoomSize", std::to_string(prefs.create.maxMembers)},
@@ -420,7 +552,18 @@ void SavePrefs(const UiPrefs& prefs)
         {"Lobby", "RoomFirstTo", std::to_string(prefs.create.firstTo)},
         {"Lobby", "RoomRotation", std::to_string(static_cast<int>(prefs.create.rotation))},
     };
-    IniSafe_WriteBatch(entries, sizeof(entries) / sizeof(entries[0]), path);
+    for (int i = 0; i < lobby::kTeamPresets; ++i) {
+        const lobby::TeamPreset& preset = prefs.presets[i];
+        const std::string number = std::to_string(i + 1);
+        std::string team;
+        for (int m = 0; preset.used && m < 3; ++m)
+            team += (m ? "," : "") + std::to_string(preset.team.chars[m]) + "," +
+                    std::to_string(preset.team.assists[m]) + "," +
+                    std::to_string(preset.team.colors[m]);
+        entries.push_back({"LobbyPresets", "Name" + number, preset.used ? preset.name : ""});
+        entries.push_back({"LobbyPresets", "Team" + number, team});
+    }
+    IniSafe_WriteBatch(entries.data(), entries.size(), path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +1150,57 @@ bool PumpBootSavedataLoad()
     HookLog("LobbyFlow: savedata load finished (%s)\n",
             query(SGAMECONFIG_IS_SAVEDATA_LOADED) ? "applied" : "not applied");
     return false;
+}
+
+// Saves the game's own save after a reserve unit was edited in the lobby,
+// once the player is done with the team screen and no match is being set up.
+// Returns true while the save is being written.
+bool PumpReserveSave()
+{
+    if (!g_reserveSavePending && !g_reserveSaveRunning) return false;
+    using GetInstance = void*(__fastcall*)();
+    using ConfigQuery = bool(__fastcall*)(void*);
+    void* config = reinterpret_cast<GetInstance>(_addr(SGAMECONFIG_GET_INSTANCE))();
+    if (!config) return false;
+    const auto query = [config](uintptr_t function) {
+        return reinterpret_cast<ConfigQuery>(_addr(function))(config);
+    };
+    uint8_t& loaded = *(static_cast<uint8_t*>(config) + SGAMECONFIG_SAVEDATA_LOADED);
+
+    if (g_reserveSaveRunning) {
+        if (query(SGAMECONFIG_PREMENU_ALIVE)) return true;
+        g_reserveSaveRunning = false;
+        if (loaded) {
+            HookLog("LobbyFlow: reserve units saved\n");
+        } else {
+            // The game marks the save as not loaded while it writes, and with
+            // that mark the next title area resets every setting. A save that
+            // did not finish must not leave it behind.
+            loaded = 1;
+            HookLog("LobbyFlow: WARNING - saving the reserve units did not finish\n");
+        }
+        return false;
+    }
+
+    if (g_phase != Phase::Lobby || g_mainMenuReleaseAt || !g_ui || g_ui->EditingTeam())
+        return false;
+    g_reserveSavePending = false;
+    if (!loaded || !query(SGAMECONFIG_IS_STORAGE_ENABLED) || query(SGAMECONFIG_PREMENU_ALIVE)) {
+        // Playing without a save, or the game is busy with it: the edit
+        // stays in memory and goes out with the game's next save.
+        HookLog("LobbyFlow: reserve units changed; no save written (loaded=%d)\n", loaded);
+        return false;
+    }
+    using Spawn = void(__fastcall*)(void*, int32_t, char, int32_t);
+    reinterpret_cast<Spawn>(_addr(SGAMECONFIG_SPAWN_SAVE_PREMENU))(config, kPreMenuSaveMode, 1, 0);
+    if (!query(SGAMECONFIG_PREMENU_ALIVE)) {
+        loaded = 1;
+        HookLog("LobbyFlow: WARNING - the reserve unit save could not be started\n");
+        return false;
+    }
+    g_reserveSaveRunning = true;
+    HookLog("LobbyFlow: saving the edited reserve units\n");
+    return true;
 }
 
 // Hands the title area back to the game with its main menu open.
@@ -1723,7 +1917,10 @@ void RunLobbyFrame(uint64_t titleArea)
         StartBlack();
         g_mainMenuReleaseAt = GetTickCount64() + kOnlineFadeOutMs;
     }
-    if (g_mainMenuReleaseAt && GetTickCount64() >= g_mainMenuReleaseAt) {
+    // The title area is not rebuilt, and no match set up, over a save that
+    // is still being written.
+    const bool saving = PumpReserveSave();
+    if (g_mainMenuReleaseAt && GetTickCount64() >= g_mainMenuReleaseAt && !saving) {
         g_mainMenuReleaseAt = 0;
         ReleaseToMainMenu(titleArea);
         return;

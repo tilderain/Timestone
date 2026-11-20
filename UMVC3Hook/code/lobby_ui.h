@@ -32,8 +32,9 @@ struct UpdateView {
 // Preferences the caller loads before constructing the UI and saves whenever
 // TakePrefsDirty() reports a change.
 struct UiPrefs {
-    Team team;
-    int presetIndex; // saved-roster preset in use, or -1 for a custom team
+    Team team;       // the team in use: a copy of the slot's
+    int slot;        // which of the kTeamSlots it is: a preset or a reserve unit
+    TeamPreset presets[kTeamPresets];
     int icon;        // lobby icon: kIconSteam or a character id (lobby_canvas.h)
     RoomSettings create;
     bool muteMusic;  // in someone else's lobby: do not play its music
@@ -79,13 +80,15 @@ public:
     // tick before the native backend can draw, and under the fade from black.
     void PlayEntrance(uint32_t delayFrames);
     // The reserve units were read again: if the team is one of them, take
-    // its current contents (or fall back to a custom team if it is gone).
+    // its current contents (or move to another team if it is gone).
     void RefreshPreset();
+    // True while the team screen is open or a match is being agreed.
+    bool EditingTeam() const;
 
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
-    enum class TextTarget : uint8_t { None, RoomName, Chat };
-    enum class Confirm : uint8_t { None, LeaveRoom, KickMember, Update };
+    enum class TextTarget : uint8_t { None, RoomName, Chat, PresetName };
+    enum class Confirm : uint8_t { None, LeaveRoom, KickMember, Update, DeletePreset };
     // Pre-match steps shown as a modal once both seats of the local player's
     // match slot are taken. Each is answered by both players in turn.
     enum class Handshake : uint8_t {
@@ -149,7 +152,18 @@ private:
     const Member* SeatOccupant(int slot, int side) const;
     int SlotQueueLength(int slot) const;
     int SlotWatcherCount(int slot) const;
-    void ApplyPreset(int index);
+    // Team slots: the player's presets, then the game's reserve units.
+    bool SlotUsed(int slot) const;
+    bool SlotTeam(int slot, Team* team) const;
+    void SlotName(int slot, char* out, size_t size) const;
+    int NextUsedSlot(int from, int delta) const;
+    void SelectSlot(int slot);   // makes a used slot the team in use
+    void StepSlot(int delta);    // the next used slot in that direction
+    void StoreTeam();            // writes the team in use back to its slot
+    void DeletePreset(int slot);
+    void UpdatePresetList(const Input& input);
+    void DrawPresetList(Canvas& canvas) const;
+    void DrawTeamBanners(Canvas& canvas, float x, float y, float w) const;
     void CommitTeam();
     void StepTeamField(int delta);
     void SetTeamCharacter(int member, int32_t id);
@@ -186,6 +200,8 @@ private:
     bool iconPickerOpen_ = false; // icon grid on the team screen's ICON row
     int iconCursor_ = 0;          // icon value highlighted in it (0 = Steam picture)
     int iconScroll_ = 0;          // first grid row on screen
+    bool presetListOpen_ = false; // every team slot, on the team screen's PRESET row
+    int presetListCursor_ = 0;    // slot highlighted in it
 
     bool roomMenuOpen_ = false;
     int roomMenuCursor_ = 0;

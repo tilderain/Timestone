@@ -86,7 +86,15 @@ void BuildGenerated()
             snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
                      "ui\\lic\\lic_flag_i\\lic_flag_%s_BM_HQ_NOMIP",
                      kAvatarHosts[i - kLicenseIcons]);
-        else {
+        else if (i >= TEX_BANNER_FIRST - TEX_ICON_FIRST) {
+            // The game adds "_typeB" or "_typeB_other" for its language.
+            const int banner = i - (TEX_BANNER_FIRST - TEX_ICON_FIRST);
+            snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
+                     "ui\\res\\res_stgm\\stgm_p\\p_%s%02d_BM_HQ_NOMIP",
+                     kFaceNames[banner / 8], banner % 8);
+            g_generated[i] = TexInfo{g_generatedPaths[i], 512, 256, ARC_BANNER, false};
+            continue;
+        } else {
             const int face = i - kLicenseIcons - kAvatarSlots;
             snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
                      "ui\\chs\\chs_face_a\\chs_cs_f\\f_%s%02d_BM_HQ_NOMIP",
@@ -169,6 +177,13 @@ Tex CharacterFace(int32_t characterId, int color)
     if (characterId < 1 || characterId > 50) return TEX_USER_ICON;
     if (color < 0 || color > 7) color = 0;
     return static_cast<Tex>(TEX_FACE_FIRST + (characterId - 1) * 8 + color);
+}
+
+Tex CharacterBanner(int32_t characterId, int color)
+{
+    if (characterId < 1 || characterId > 50) return TEX_USER_ICON;
+    if (color < 0 || color > 7) color = 0;
+    return static_cast<Tex>(TEX_BANNER_FIRST + (characterId - 1) * 8 + color);
 }
 
 const TexInfo& GetTexInfo(Tex tex)
