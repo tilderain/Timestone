@@ -19,6 +19,8 @@
 #include <cstring>
 #include <vector>
 
+extern bool HookLogOpenInViewer();
+
 extern bool ChrSelImGui_IsOpen();
 extern bool ChrSelImGui_Open();
 
@@ -258,6 +260,16 @@ void EscMenuImGui_Draw()
         ImGui::TextDisabled("Capture complete. Log opened.");
     else
         ImGui::TextDisabled("Records for 15 seconds, then opens the log.");
+    // The log is buffered once the game has loaded: write it out first, so
+    // what opens is current.
+    static bool logOpenFailed = false;
+    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
+    if (ImGui::Button("Open Timestone Log"))
+        logOpenFailed = !HookLogOpenInViewer();
+    ImGui::PopStyleColor(3);
+    if (logOpenFailed) ImGui::TextUnformatted("Could not open the log.");
     const ImVec2 settingsPos = ImGui::GetWindowPos();
     const ImVec2 settingsSize = ImGui::GetWindowSize();
     ImGui::End();

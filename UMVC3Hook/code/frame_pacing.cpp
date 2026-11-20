@@ -301,6 +301,10 @@ int64_t FramePacing_BeforePresent(IDirect3DDevice9* device)
             float top[3] = {}; // the three longest, longest first
             for (int i = 0; i < g_holdWorkCount; ++i) {
                 const float value = g_holdWork[i];
+                // A frame longer than the hold may be is late whatever the
+                // hold is; counting it only held every other frame back
+                // (2026-11-20: work 1 to 3 ms, held to 10 ms for seconds).
+                if (value > kHoldLimitMs) continue;
                 if (value > top[0]) { top[2] = top[1]; top[1] = top[0]; top[0] = value; }
                 else if (value > top[1]) { top[2] = top[1]; top[1] = value; }
                 else if (value > top[2]) top[2] = value;

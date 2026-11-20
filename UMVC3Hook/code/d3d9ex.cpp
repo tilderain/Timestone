@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <cstring>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 extern void HookLog(const char*, ...);
 extern "C" bool FrameStepper_IsBattleSynchronized();
@@ -76,11 +78,14 @@ std::unordered_map<IDirect3DBaseTexture9*, Staging*> stagingByTexture;
 struct Staging final : IUnknown {
     std::atomic<ULONG> refs {1};
     IDirect3DBaseTexture9* texture;
+    const int type;    // of both textures; asked once, not on every map
+    const UINT levels;
     IDirect3DBaseTexture9* gpu = nullptr; // set once attached; its key in stagingByTexture
     SRWLOCK mutex = SRWLOCK_INIT;
     unsigned locks = 0;
     bool pending = false; // nothing has gone up to the GPU texture yet
-    explicit Staging(IDirect3DBaseTexture9* value) : texture(value) {}
+    explicit Staging(IDirect3DBaseTexture9* value)
+        : texture(value), type(static_cast<int>(value->GetType())), levels(value->GetLevelCount()) {}
     HRESULT WINAPI QueryInterface(REFIID iid, void** out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
@@ -154,7 +159,7 @@ Staging* GetStaging(IDirect3DBaseTexture9* texture)
 void Upload(Staging* staging, IDirect3DBaseTexture9* gpu)
 {
     // Explicitly dirty level zero: native code can edit any mip independently.
-    switch (staging->texture->GetType()) {
+    switch (staging->type) {
     case D3DRTYPE_TEXTURE:
         Check(static_cast<IDirect3DTexture9*>(staging->texture)->AddDirtyRect(nullptr), "dirty texture");
         break;
@@ -178,15 +183,21 @@ void UploadSubresource(Staging* staging, IDirect3DBaseTexture9* gpu, unsigned su
 {
     IDirect3DSurface9* from = nullptr;
     IDirect3DSurface9* to = nullptr;
-    switch (staging->texture->GetType()) {
+    switch (staging->type) {
     case D3DRTYPE_TEXTURE:
+        if (staging->levels == 1) {
+            // One level: the lock recorded what was written, and UpdateTexture
+            // sends exactly that in one call (the per-frame textures are these).
+            Check(exDevice->UpdateTexture(staging->texture, gpu), "upload managed texture");
+            return;
+        }
         Check(static_cast<IDirect3DTexture9*>(staging->texture)->GetSurfaceLevel(subresource, &from),
             "staging texture level");
         Check(static_cast<IDirect3DTexture9*>(gpu)->GetSurfaceLevel(subresource, &to),
             "GPU texture level");
         break;
     case D3DRTYPE_CUBETEXTURE: {
-        const UINT levels = staging->texture->GetLevelCount();
+        const UINT levels = staging->levels;
         const auto face = static_cast<D3DCUBEMAP_FACES>(subresource / levels);
         Check(static_cast<IDirect3DCubeTexture9*>(staging->texture)->GetCubeMapSurface(
             face, subresource % levels, &from), "staging cube level");
@@ -206,14 +217,23 @@ void UploadSubresource(Staging* staging, IDirect3DBaseTexture9* gpu, unsigned su
 
 double NowMs()
 {
-    static double toMs = 0.0;
+    static const double toMs = [] {
+        LARGE_INTEGER frequency;
+        QueryPerformanceFrequency(&frequency);
+        return 1000.0 / static_cast<double>(frequency.QuadPart);
+    }();
     LARGE_INTEGER value;
-    if (toMs == 0.0) {
-        QueryPerformanceFrequency(&value);
-        toMs = 1000.0 / static_cast<double>(value.QuadPart);
-    }
     QueryPerformanceCounter(&value);
     return static_cast<double>(value.QuadPart) * toMs;
+}
+
+// Lists a texture as waiting; the set takes over the caller's two references.
+void Requeue(Staging* staging, IDirect3DBaseTexture9* gpu)
+{
+    AcquireSRWLockExclusive(&pendingLock);
+    pendingTextures.emplace(gpu, staging);
+    pendingCount.store(static_cast<unsigned>(pendingTextures.size()), std::memory_order_relaxed);
+    ReleaseSRWLockExclusive(&pendingLock);
 }
 
 // A new texture: its first upload is owed.
@@ -222,10 +242,7 @@ void Defer(Staging* staging, IDirect3DBaseTexture9* gpu)
     staging->pending = true;
     staging->AddRef();
     gpu->AddRef();
-    AcquireSRWLockExclusive(&pendingLock);
-    pendingTextures.emplace(gpu, staging);
-    pendingCount.store(static_cast<unsigned>(pendingTextures.size()), std::memory_order_relaxed);
-    ReleaseSRWLockExclusive(&pendingLock);
+    Requeue(staging, gpu);
 }
 
 // Takes a texture out of the waiting set: `gpu` itself, or any one when it is
@@ -248,8 +265,9 @@ bool TakePending(IDirect3DBaseTexture9*& gpu, Staging*& staging)
 enum class Flush { Uploaded, Dropped, Mapped };
 
 // Sends a taken texture up and lets go of the set's references. One the game
-// still has mapped cannot be read yet and goes back in the set; one nobody
-// else holds any more (`binding` rules that out) is simply released.
+// still has mapped cannot be read yet: the caller keeps the references and
+// puts it back (Requeue). One nobody else holds any more (`binding` rules
+// that out) is simply released.
 Flush FlushPending(IDirect3DBaseTexture9* gpu, Staging* staging, bool binding)
 {
     Flush outcome = Flush::Uploaded;
@@ -269,23 +287,21 @@ Flush FlushPending(IDirect3DBaseTexture9* gpu, Staging* staging, bool binding)
         staging->pending = false;
     }
     ReleaseSRWLockExclusive(&staging->mutex);
-    if (outcome == Flush::Mapped) {
-        AcquireSRWLockExclusive(&pendingLock);
-        pendingTextures.emplace(gpu, staging);
-        pendingCount.store(static_cast<unsigned>(pendingTextures.size()), std::memory_order_relaxed);
-        ReleaseSRWLockExclusive(&pendingLock);
-        return outcome;
-    }
+    if (outcome == Flush::Mapped) return outcome;
     staging->Release();
     gpu->Release();
     return outcome;
 }
 
-// Most time a frame gives to uploading textures ahead of their first use. In
-// a running battle a frame has little to spare; anywhere else (menus, loading
-// screens, waiting for the opponent) nothing is lost by a longer frame.
-constexpr double kWarmBattleMs = 1.0;
-constexpr double kWarmIdleMs = 6.0;
+// Most time a frame gives to uploading textures ahead of their first use.
+// While textures are still being created the game is loading and nothing is
+// lost by a longer frame. Once that stops (a fight or a menu is running, and
+// a few textures are left over) and all through a netplay battle, a frame has
+// little to spare.
+constexpr double kWarmPlayMs = 1.0;
+constexpr double kWarmLoadingMs = 6.0;
+constexpr double kLoadingQuietMs = 250.0; // no texture created for this long: not loading
+std::atomic<double> lastCreateMs {-kLoadingQuietMs};
 
 // Once a frame, before it is presented: upload waiting textures until the
 // frame's budget is spent, so few are left to be uploaded at their first draw.
@@ -293,8 +309,13 @@ void WarmTextures()
 {
     unsigned left = pendingCount.load(std::memory_order_relaxed);
     if (!left) return;
-    const double budget = FrameStepper_IsBattleSynchronized() ? kWarmBattleMs : kWarmIdleMs;
     const double start = NowMs();
+    const bool loading = !FrameStepper_IsBattleSynchronized() &&
+        start - lastCreateMs.load(std::memory_order_relaxed) < kLoadingQuietMs;
+    const double budget = loading ? kWarmLoadingMs : kWarmPlayMs;
+    // Textures found still mapped: kept out of the set until the loop is over,
+    // so each is tried once a frame and the ones behind it are reached.
+    std::vector<std::pair<IDirect3DBaseTexture9*, Staging*>> mapped;
     double now = start;
     for (; left && now - start < budget; --left) {
         IDirect3DBaseTexture9* gpu = nullptr;
@@ -307,9 +328,12 @@ void WarmTextures()
         } else if (outcome == Flush::Dropped) {
             textureStats.dropped.fetch_add(1, std::memory_order_relaxed);
             textureStats.changed.store(true, std::memory_order_relaxed);
+        } else {
+            mapped.emplace_back(gpu, staging);
         }
         now = after;
     }
+    for (const auto& entry : mapped) Requeue(entry.second, entry.first);
 }
 
 // What the texture path cost since the last line, at most every two seconds.
@@ -395,6 +419,7 @@ void __fastcall CreateTexture(void* object, void* shared, uint64_t flags, void* 
     originalTextureCreate(object, nullptr, flags, data);
     Field<int>(object, 0x18) = usage;
     const double filled = NowMs();
+    lastCreateMs.store(filled, std::memory_order_relaxed);
     // The native function creates nothing for texture kinds 0 and 8 (it
     // leaves or clears the slot): there is then nothing to adapt.
     if (!slot || slot == before) return;
@@ -449,20 +474,21 @@ void __fastcall CreateTexture(void* object, void* shared, uint64_t flags, void* 
 void* __fastcall MapTexture(void* object, void* result, unsigned subresource, int type, void* rect)
 {
     auto* gpu = Field<IDirect3DBaseTexture9*>(object, 0x48);
-    Staging* staging = GetStaging(gpu);
+    // Without an Ex device (a fallback) nothing is ever staged.
+    Staging* staging = exDevice ? GetStaging(gpu) : nullptr;
     if (!staging) return originalTextureMap(object, result, subresource, type, rect);
     {
         AcquireSRWLockExclusive(&staging->mutex);
         D3DLOCKED_RECT mapped = {};
         D3DLOCKED_BOX box = {};
         HRESULT hr = D3DERR_INVALIDCALL;
-        switch (staging->texture->GetType()) {
+        switch (staging->type) {
         case D3DRTYPE_TEXTURE:
             hr = static_cast<IDirect3DTexture9*>(staging->texture)->LockRect(
                 subresource, &mapped, static_cast<RECT*>(rect), 0);
             break;
         case D3DRTYPE_CUBETEXTURE: {
-            const UINT levels = staging->texture->GetLevelCount();
+            const UINT levels = staging->levels;
             hr = static_cast<IDirect3DCubeTexture9*>(staging->texture)->LockRect(
                 static_cast<D3DCUBEMAP_FACES>(subresource / levels), subresource % levels,
                 &mapped, static_cast<RECT*>(rect), 0);
@@ -490,17 +516,17 @@ void* __fastcall MapTexture(void* object, void* result, unsigned subresource, in
 void __fastcall UnmapTexture(void* object, unsigned subresource)
 {
     auto* gpu = Field<IDirect3DBaseTexture9*>(object, 0x48);
-    Staging* staging = GetStaging(gpu);
+    Staging* staging = exDevice ? GetStaging(gpu) : nullptr;
     if (!staging) { originalTextureUnmap(object, subresource); return; }
     {
         AcquireSRWLockExclusive(&staging->mutex);
         if (!staging->locks) D3D9Reset_AbortStartup("Unbalanced managed texture unmap");
         HRESULT hr = D3DERR_INVALIDCALL;
-        switch (staging->texture->GetType()) {
+        switch (staging->type) {
         case D3DRTYPE_TEXTURE:
             hr = static_cast<IDirect3DTexture9*>(staging->texture)->UnlockRect(subresource); break;
         case D3DRTYPE_CUBETEXTURE: {
-            const UINT levels = staging->texture->GetLevelCount();
+            const UINT levels = staging->levels;
             hr = static_cast<IDirect3DCubeTexture9*>(staging->texture)->UnlockRect(
                 static_cast<D3DCUBEMAP_FACES>(subresource / levels), subresource % levels); break;
         }
@@ -536,6 +562,7 @@ HRESULT WINAPI SetTexture(IDirect3DDevice9* device, DWORD stage, IDirect3DBaseTe
         if (TakePending(gpu, staging)) {
             const double start = NowMs();
             const Flush outcome = FlushPending(gpu, staging, true);
+            if (outcome == Flush::Mapped) Requeue(staging, gpu);
             const double took = NowMs() - start;
             if (outcome == Flush::Uploaded) {
                 AddStat(textureStats.boundUploads, textureStats.boundUs, took);
@@ -598,7 +625,8 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
                 HookLog("D3D9Ex: FORCEIMMEDIATE refused; using ordinary Present\n");
                 result = originalPresent(device, src, dst, window, dirty);
             }
-        } else if (device == exDevice && !doNotWaitRefused) {
+        } else if (device == exDevice && !immediatePresent && !doNotWaitRefused) {
+            // VSync on only: with it off there is no refresh to wait for.
             result = exDevice->PresentEx(src, dst, window, dirty, kDoNotWait);
             if (result == kStillDrawing) {
                 static bool reported = false;

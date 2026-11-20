@@ -429,8 +429,13 @@ bool IsLaunchMenuDarkModeEnabled()
     return g_darkMode;
 }
 
+// TEMPORARY: VSync is forced off whatever the setting says. Set this to false
+// to honour [Display] VSYNC_ again. The saved setting is not touched.
+constexpr bool kForceVsyncOff = true;
+
 bool IsLaunchVsyncEnabled()
 {
+    if (kForceVsyncOff) return false;
     return g_vsyncEnabled.load();
 }
 

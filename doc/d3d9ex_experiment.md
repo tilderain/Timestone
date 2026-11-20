@@ -133,8 +133,10 @@ in `pendingTextures` and goes up whole by `UpdateTexture`:
 - when it is first bound (the `SetTexture` hook, device vtable 65), as the
   managed pool does; or
 - before that, in `WarmTextures`, which runs once a frame ahead of Present and
-  uploads waiting textures for up to 6 ms (1 ms while a netplay battle is
-  synchronized), so that few are left for their first draw.
+  uploads waiting textures for up to 6 ms while the game is loading (a texture
+  was created in the last 250 ms) and 1 ms otherwise or in a synchronized
+  netplay battle, so that few are left for their first draw. One found still
+  mapped is tried once a frame and does not hold the others up.
 
 A texture the game still has mapped is skipped until it is unmapped, and one
 the game released before any use is dropped without an upload. The list holds
@@ -144,7 +146,9 @@ while listed. `SetTexture` costs one atomic load when nothing is waiting.
 Later native map/unmap calls use staging storage. While a texture's first
 upload is still owed an unmap sends nothing. After it, a 2D or cube texture
 uploads only the mip (and face) that was mapped, with `UpdateSurface`,
-even while other levels are still mapped. Volume textures have no per-level
+even while other levels are still mapped. A single-level 2D texture (the
+per-frame ones, such as `uModel__updateShaderAttributes`' 256x1) goes up with
+one `UpdateTexture` call instead, which sends what the lock marked dirty. Volume textures have no per-level
 surface copy: they are marked dirty and uploaded whole with `UpdateTexture`
 once nothing is mapped. The adapter preserves the native static-map behavior,
 including ignoring the rectangle argument for volume textures. Unadapted

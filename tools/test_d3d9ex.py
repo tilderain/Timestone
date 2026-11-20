@@ -20,6 +20,8 @@ MOCKS = r'''
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 #define WINAPI
 #define __fastcall
 using HRESULT = int;
@@ -326,6 +328,16 @@ int main() {
     assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK && device.forcedPresents == 2);
     assert(forceImmediateRefused);
     assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK && device.forcedPresents == 2);
+    // ...and with VSync off a busy queue is never polled or waited out.
+    {
+        doNotWaitRefused = false;
+        device.polledResult = S_OK;
+        const unsigned waits = refreshWaits, polled = device.polledPresents;
+        device.busyPolls = 1;
+        assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK);
+        assert(refreshWaits == waits && device.polledPresents == polled);
+        device.busyPolls = 0;
+    }
 
     for (unsigned kind : {D3DRTYPE_TEXTURE, D3DRTYPE_CUBETEXTURE, D3DRTYPE_VOLUMETEXTURE}) {
         std::array<uint64_t, 16> object = {}, alias = {};
@@ -430,6 +442,55 @@ int main() {
         assert(updates == before + 4);
         Field<FakeTexture*>(objects[0].data(), 0x48)->Release();
         assert(aliveTextures == 0);
+
+        // One texture the game keeps mapped does not hold the others up, and
+        // is still found by a bind afterwards.
+        for (auto& object : objects) {
+            Field<unsigned>(object.data(), 0x38) = D3DRTYPE_TEXTURE;
+            CreateTexture(object.data(), nullptr, 123, &initial);
+        }
+        for (auto& object : objects) {
+            std::array<uint64_t, 2> mapped = {};
+            MapTexture(object.data(), mapped.data(), 0, 0, nullptr);
+            const int uploaded = updates;
+            WarmTextures();
+            assert(updates == uploaded + 3 && pendingCount == 1);
+            auto* held = Field<FakeTexture*>(object.data(), 0x48);
+            assert(SetTexture(&device, 0, held) == S_OK && updates == uploaded + 3 && pendingCount == 1);
+            UnmapTexture(object.data(), 0);
+            WarmTextures();
+            assert(updates == uploaded + 4 && pendingCount == 0);
+            for (auto& other : objects) Field<FakeTexture*>(other.data(), 0x48)->Release();
+            assert(aliveTextures == 0);
+            if (&object == &objects.back()) break;
+            for (auto& other : objects) CreateTexture(other.data(), nullptr, 123, &initial);
+        }
+
+        // Once no texture has been created for a while the game is not
+        // loading, and a frame gives the leftovers 1 ms, not 6.
+        for (auto& object : objects) CreateTexture(object.data(), nullptr, 123, &initial);
+        clockNow += 1000.0;
+        clockStep = 2.0;
+        WarmTextures();
+        assert(pendingCount == 3);
+        clockStep = 0;
+        for (auto& object : objects) Field<FakeTexture*>(object.data(), 0x48)->Release();
+        WarmTextures(); // all four released unused
+        assert(pendingCount == 0 && aliveTextures == 0);
+    }
+
+    // A single-level texture goes up in one call when it is unmapped.
+    {
+        auto* cpu = new FakeTexture(D3DRTYPE_TEXTURE);
+        auto* gpu = new FakeTexture(D3DRTYPE_TEXTURE);
+        cpu->levels = gpu->levels = 1;
+        Staging* single = new Staging(cpu);
+        cpu->data[0] = 5;
+        const int uploaded = updates, surfaces = surfaceUploads;
+        UploadSubresource(single, gpu, 0);
+        assert(updates == uploaded + 1 && surfaceUploads == surfaces && gpu->data[0] == 5);
+        single->Release(); gpu->Release();
+        assert(aliveTextures == 0);
     }
     assert(nativeMaps == 0 && nativeUnmaps == 0);
     std::array<uint64_t, 16> ordinary = {};
@@ -461,7 +522,7 @@ class D3D9ExTests(unittest.TestCase):
         source = (ROOT / "UMVC3Hook/code/d3d9ex.cpp").read_text()
         staging = source[source.index("struct Staging;"):source.index("// The staging copy of a GPU texture")]
         unit = MOCKS + function(source, "Field") + function(source, "Check") + staging
-        for name in ("GetStaging", "Upload", "UploadSubresource", "Defer", "TakePending"):
+        for name in ("GetStaging", "Upload", "UploadSubresource", "Requeue", "Defer", "TakePending"):
             unit += function(source, name)
         # FlushPending, the warm-up budgets and WarmTextures.
         unit += source[source.index("enum class Flush"):source.index("// What the texture path cost")]

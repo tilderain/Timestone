@@ -1,5 +1,7 @@
 // dllmain.cpp : Defines the entry point for the DLL application.
 #include "pch.h"
+#include <shellapi.h>
+#include <objbase.h>
 #include "IniSafe.h"
 #include <iostream>
 #include "code/umvc3.h"
@@ -244,6 +246,43 @@ void HookLogFlush()
 	AcquireSRWLockExclusive(&g_hookLogLock);
 	HookLogFlushLocked();
 	ReleaseSRWLockExclusive(&g_hookLogLock);
+}
+
+// Writes out what is buffered, then opens the log in whatever the system uses
+// for .log files. The shell call runs on its own thread: file-association work
+// must never run inside EndScene or a game tick.
+static DWORD WINAPI HookLogOpenThread(LPVOID parameter)
+{
+	char* path = static_cast<char*>(parameter);
+	const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+	SHELLEXECUTEINFOA open = {};
+	open.cbSize = sizeof(open);
+	open.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+	open.lpVerb = "open";
+	open.lpFile = path;
+	open.nShow = SW_SHOWNORMAL;
+	ShellExecuteExA(&open);
+	if (SUCCEEDED(com)) CoUninitialize();
+	delete[] path;
+	return 0;
+}
+
+bool HookLogOpenInViewer()
+{
+	char* path = new char[MAX_PATH]();
+	AcquireSRWLockExclusive(&g_hookLogLock);
+	HookLogFlushLocked();
+	const DWORD length = g_hookLogFilename[0]
+		? GetFullPathNameA(g_hookLogFilename, MAX_PATH, path, nullptr) : 0;
+	ReleaseSRWLockExclusive(&g_hookLogLock);
+	HANDLE thread = length && length < MAX_PATH
+		? CreateThread(nullptr, 0, HookLogOpenThread, path, 0, nullptr) : nullptr;
+	if (!thread) {
+		delete[] path;
+		return false;
+	}
+	CloseHandle(thread);
+	return true;
 }
 
 void HookLogTryFlush()
@@ -1009,16 +1048,16 @@ void ApplyD3D9BorderlessWindow()
 	if (!monitor || !GetMonitorInfoA(monitor, &info))
 		return;
 
-	LONG_PTR style = GetWindowLongPtrA(g_d3d9FocusWindow, GWL_STYLE);
+	const LONG_PTR oldStyle = GetWindowLongPtrA(g_d3d9FocusWindow, GWL_STYLE);
+	LONG_PTR style = oldStyle;
 	style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
 		WS_MAXIMIZEBOX | WS_SYSMENU);
 	style |= WS_POPUP;
-	SetWindowLongPtrA(g_d3d9FocusWindow, GWL_STYLE, style);
 
-	LONG_PTR exStyle = GetWindowLongPtrA(g_d3d9FocusWindow, GWL_EXSTYLE);
+	const LONG_PTR oldExStyle = GetWindowLongPtrA(g_d3d9FocusWindow, GWL_EXSTYLE);
+	LONG_PTR exStyle = oldExStyle;
 	exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
 		WS_EX_CLIENTEDGE | WS_EX_STATICEDGE);
-	SetWindowLongPtrA(g_d3d9FocusWindow, GWL_EXSTYLE, exStyle);
 
 	const RECT& rect = info.rcMonitor;
 	int x = rect.left;
@@ -1034,6 +1073,26 @@ void ApplyD3D9BorderlessWindow()
 		else if (g_windowCorner == 2)
 			y = rect.bottom - height;
 	}
+
+	// Already borderless and in place: leave the window alone. This runs
+	// again after the start-up Reset, when the first Present may still be
+	// in flight on DXVK's submit thread; reconfiguring the window under it
+	// left vkQueuePresentKHR blocked for good (Proton, 2026-11-20), and the
+	// game thread then waited forever on its first buffer lock.
+	RECT current = {};
+	if (style == oldStyle && exStyle == oldExStyle &&
+		GetWindowRect(g_d3d9FocusWindow, &current) &&
+		current.left == x && current.top == y &&
+		current.right - current.left == width && current.bottom - current.top == height) {
+		HookLog("D3D9: borderless window already in place (%d,%d %dx%d)\n",
+			x, y, width, height);
+		return;
+	}
+
+	if (style != oldStyle)
+		SetWindowLongPtrA(g_d3d9FocusWindow, GWL_STYLE, style);
+	if (exStyle != oldExStyle)
+		SetWindowLongPtrA(g_d3d9FocusWindow, GWL_EXSTYLE, exStyle);
 	SetWindowPos(g_d3d9FocusWindow, HWND_TOP,
 		x, y, width, height,
 		SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOOWNERZORDER);

@@ -928,6 +928,50 @@ LONG ReadCounter(volatile LONG* counter)
     return InterlockedCompareExchange(counter, 0, 0);
 }
 
+// The exported function an address in a module falls in or just after, with
+// the distance to it, or nullptr. Names the Vulkan call a DXVK thread is in:
+// winevulkan.dll exports one small entry per call. (DXVK itself exports
+// almost nothing, so its own frames stay as offsets.)
+const char* NearestExport(HMODULE module, uintptr_t address, uintptr_t* distance)
+{
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(module);
+    if (!base || IsBadReadPtr(base, sizeof(IMAGE_DOS_HEADER))) return nullptr;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (IsBadReadPtr(nt, sizeof(*nt)) || nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
+    const IMAGE_DATA_DIRECTORY& entry =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!entry.VirtualAddress || entry.Size < sizeof(IMAGE_EXPORT_DIRECTORY)) return nullptr;
+    const auto* exports =
+        reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + entry.VirtualAddress);
+    if (IsBadReadPtr(exports, sizeof(*exports))) return nullptr;
+    const DWORD* names = reinterpret_cast<const DWORD*>(base + exports->AddressOfNames);
+    const WORD* ordinals = reinterpret_cast<const WORD*>(base + exports->AddressOfNameOrdinals);
+    const DWORD* functions = reinterpret_cast<const DWORD*>(base + exports->AddressOfFunctions);
+    if (IsBadReadPtr(names, exports->NumberOfNames * sizeof(DWORD)) ||
+        IsBadReadPtr(ordinals, exports->NumberOfNames * sizeof(WORD)) ||
+        IsBadReadPtr(functions, exports->NumberOfFunctions * sizeof(DWORD)))
+        return nullptr;
+    const uintptr_t rva = address - reinterpret_cast<uintptr_t>(base);
+    const char* best = nullptr;
+    uintptr_t bestRva = 0;
+    for (DWORD i = 0; i < exports->NumberOfNames; ++i) {
+        if (ordinals[i] >= exports->NumberOfFunctions) continue;
+        const DWORD function = functions[ordinals[i]];
+        // Forwarded exports point into the export directory itself.
+        if (function >= entry.VirtualAddress && function < entry.VirtualAddress + entry.Size)
+            continue;
+        if (function <= rva && function >= bestRva) {
+            bestRva = function;
+            best = reinterpret_cast<const char*>(base + names[i]);
+        }
+    }
+    if (!best || IsBadReadPtr(best, 1)) return nullptr;
+    *distance = rva - bestRva;
+    return best;
+}
+
 // Logs where a thread is, as module+offset frames. The thread is suspended
 // only while its stack is walked into a local array: it may be holding the
 // log or heap lock, so nothing is logged or allocated until it runs again.
@@ -978,8 +1022,18 @@ void LogThreadBacktrace(DWORD threadId, const char* label)
             GetModuleFileNameA(module, path, sizeof(path));
         }
         const char* name = strrchr(path, '\\');
-        HookLog("D3D9:   #%02d %s+0x%llX\n", i, name ? name + 1 : path,
-                static_cast<unsigned long long>(frames[i] - reinterpret_cast<uintptr_t>(module)));
+        name = name ? name + 1 : path;
+        const unsigned long long offset = frames[i] - reinterpret_cast<uintptr_t>(module);
+        // Only where a nearby export says something: the system and Vulkan
+        // modules. An export far below the address is some other function.
+        uintptr_t distance = 0;
+        const char* symbol = module && module != GetModuleHandleA(nullptr)
+            ? NearestExport(module, frames[i], &distance) : nullptr;
+        if (symbol && distance < 0x1000)
+            HookLog("D3D9:   #%02d %s+0x%llX (%s+0x%llX)\n", i, name, offset, symbol,
+                    static_cast<unsigned long long>(distance));
+        else
+            HookLog("D3D9:   #%02d %s+0x%llX\n", i, name, offset);
     }
 }
 
