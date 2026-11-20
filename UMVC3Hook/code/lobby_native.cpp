@@ -222,7 +222,17 @@ int g_nextDepth = kDepthFar;
 void* CloneUnit(Kind kind)
 {
     Pool& pool = g_pools[kind];
-    if (!IsUnitAlive(pool.prototype) || pool.units.size() >= kMaxUnitsPerKind) return nullptr;
+    if (!IsUnitAlive(pool.prototype)) return nullptr;
+    if (pool.units.size() >= kMaxUnitsPerKind) {
+        // Whatever is drawn past this point is missing from the frame.
+        static bool logged[KIND_COUNT] = {};
+        if (!logged[kind]) {
+            logged[kind] = true;
+            HookLog("LobbyNative: out of units of kind %d (%zu in use); later draws are dropped\n",
+                    static_cast<int>(kind), pool.units.size());
+        }
+        return nullptr;
+    }
 
     // The class operator new is (size, alignment): it forwards both to the
     // class allocator together with the DTI id. Sizes are the native object
@@ -723,6 +733,29 @@ public:
         const float half = std::atan2(dy, dx) * 0.5f;
         Field<float>(unit, UCOORD_QUAT + 8) = std::sin(half);
         Field<float>(unit, UCOORD_QUAT + 12) = std::cos(half);
+    }
+
+    bool GlowLine(float x0, float y0, float x1, float y1, Color color) override
+    {
+        void* texture = GetTexture(TEX_SPACE_STARS);
+        if (!texture || !EnsureSpaceStars(texture)) return false;
+        const float dx = x1 - x0, dy = y1 - y0;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        if (color.a <= 0.004f || length <= 0.01f) return true;
+        void* unit = AcquireUnit(KIND_SPRITE);
+        if (!unit) return true;
+        // As Line, but textured with the profile rows of the star texture.
+        const float v0 = static_cast<float>(kSpaceLineRow0) / kSpaceStarsSize;
+        const float v1 = static_cast<float>(kSpaceLineRow0 + kSpaceLineRows) / kSpaceStarsSize;
+        ApplyTextured(unit, TEX_SPACE_STARS, texture, length, static_cast<float>(kSpaceLineRows),
+                      Uv{0.25f, v0, 0.75f, v1});
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
+            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        ApplyPlacement(unit, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 1.0f, 1.0f, A_MC, color);
+        const float half = std::atan2(dy, dx) * 0.5f;
+        Field<float>(unit, UCOORD_QUAT + 8) = std::sin(half);
+        Field<float>(unit, UCOORD_QUAT + 12) = std::cos(half);
+        return true;
     }
 
     void Frame(Tex tex, float x, float y, float w, float h, Uv uv, Anchor anchor,

@@ -24,6 +24,12 @@ constexpr int kSpaceStarsSize = kSpaceStarsTile * 2;
 constexpr size_t kSpaceStarsRgbaBytes =
     static_cast<size_t>(kSpaceStarsSize) * kSpaceStarsSize * 4;
 
+// The grid line's profile is baked into the star texture's top rows, which
+// the stars never read: kSpaceLineRows texels across the line, one texel to
+// a screen pixel.
+constexpr int kSpaceLineRow0 = 4;
+constexpr int kSpaceLineRows = 16;
+
 // Decodes the tile into the star texture's pixels (kSpaceStarsRgbaBytes of
 // RGBA). False if `size` is not exactly one tile.
 bool BuildSpaceStarsRgba(const uint8_t* tile, size_t size, uint8_t* rgba);

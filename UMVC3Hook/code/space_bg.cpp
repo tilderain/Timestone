@@ -64,6 +64,7 @@ constexpr float kGridTexel = 0.6f;
 constexpr float kGridCoreWidth = 2.0f * kGridTexel + 0.6f; // never thinner than a line can draw
 constexpr float kGridCoreAlpha = 230.0f / 255.0f;
 constexpr float kGridHaloWidth = 14.0f * kGridTexel;
+constexpr float kGridArcSlack = 0.4f; // pixels a joined run may stray from its arc
 constexpr float kGridHaloAlpha = 0.20f; // the halo's mean over that width
 constexpr float kGridTexR = 0.46f, kGridTexG = 0.74f, kGridTexB = 0.86f;
 
@@ -201,6 +202,24 @@ bool OnScreen(const Point& a, const Point& b)
     return true;
 }
 
+// Whether the lattice points strictly between two of an arc lie on the
+// straight line joining them, to within what the eye can tell.
+bool RunIsStraight(const Point* arc, int from, int to)
+{
+    const Point& a = arc[from];
+    const Point& b = arc[to];
+    if (!a.ahead || !b.ahead) return false;
+    const float dx = b.x - a.x, dy = b.y - a.y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length <= 0.01f) return false;
+    for (int i = from + 1; i < to; ++i) {
+        if (!arc[i].ahead) return false;
+        const float off = std::fabs((arc[i].x - a.x) * dy - (arc[i].y - a.y) * dx) / length;
+        if (off > kGridArcSlack) return false;
+    }
+    return true;
+}
+
 void DrawGrid(Canvas& canvas, float phase, const Rgba& tint, float alpha)
 {
     // What reaches the screen is texture x BaseMapFactor x vertex colour:
@@ -213,6 +232,9 @@ void DrawGrid(Canvas& canvas, float phase, const Rgba& tint, float alpha)
         float fade = v / kGridSolidV;
         if (fade > 1.0f) fade = 1.0f;
         if (fade <= 0.02f || !OnScreen(a, b)) return;
+        // One sprite carrying the whole profile where the canvas has it;
+        // otherwise the halo and the core as two flat lines.
+        if (canvas.GlowLine(a.x, a.y, b.x, b.y, WithAlpha(ink, solid * fade))) return;
         canvas.Line(a.x, a.y, b.x, b.y, kGridHaloWidth,
                     WithAlpha(ink, kGridHaloAlpha * solid * fade));
         canvas.Line(a.x, a.y, b.x, b.y, kGridCoreWidth,
@@ -233,8 +255,18 @@ void DrawGrid(Canvas& canvas, float phase, const Rgba& tint, float alpha)
         const float shift = std::fmod(kGridTilesPerLoop * phase * 2.0f, 1.0f);
         for (int index = 1; index <= lastRow; ++index) {
             const float row = index - shift;
-            for (int column = 0; column + 1 < kGridColumns; ++column)
-                line(GridPoint(sign, column, row), GridPoint(sign, column + 1, row), row * 0.5f);
+            // An arc is one strength from end to end, so its lattice steps
+            // are joined wherever a single straight run stays on the curve.
+            // Near the horizon the arcs are almost flat and a few runs do.
+            Point arc[kGridColumns];
+            for (int column = 0; column < kGridColumns; ++column)
+                arc[column] = GridPoint(sign, column, row);
+            for (int from = 0; from + 1 < kGridColumns;) {
+                int to = from + 1;
+                while (to + 1 < kGridColumns && RunIsStraight(arc, from, to + 1)) ++to;
+                line(arc[from], arc[to], row * 0.5f);
+                from = to;
+            }
         }
     }
 }
@@ -281,6 +313,20 @@ bool BuildSpaceStarsRgba(const uint8_t* tile, size_t size, uint8_t* rgba)
                     }
                 }
             }
+        }
+    }
+    // The grid line's profile, in the rows above anything the stars read
+    // (their window starts 42 rows down): white, with the alpha of a bright
+    // core two texels across inside a soft halo. Flat along u.
+    static const uint8_t kProfile[kSpaceLineRows] = {0,  0,  0,  0,  14,  36, 60, 230,
+                                                     230, 60, 36, 14, 0,  0,  0,  0};
+    for (int y = 0; y < kSpaceLineRow0 + kSpaceLineRows + 4; ++y) {
+        const int row = y - kSpaceLineRow0;
+        const uint8_t a = row >= 0 && row < kSpaceLineRows ? kProfile[row] : 0;
+        for (int x = 0; x < kSpaceStarsSize; ++x) {
+            uint8_t* out = rgba + (static_cast<size_t>(y) * kSpaceStarsSize + x) * 4;
+            out[0] = out[1] = out[2] = 255;
+            out[3] = a;
         }
     }
     return true;

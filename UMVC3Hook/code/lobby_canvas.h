@@ -199,6 +199,10 @@ public:
     // axis-aligned; the space backdrop's curved grid is drawn with it.
     virtual void Line(float x0, float y0, float x1, float y1, float width, Color color) = 0;
 
+    // The space backdrop's grid line, core and halo in one sprite. False if
+    // this canvas has no such sprite; the caller then builds it from Line.
+    virtual bool GlowLine(float, float, float, float, Color) { return false; }
+
     // `scale` is the horizontal scale; the vertical one is scale * stretch
     // (the native main menu draws its labels about 1.3 times taller than wide).
     virtual void Text(const char* utf8, float x, float y, float scale,
