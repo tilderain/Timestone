@@ -350,29 +350,66 @@ restart)`:
   1 for every room track.
 - Cues 71..80 (`sGSound__isLayeredStageCue` `0x1402AB490`) are stage themes
   with a second mix in cue + 20 (`bgm_st_NNN_b`). Both are started together
-  and `variant` picks the audible one (0 main, 1 the `_b` file, 2 a third
-  channel pair that the lobby does not offer). Cues 90..104 cannot be
+  and `variant` picks the audible one: 0 is channels 0/1 of the six-channel
+  main file, 1 the two-channel `_b` file, 2 channels 4/5 of the main file.
+  The lobby offers all three, as the gallery's sound test does, numbered
+  1 to 3 after the stage's name. Cues 90..104 cannot be
   requested directly (`sGSound__isStageAltMixCue` `0x1402AB480`).
 
-Where the names in the table come from (static analysis of the executable and
-the cue table; none of the tracks beyond 13/14/16 has been heard in the lobby
-yet):
+The table's names are the soundtrack's track titles (fan rips of the two
+albums; character themes without their "Theme of"). Which cue is which: only
+13/14/16 have been heard in the lobby; the rest was checked against the executable, the cue table, the audio
+files (`game_sounds/sound/bgm/source`, loop points in the Ogg tags), the
+game's own sound test and the soundtrack listings.
 
+- The gallery has a sound test (`uMenuGallery__activateSelectedContent`
+  `0x14037CCE0`, cases 12..14) with three cue tables: characters
+  `0x140B40930`, stages `0x140B40A20` (variant per entry at `0x140B40AA0`)
+  and "other" `0x140B40B20`. Its text is in `msg_sys_menu2_en`
+  (`ui\mnmain_msg.arc`, `MSD`: UTF-16 units of ASCII minus 0x20). The other
+  list is 2, 3, 4, 5, 6, 8..19, 106..108, 112, 113, 84..88, 138, 132..137.
 - Characters: every character class's theme virtual (`+0x2E0`) is
   `mov eax, cue; ret`. Cues 20..39 are the original Capcom cast, 40..55 and
   57..59 the Marvel cast, 60 Galactus, 120..125 and 126..131 the Ultimate
-  additions; 121 is Wright's Turnabout theme. Cue 56 has no file.
+  additions; 121 is Wright's Turnabout theme. Cue 56 has no file. The sound
+  test's character table holds exactly this set.
 - Stages: `uStageNNN`'s theme virtual (`+0x238`) returns 70 + stage number
   (training room 70, Danger Room `uStage100` 71); the 1xx variants share the
-  base stage's cue. No stage class returns 78, listed as "Stage 8".
-- Menus, from the call sites of `sGSound__playSystemCue`: 2/3
-  `sAction__executeMatchPhase` (listed as Victory, a guess from context), 4/5
-  and 106..108 character select, 9/10 `uBtContinue__setup`, 15 gallery, 17
-  `uMenuLicense`, 19 `aFinalResut__init`, 84..88 `uEnding`, 134..137 the
-  gallery's content table, 138 `aCredit`. The use of 18, 112, 113, 132 and 133
-  was not identified and they are listed by number. Where a pair exists the
-  second entry ("B") is the one the BGM-style option switches to.
-- Left out: the short stingers (6, 8, 11, 12).
+  base stage's cue. The sound test lists each of 71..77, 79, 80 three times
+  with variants 0, 1, 2 ("Stage theme 1/2/3"), and 81..83 as Fate of the
+  Earth (1)(2)(3). Cue 78 (`bgm_st_008`) has no stage class and is not in the
+  sound test: an unused stage theme. The r/mahvelmods index and fan
+  soundtrack rips both call it the unused Okami stage; not heard here.
+- BGM STYLE (`sGameConfig` `0x140251640`) is CLASSIC SOUND (0) or DYNAMIC
+  SOUND (1); the pairs 2/3, 4/5, 9/10, 13/14 are classic/dynamic.
+- 2/3 `sAction__executeMatchPhase`: the win screen (soundtrack "Victory").
+- 4/5 character select. 106..108 are the three Marvel vs. Capcom 2 "Take You
+  for a Ride" remixes the character select plays when a trigger is held
+  (`aChrSelect` `0x140368840`): `bgm_gm_019` traditional, `bgm_gm_028`
+  techno, `bgm_gm_029` rock. This is the r/mahvelmods filename index, and the
+  loop lengths agree with the soundtrack's 1:30 / 1:34 / 1:26; a Steam
+  modding guide labels 019 techno and 028 rock, which the lengths rule out.
+- 9/10 `uBtContinue__setup`. 15 gallery. 16 the room, "Online Lobby music"
+  in the sound test, "Network" on the soundtrack.
+- 17 is what the leaderboard (`uMenuNetLeaderBoard_vfn21`) and the license
+  screen return to: soundtrack "Ranking" (its loop gives the soundtrack's
+  1:33). It was listed as "License" before, which was wrong.
+- 18 `uMenuMission` (vtable slot `0x1403EC2C0`): "Mission Mode".
+- 19 `aFinalResut__init`: "Congratulations screen music" in the sound test,
+  "Arcade Clear" on the soundtrack.
+- 112/113 are the same recording (`bgm_gm_026` without loop points,
+  `bgm_gm_027` with): the sound test's "Main Theme music" full and looped
+  versions. 113 is what the License Card screen plays
+  (`uMenuLicense__setup`), hence "License Card" on soundtrack rips; 112 is
+  played by `sMain__playInitialModeSound` for game mode 2.
+- 132 (`bgm_gm_037`, no loop) is played by `uMenuTitle__move`; the
+  r/mahvelmods index identifies it as the comic book intro.
+- 133 Heroes & Heralds; 134/135 and 136/137 are its two themes per side
+  (`aChrSelect__playRoundResultSound`, side 1 gets 134/135, side 2 136/137),
+  "Heroes Ver. 1/2" and "Heralds Ver. 1/2" on the soundtrack. Which side is
+  which follows the loop lengths against the soundtrack's track lengths.
+- 84..88 `uEnding`, 138 `aCredit`.
+- Left out: the short stingers (6 versus screen, 8, 11 game over, 12 retry).
 
 The lobby's menus use the menu theme and a room uses the host's track (cue 16
 unless changed); picking "Main Menu" in a room plays the same two-layer theme

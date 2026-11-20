@@ -2389,8 +2389,13 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
                 p.Text("_", valueX + TextWidth(fitted) * 0.86f * 0.5f + 2.0f, y, 0.86f, A_ML, kCyan);
             continue;
         }
-        p.TextFit(value, valueX, y, 0.86f, row == CREATE_NAME ? 440.0f : kValueTextWidth, A_MC,
-                  kText);
+        // A track name is never cut: the row has no arrows, so it gets the
+        // name's width and is drawn smaller if it still does not fit.
+        if (row == CREATE_MUSIC)
+            p.TextShrink(value, valueX, y, 0.86f, 440.0f, A_MC, kText);
+        else
+            p.TextFit(value, valueX, y, 0.86f, row == CREATE_NAME ? 440.0f : kValueTextWidth, A_MC,
+                      kText);
         if (selected && row != CREATE_NAME && row != CREATE_MUSIC &&
             !(row == CREATE_ROTATION && draft.firstTo == kFirstToEndless)) {
             DrawValueArrows(p, frame_, valueX, y, kValueArrowSpan);
@@ -2793,7 +2798,8 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     // Title bar: room name on the left, population on the right.
     p.Sprite(TEX_TITLE_BAR, 40.0f, 62.0f, 1200.0f, 52.0f,
              Uv{4.0f / 1024.0f, 8.0f / 64.0f, 1020.0f / 1024.0f, 56.0f / 64.0f}, A_ML);
-    p.TextFit(room.settings.name, 64.0f, 60.0f, 0.44f, 510.0f, A_ML, kText, FONT_HEADING);
+    const float kNameScale = 0.44f, kNameMax = 460.0f;
+    p.TextFit(room.settings.name, 64.0f, 60.0f, kNameScale, kNameMax, A_ML, kText, FONT_HEADING);
     // What the host has playing, so a change is not a mystery to the room.
     const int track = FindMusicTrack(room.music);
     char music[96];
@@ -2802,7 +2808,11 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     else
         snprintf(music, sizeof(music), "FT%d   %s   BGM: %s", room.settings.firstTo,
                  RotationName(room.settings.rotation), kMusicTracks[track < 0 ? 0 : track].name);
-    p.TextFit(music, 1060.0f, 61.0f, 0.62f, 470.0f, A_MR, kDim);
+    // Shrunk to fit, never cut. It takes whatever the lobby name leaves free,
+    // so the long soundtrack titles stay full size beside a short name.
+    float nameWidth = TextWidth(room.settings.name, FONT_HEADING) * kNameScale;
+    if (nameWidth > kNameMax) nameWidth = kNameMax;
+    p.TextShrink(music, 1060.0f, 61.0f, 0.62f, 1060.0f - 64.0f - nameWidth - 28.0f, A_MR, kDim);
     p.Sprite(TEX_FRIENDS, 1098.0f, 62.0f, 40.0f, 40.0f, kFullUv, A_MC);
     char population[24];
     snprintf(population, sizeof(population), "%d / %d", room.memberCount, room.settings.maxMembers);
@@ -2864,7 +2874,7 @@ void LobbyUi::DrawMusicMenu(Canvas& canvas) const
 {
     const Painter p(canvas, 1.0f, 0.0f);
     p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.55f});
-    const float w = 620.0f;
+    const float w = 860.0f; // the group label plus the longest soundtrack title
     const float h = 136.0f + kMusicRows * 44.0f;
     const float x = (kScreenW - w) * 0.5f;
     const float y = (kScreenH - h) * 0.5f - 10.0f;
@@ -2888,8 +2898,8 @@ void LobbyUi::DrawMusicMenu(Canvas& canvas) const
         const bool current = track.id == playing;
         p.Text(MusicGroupName(track.group), x + 48.0f, rowY, 0.56f, A_ML,
                current ? kCyan : kDim);
-        p.TextFit(track.name, x + 190.0f, rowY, 0.8f, w - 190.0f - 48.0f, A_ML,
-                  current ? kCyan : selected ? kText : kDim);
+        p.TextShrink(track.name, x + 190.0f, rowY, 0.8f, w - 190.0f - 48.0f, A_ML,
+                     current ? kCyan : selected ? kText : kDim);
     }
     char position[24];
     snprintf(position, sizeof(position), "%d / %d", musicCursor_ + 1, kMusicTrackCount);
