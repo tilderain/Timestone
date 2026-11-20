@@ -49,6 +49,10 @@ bool forced = false;
 IDirect3DDevice9Ex* exDevice = nullptr; // Borrowed from the native renderer.
 HWND deviceWindow = nullptr;
 const GUID stagingKey = {0x8cad6d71, 0xb8b5, 0x482c, {0xb2,0x14,0x71,0x73,0x65,0x78,0x30,0x31}};
+const GUID bufferCopyKey = {0x8cad6d72, 0xb8b5, 0x482c, {0xb2,0x14,0x71,0x73,0x65,0x78,0x30,0x32}};
+// [Graphics] D3D9ExStageBuffers=0 turns the deferred buffers off (see
+// pendingBuffers), for comparing a load with and without them.
+bool stageBuffers = true;
 
 template<typename T>
 T& Field(void* object, size_t offset)
@@ -120,6 +124,33 @@ struct Staging final : IUnknown {
 SRWLOCK pendingLock = SRWLOCK_INIT;
 std::unordered_map<IDirect3DBaseTexture9*, Staging*> pendingTextures;
 std::atomic<unsigned> pendingCount {0};
+
+// Static vertex and index buffers the game has filled but that are not on the
+// GPU yet, by the game's own buffer object (nDraw::VertexBuffer/IndexBuffer).
+// The game creates these MANAGED, which an Ex device does not have. Creating
+// them in the default pool instead put a GPU allocation and a driver lock for
+// every buffer of a character or stage on the loader's decoder threads, inside
+// the archive decode (2026-11-20, a Windows NVIDIA machine: a stage archive
+// decoded in 1.6 s against 0.13-0.5 s under DXVK, with textures already shown
+// to cost little; that buffers are what took the time was not measured).
+// So the game now fills a system-memory buffer, which costs neither, and the
+// per-frame warm-up makes the GPU buffer on the game thread and puts it in the
+// game's object in place of the copy. Until then the copy is what gets drawn,
+// which Direct3D allows and is only slow. `cpu` holds a reference.
+struct PendingBuffer { IUnknown* cpu; UINT size; bool index; };
+SRWLOCK bufferLock = SRWLOCK_INIT;
+std::unordered_map<void*, PendingBuffer> pendingBuffers;
+std::atomic<unsigned> pendingBufferCount {0};
+constexpr size_t kBufferSlot = 0x30; // nDraw::VertexBuffer/IndexBuffer: the Direct3D buffer
+// Set around the game's own creation of a static buffer it fills at once; the
+// device's create hook clears it when it has made that buffer in memory.
+thread_local bool stagingBufferCreate = false;
+
+struct BufferStats {
+    std::atomic<unsigned> staged {0}, direct {0}, sent {0}, dropped {0};
+    std::atomic<int64_t> stagedUs {0}, directUs {0}, sentUs {0}, sentWorstUs {0};
+};
+BufferStats bufferStats;
 
 // Since the last log line; see LogTextureStats. Counters only, added to
 // without a lock from whichever thread creates, binds or presents; times are
@@ -303,6 +334,13 @@ constexpr double kWarmLoadingMs = 6.0;
 constexpr double kLoadingQuietMs = 250.0; // no texture created for this long: not loading
 std::atomic<double> lastCreateMs {-kLoadingQuietMs};
 
+double WarmBudget(double now)
+{
+    const bool loading = !FrameStepper_IsBattleSynchronized() &&
+        now - lastCreateMs.load(std::memory_order_relaxed) < kLoadingQuietMs;
+    return loading ? kWarmLoadingMs : kWarmPlayMs;
+}
+
 // Once a frame, before it is presented: upload waiting textures until the
 // frame's budget is spent, so few are left to be uploaded at their first draw.
 void WarmTextures()
@@ -310,9 +348,7 @@ void WarmTextures()
     unsigned left = pendingCount.load(std::memory_order_relaxed);
     if (!left) return;
     const double start = NowMs();
-    const bool loading = !FrameStepper_IsBattleSynchronized() &&
-        start - lastCreateMs.load(std::memory_order_relaxed) < kLoadingQuietMs;
-    const double budget = loading ? kWarmLoadingMs : kWarmPlayMs;
+    const double budget = WarmBudget(start);
     // Textures found still mapped: kept out of the set until the loop is over,
     // so each is tried once a frame and the ones behind it are reached.
     std::vector<std::pair<IDirect3DBaseTexture9*, Staging*>> mapped;
@@ -365,6 +401,15 @@ void LogTextureStats()
             "released unused=%u waiting=%u\n",
             created, fill, gpuCreate, bound, boundMs, worst, warm, warmMs, dropped,
             pendingCount.load(std::memory_order_relaxed));
+    const unsigned staged = count(bufferStats.staged), direct = count(bufferStats.direct);
+    const unsigned sent = count(bufferStats.sent), unused = count(bufferStats.dropped);
+    const double stagedMs = ms(bufferStats.stagedUs), directMs = ms(bufferStats.directUs);
+    const double sentMs = ms(bufferStats.sentUs), sentWorst = ms(bufferStats.sentWorstUs);
+    if (staged || direct || sent || unused)
+        HookLog("D3D9Ex: buffers filled in memory=%u (%.1f ms) created on the GPU directly=%u "
+                "(%.1f ms) sent to the GPU=%u (%.1f ms, longest %.1f) released unused=%u waiting=%u\n",
+                staged, stagedMs, direct, directMs, sent, sentMs, sentWorst, unused,
+                pendingBufferCount.load(std::memory_order_relaxed));
 }
 
 // Waits for the desktop compositor's next pass, which follows the display's
@@ -577,18 +622,203 @@ HRESULT WINAPI SetTexture(IDirect3DDevice9* device, DWORD stage, IDirect3DBaseTe
     return originalSetTexture(device, stage, texture);
 }
 
+// Where a managed buffer goes on the Ex device: system memory when the game
+// is about to fill it (see pendingBuffers), otherwise the default pool. The
+// copy is read back later, so it is not write-only.
+D3DPOOL BufferPool(DWORD& usage)
+{
+    if (!stagingBufferCreate) return D3DPOOL_DEFAULT;
+    stagingBufferCreate = false;
+    usage &= ~static_cast<DWORD>(D3DUSAGE_WRITEONLY);
+    return D3DPOOL_SYSTEMMEM;
+}
+
 HRESULT WINAPI CreateVertex(IDirect3DDevice9* device, UINT size, DWORD usage, DWORD fvf,
     D3DPOOL pool, IDirect3DVertexBuffer9** output, HANDLE* shared)
 {
-    if (device == exDevice && pool == D3DPOOL_MANAGED) pool = D3DPOOL_DEFAULT;
-    return originalVertexCreate(device, size, usage, fvf, pool, output, shared);
+    if (device != exDevice || pool != D3DPOOL_MANAGED)
+        return originalVertexCreate(device, size, usage, fvf, pool, output, shared);
+    pool = BufferPool(usage);
+    if (pool != D3DPOOL_DEFAULT)
+        return originalVertexCreate(device, size, usage, fvf, pool, output, shared);
+    const double start = NowMs();
+    const HRESULT result = originalVertexCreate(device, size, usage, fvf, pool, output, shared);
+    AddStat(bufferStats.direct, bufferStats.directUs, NowMs() - start);
+    return result;
 }
 HRESULT WINAPI CreateIndex(IDirect3DDevice9* device, UINT size, DWORD usage, D3DFORMAT format,
     D3DPOOL pool, IDirect3DIndexBuffer9** output, HANDLE* shared)
 {
-    if (device == exDevice && pool == D3DPOOL_MANAGED) pool = D3DPOOL_DEFAULT;
-    return originalIndexCreate(device, size, usage, format, pool, output, shared);
+    if (device != exDevice || pool != D3DPOOL_MANAGED)
+        return originalIndexCreate(device, size, usage, format, pool, output, shared);
+    pool = BufferPool(usage);
+    if (pool != D3DPOOL_DEFAULT)
+        return originalIndexCreate(device, size, usage, format, pool, output, shared);
+    const double start = NowMs();
+    const HRESULT result = originalIndexCreate(device, size, usage, format, pool, output, shared);
+    AddStat(bufferStats.direct, bufferStats.directUs, NowMs() - start);
+    return result;
 }
+
+using BufferCreate = void(__fastcall*)(void*, unsigned, void*);
+using BufferDestroy = void*(__fastcall*)(void*, uint64_t);
+BufferCreate originalVertexBufferCreate = nullptr;
+BufferCreate originalIndexBufferCreate = nullptr;
+BufferDestroy originalVertexBufferDestroy = nullptr;
+BufferDestroy originalIndexBufferDestroy = nullptr;
+
+// The game's own buffer creation (nDraw::VertexBuffer/IndexBuffer::create):
+// it creates the Direct3D buffer and, given data, fills it at once. Only that
+// case is deferred: a buffer created empty is filled later through a lock
+// this cannot see, and stays a default-pool buffer as before.
+void CreateBuffer(BufferCreate original, bool index, void* object, unsigned size, void* data)
+{
+    const int usage = Field<int>(object, 0x18); // 1 dynamic, 3 staging: not managed
+    if (!exDevice || !stageBuffers || !data || usage == 1 || usage == 3) {
+        original(object, size, data);
+        return;
+    }
+    const double start = NowMs();
+    stagingBufferCreate = true;
+    original(object, size, data);
+    const bool made = !stagingBufferCreate;
+    stagingBufferCreate = false;
+    const double now = NowMs();
+    lastCreateMs.store(now, std::memory_order_relaxed);
+    auto* cpu = Field<IUnknown*>(object, kBufferSlot);
+    if (!made || !cpu) return;
+    cpu->AddRef();
+    IUnknown* replaced = nullptr;
+    AcquireSRWLockExclusive(&bufferLock);
+    PendingBuffer& entry = pendingBuffers[object];
+    replaced = entry.cpu;
+    entry.cpu = cpu;
+    entry.size = size;
+    entry.index = index;
+    pendingBufferCount.store(static_cast<unsigned>(pendingBuffers.size()));
+    ReleaseSRWLockExclusive(&bufferLock);
+    if (replaced) replaced->Release();
+    AddStat(bufferStats.staged, bufferStats.stagedUs, now - start);
+}
+void __fastcall CreateVertexBuffer(void* object, unsigned size, void* data)
+{
+    CreateBuffer(originalVertexBufferCreate, false, object, size, data);
+}
+void __fastcall CreateIndexBuffer(void* object, unsigned size, void* data)
+{
+    CreateBuffer(originalIndexBufferCreate, true, object, size, data);
+}
+
+// A buffer object about to be destroyed is taken off the list first. The list
+// is locked for the whole of a send, so the object cannot go away under one.
+void ForgetBuffer(void* object)
+{
+    if (!pendingBufferCount.load()) return;
+    IUnknown* cpu = nullptr;
+    AcquireSRWLockExclusive(&bufferLock);
+    const auto found = pendingBuffers.find(object);
+    if (found != pendingBuffers.end()) {
+        cpu = found->second.cpu;
+        pendingBuffers.erase(found);
+        pendingBufferCount.store(static_cast<unsigned>(pendingBuffers.size()));
+    }
+    ReleaseSRWLockExclusive(&bufferLock);
+    if (!cpu) return;
+    cpu->Release();
+    bufferStats.dropped.fetch_add(1, std::memory_order_relaxed);
+    textureStats.changed.store(true, std::memory_order_relaxed);
+}
+void* __fastcall DestroyVertexBuffer(void* object, uint64_t flags)
+{
+    ForgetBuffer(object);
+    return originalVertexBufferDestroy(object, flags);
+}
+void* __fastcall DestroyIndexBuffer(void* object, uint64_t flags)
+{
+    ForgetBuffer(object);
+    return originalIndexBufferDestroy(object, flags);
+}
+
+// Copies the game's buffer into the new GPU one, which from here on keeps the
+// copy alive: anything still holding the copy's address goes on drawing the
+// same data, and the managed pool kept such a copy too.
+template<typename Buffer>
+void FillBuffer(Buffer* cpu, Buffer* gpu, UINT size)
+{
+    void* from = nullptr;
+    void* to = nullptr;
+    Check(cpu->Lock(0, 0, &from, D3DLOCK_READONLY), "read buffer copy");
+    Check(gpu->Lock(0, 0, &to, 0), "fill GPU buffer");
+    memcpy(to, from, size);
+    Check(gpu->Unlock(), "fill GPU buffer");
+    Check(cpu->Unlock(), "read buffer copy");
+    Check(gpu->SetPrivateData(bufferCopyKey, cpu, sizeof(IUnknown*), D3DSPD_IUNKNOWN),
+        "keep buffer copy");
+}
+
+// Makes the GPU buffer for a listed one and gives it to the game's object,
+// with bufferLock held. False when the object no longer has the copy (the
+// game let go of it). Lets go of the list's reference either way.
+bool SendBuffer(void* object, const PendingBuffer& entry)
+{
+    void*& slot = Field<void*>(object, kBufferSlot);
+    const bool current = slot == static_cast<void*>(entry.cpu);
+    if (current) {
+        // The game's own choices for a static buffer: write-only, 16-bit indices.
+        if (entry.index) {
+            IDirect3DIndexBuffer9* gpu = nullptr;
+            Check(originalIndexCreate(exDevice, entry.size, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                D3DPOOL_DEFAULT, &gpu, nullptr), "create GPU index buffer");
+            FillBuffer(static_cast<IDirect3DIndexBuffer9*>(entry.cpu), gpu, entry.size);
+            slot = gpu;
+        } else {
+            IDirect3DVertexBuffer9* gpu = nullptr;
+            Check(originalVertexCreate(exDevice, entry.size, D3DUSAGE_WRITEONLY, 0,
+                D3DPOOL_DEFAULT, &gpu, nullptr), "create GPU vertex buffer");
+            FillBuffer(static_cast<IDirect3DVertexBuffer9*>(entry.cpu), gpu, entry.size);
+            slot = gpu;
+        }
+        entry.cpu->Release(); // the object's reference; it owns the GPU buffer now
+    }
+    entry.cpu->Release();
+    return current;
+}
+
+// Once a frame, before it is presented, with a budget of its own: waiting
+// buffers get their GPU buffer on this thread, the one that draws.
+void WarmBuffers()
+{
+    unsigned left = pendingBufferCount.load(std::memory_order_relaxed);
+    if (!left) return;
+    const double start = NowMs();
+    const double budget = WarmBudget(start);
+    double now = start;
+    for (; left && now - start < budget; --left) {
+        AcquireSRWLockExclusive(&bufferLock);
+        const auto found = pendingBuffers.begin();
+        const bool any = found != pendingBuffers.end();
+        bool sent = false;
+        if (any) {
+            sent = SendBuffer(found->first, found->second);
+            pendingBuffers.erase(found);
+            pendingBufferCount.store(static_cast<unsigned>(pendingBuffers.size()));
+        }
+        ReleaseSRWLockExclusive(&bufferLock);
+        if (!any) break;
+        const double after = NowMs();
+        if (sent) {
+            AddStat(bufferStats.sent, bufferStats.sentUs, after - now);
+            const int64_t us = static_cast<int64_t>((after - now) * 1000.0);
+            if (us > bufferStats.sentWorstUs.load(std::memory_order_relaxed))
+                bufferStats.sentWorstUs.store(us, std::memory_order_relaxed);
+        } else {
+            bufferStats.dropped.fetch_add(1, std::memory_order_relaxed);
+            textureStats.changed.store(true, std::memory_order_relaxed);
+        }
+        now = after;
+    }
+}
+
 HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const RECT* dst,
     HWND window, const RGNDATA* dirty)
 {
@@ -609,6 +839,7 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
     }
     if (device == exDevice) {
         // Before the pacing hold, so the hold absorbs the time this takes.
+        WarmBuffers();
         WarmTextures();
         LogTextureStats();
     }
@@ -689,8 +920,14 @@ bool D3D9Ex_Initialize()
         {(void*)_addr(0x140782060), (void*)CreateTexture, (void**)&originalTextureCreate},
         {(void*)_addr(0x1407832C0), (void*)MapTexture, (void**)&originalTextureMap},
         {(void*)_addr(0x140783A40), (void*)UnmapTexture, (void**)&originalTextureUnmap},
+        {(void*)_addr(0x14079F900), (void*)CreateVertexBuffer, (void**)&originalVertexBufferCreate},
+        {(void*)_addr(0x14079FDA0), (void*)CreateIndexBuffer, (void**)&originalIndexBufferCreate},
+        {(void*)_addr(0x14079F890), (void*)DestroyVertexBuffer, (void**)&originalVertexBufferDestroy},
+        {(void*)_addr(0x14079FD30), (void*)DestroyIndexBuffer, (void**)&originalIndexBufferDestroy},
     };
+    stageBuffers = !path[0] || GetPrivateProfileIntA("Graphics", "D3D9ExStageBuffers", 1, path) != 0;
     HookLog("D3D9Ex: backend enabled; set [Graphics] ExperimentalD3D9Ex=0 to revert\n");
+    if (!stageBuffers) HookLog("D3D9Ex: static buffers are created on the GPU directly\n");
     return Install(hooks, sizeof(hooks) / sizeof(hooks[0]));
 }
 

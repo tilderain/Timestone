@@ -41,7 +41,8 @@ constexpr int D3D_OK = 0, D3DERR_DEVICELOST = -4, D3DERR_DEVICENOTRESET = -5;
 constexpr int S_PRESENT_OCCLUDED = 1, S_PRESENT_MODE_CHANGED = 2;
 using HWND = void*;
 HWND deviceWindow = nullptr;
-constexpr int IID_IUnknown = 1, stagingKey = 2;
+constexpr int IID_IUnknown = 1, stagingKey = 2, bufferCopyKey = 3;
+bool stageBuffers = true;
 constexpr int D3DRTYPE_TEXTURE = 3, D3DRTYPE_CUBETEXTURE = 4, D3DRTYPE_VOLUMETEXTURE = 5;
 constexpr int D3DPOOL_DEFAULT = 0, D3DPOOL_SYSTEMMEM = 2, D3DSPD_IUNKNOWN = 1;
 constexpr int TRUE = 1, D3DSWAPEFFECT_FLIPEX = 5, D3DMULTISAMPLE_NONE = 0;
@@ -193,16 +194,55 @@ using IDirect3DDevice9 = Device;
 using D3DFORMAT = unsigned;
 using D3DPOOL = unsigned;
 using HANDLE = void*;
-using IDirect3DVertexBuffer9 = void;
-using IDirect3DIndexBuffer9 = void;
+constexpr unsigned D3DUSAGE_WRITEONLY = 8, D3DFMT_INDEX16 = 101, D3DLOCK_READONLY = 0x10;
+int aliveBuffers = 0;
+struct FakeBuffer : IUnknown {
+    unsigned refs = 1, pool, usage, size, format, locks = 0;
+    IUnknown* copy = nullptr;
+    std::vector<char> data;
+    FakeBuffer(unsigned p, unsigned u, unsigned s, unsigned f)
+        : pool(p), usage(u), size(s), format(f), data(s) { ++aliveBuffers; }
+    virtual ~FakeBuffer() = default;
+    HRESULT QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
+    ULONG AddRef() override { return ++refs; }
+    ULONG Release() override {
+        const unsigned left = --refs;
+        if (!left) { assert(!locks); if (copy) copy->Release(); --aliveBuffers; delete this; }
+        return left;
+    }
+    HRESULT Lock(unsigned offset, unsigned length, void** out, unsigned flags) {
+        assert(!offset && !length);
+        // Only a copy in memory that is not write-only is ever read back.
+        if (flags == D3DLOCK_READONLY) assert(pool == D3DPOOL_SYSTEMMEM && !(usage & D3DUSAGE_WRITEONLY));
+        else assert(!flags);
+        ++locks; *out = data.data(); return S_OK;
+    }
+    HRESULT Unlock() { assert(locks); --locks; return S_OK; }
+    HRESULT SetPrivateData(int key, void* pointer, unsigned size_, unsigned flags) {
+        assert(key == bufferCopyKey && size_ == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN && !copy);
+        copy = static_cast<IUnknown*>(pointer); copy->AddRef(); return S_OK;
+    }
+};
+using IDirect3DVertexBuffer9 = FakeBuffer;
+using IDirect3DIndexBuffer9 = FakeBuffer;
 struct RGNDATA {};
 constexpr unsigned D3DPOOL_MANAGED = 1;
-unsigned seenPool = 99;
-HRESULT BufferCreate(Device*, UINT, DWORD, unsigned, D3DPOOL pool, void**, HANDLE*) {
-    seenPool = pool; return S_OK;
+unsigned seenPool = 99, seenUsage = 99;
+HRESULT BufferCreate(Device*, UINT size, DWORD usage, unsigned format, D3DPOOL pool, FakeBuffer** out, HANDLE*) {
+    seenPool = pool; seenUsage = usage;
+    if (out) *out = new FakeBuffer(pool, usage, size, format);
+    return S_OK;
 }
 auto originalVertexCreate = BufferCreate;
 auto originalIndexCreate = BufferCreate;
+void NativeBufferCreate(void*, unsigned, void*);
+void* NativeBufferDestroy(void* object, uint64_t);
+auto originalVertexBufferCreate = NativeBufferCreate;
+auto originalIndexBufferCreate = NativeBufferCreate;
+auto originalVertexBufferDestroy = NativeBufferDestroy;
+auto originalIndexBufferDestroy = NativeBufferDestroy;
+using BufferCreateFn = void(*)(void*, unsigned, void*);
+#define BufferCreate BufferCreateFn
 HRESULT presentResult = S_OK;
 unsigned nativePresents = 0;
 HRESULT NativePresent(Device*, const RECT*, const RECT*, HWND, const RGNDATA*) { ++nativePresents; return presentResult; }
@@ -245,7 +285,105 @@ void NativeCreate(void* object, void* shared, uint64_t flags, void* data) {
     if (data) texture->data.fill(*static_cast<int*>(data));
     Field<FakeTexture*>(object, 0x48) = texture;
 }
+// The game's own create: MANAGED and write-only unless dynamic (1) or staging
+// (3), filled at once when given data.
+bool nativeIndex = false;
+void NativeBufferCreate(void* object, unsigned size, void* data) {
+    const int usage = Field<int>(object, 0x18);
+    FakeBuffer* buffer = nullptr;
+    const unsigned pool = usage == 1 ? D3DPOOL_DEFAULT : usage == 3 ? D3DPOOL_SYSTEMMEM : D3DPOOL_MANAGED;
+    const unsigned flags = usage == 1 ? 0x200 : usage == 3 ? 0 : D3DUSAGE_WRITEONLY;
+    if (nativeIndex) CreateIndex(&device, size, flags, D3DFMT_INDEX16, pool, &buffer, nullptr);
+    else CreateVertex(&device, size, flags, 0, pool, &buffer, nullptr);
+    Field<FakeBuffer*>(object, 0x30) = buffer;
+    if (data) {
+        void* to = nullptr;
+        buffer->Lock(0, 0, &to, 0);
+        memcpy(to, data, size);
+        buffer->Unlock();
+    }
+}
+int destroyed = 0;
+void* NativeBufferDestroy(void* object, uint64_t) {
+    if (auto*& buffer = Field<FakeBuffer*>(object, 0x30)) { buffer->Release(); buffer = nullptr; }
+    ++destroyed;
+    return object;
+}
+void BufferCases() {
+    const char bytes[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    for (bool index : {false, true}) {
+        nativeIndex = index;
+        const auto create = index ? CreateIndexBuffer : CreateVertexBuffer;
+        const auto destroy = index ? DestroyIndexBuffer : DestroyVertexBuffer;
+        std::array<uint64_t, 8> object = {};
+        // Filled at once: made in memory, readable, and listed.
+        create(object.data(), 8, (void*)bytes);
+        auto* cpu = Field<FakeBuffer*>(object.data(), 0x30);
+        assert(seenPool == D3DPOOL_SYSTEMMEM && seenUsage == 0 && pendingBufferCount == 1);
+        assert(cpu->refs == 2 && aliveBuffers == 1 && !stagingBufferCreate);
+        // The next frame makes the GPU buffer and hands it to the object.
+        WarmBuffers();
+        auto* gpu = Field<FakeBuffer*>(object.data(), 0x30);
+        assert(gpu != cpu && pendingBufferCount == 0 && aliveBuffers == 2);
+        assert(gpu->pool == D3DPOOL_DEFAULT && gpu->usage == D3DUSAGE_WRITEONLY && gpu->size == 8);
+        assert(gpu->format == (index ? D3DFMT_INDEX16 : 0u));
+        assert(!memcmp(gpu->data.data(), bytes, 8) && gpu->refs == 1);
+        assert(gpu->copy == cpu && cpu->refs == 1 && !cpu->locks && !gpu->locks);
+        assert(destroy(object.data(), 1) == object.data() && aliveBuffers == 0);
+
+        // Destroyed while still listed: taken off the list, nothing made.
+        create(object.data(), 8, (void*)bytes);
+        assert(pendingBufferCount == 1 && aliveBuffers == 1);
+        destroy(object.data(), 1);
+        assert(pendingBufferCount == 0 && aliveBuffers == 0);
+        WarmBuffers();
+        assert(aliveBuffers == 0);
+
+        // The game let go of the copy without destroying the object.
+        create(object.data(), 8, (void*)bytes);
+        Field<FakeBuffer*>(object.data(), 0x30)->Release();
+        Field<FakeBuffer*>(object.data(), 0x30) = nullptr;
+        WarmBuffers();
+        assert(pendingBufferCount == 0 && aliveBuffers == 0 && !Field<FakeBuffer*>(object.data(), 0x30));
+
+        // Created empty, dynamic, staging, or with the setting off: as before.
+        create(object.data(), 8, nullptr);
+        assert(seenPool == D3DPOOL_DEFAULT && seenUsage == D3DUSAGE_WRITEONLY && pendingBufferCount == 0);
+        destroy(object.data(), 1);
+        Field<int>(object.data(), 0x18) = 1;
+        create(object.data(), 8, (void*)bytes);
+        assert(seenPool == D3DPOOL_DEFAULT && seenUsage == 0x200 && pendingBufferCount == 0);
+        destroy(object.data(), 1);
+        Field<int>(object.data(), 0x18) = 3;
+        create(object.data(), 8, (void*)bytes);
+        assert(seenPool == D3DPOOL_SYSTEMMEM && pendingBufferCount == 0);
+        destroy(object.data(), 1);
+        Field<int>(object.data(), 0x18) = 0;
+        stageBuffers = false;
+        create(object.data(), 8, (void*)bytes);
+        assert(seenPool == D3DPOOL_DEFAULT && seenUsage == D3DUSAGE_WRITEONLY && pendingBufferCount == 0);
+        destroy(object.data(), 1);
+        stageBuffers = true;
+        assert(aliveBuffers == 0);
+
+        // The frame's budget: 1 ms in a battle, each send taking 2.
+        std::array<std::array<uint64_t, 8>, 3> objects = {};
+        for (auto& each : objects) create(each.data(), 8, (void*)bytes);
+        battle = true;
+        clockStep = 2.0;
+        WarmBuffers();
+        assert(pendingBufferCount == 2);
+        battle = false;
+        WarmBuffers();
+        assert(pendingBufferCount == 0 && aliveBuffers == 6);
+        clockStep = 0;
+        for (auto& each : objects) destroy(each.data(), 1);
+        assert(aliveBuffers == 0 && pendingBuffers.empty());
+    }
+    nativeIndex = false;
+}
 int main() {
+    BufferCases();
     D3DPRESENT_PARAMETERS params;
     D3D9Ex_Prepare(params);
     assert(params.SwapEffect == 1 && params.MultiSampleType == 4);
@@ -529,7 +667,9 @@ class D3D9ExTests(unittest.TestCase):
         for name in ("CreateTexture", "MapTexture", "UnmapTexture", "D3D9Ex_Prepare",
                      "D3D9Ex_IsDevice", "D3D9Ex_Reset", "D3D9Ex_Check"):
             unit += function(source, name)
-        for name in ("CreateVertex", "CreateIndex", "SetTexture", "PresentFrame"):
+        for name in ("SetTexture", "BufferPool", "CreateVertex", "CreateIndex", "CreateBuffer",
+                     "CreateVertexBuffer", "CreateIndexBuffer", "ForgetBuffer", "DestroyVertexBuffer",
+                     "DestroyIndexBuffer", "FillBuffer", "SendBuffer", "WarmBuffers", "PresentFrame"):
             unit += function(source, name)
         unit += CASES
         with tempfile.TemporaryDirectory(prefix="d3d9ex-", dir="/tmp/opencode") as tmp:

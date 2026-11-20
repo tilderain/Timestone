@@ -164,11 +164,36 @@ The CPU copy is kept for the life of the texture, as the managed pool itself
 does: a default-pool texture cannot be read back, and native callers map
 existing textures (`sScene__initSysTexture`, `rDeformWeightMap__load/save`).
 
-Managed vertex/index creation is translated to DEFAULT on the tracked Ex device
-only, retaining usage/format flags. Unlike ordinary default-pool textures,
-default-pool vertex/index buffers support locking. Native managed usage metadata
-is not rewritten, and ResetEx preserves these static resources. Dynamic,
-render-target, depth/stencil and explicit staging resource paths stay native.
+Managed vertex/index creation is translated on the tracked Ex device only.
+Native managed usage metadata is not rewritten, and ResetEx preserves these
+static resources. Dynamic, render-target, depth/stencil and explicit staging
+resource paths stay native.
+
+A static buffer the game fills as it creates it (`nDraw::VertexBuffer::create`
+/ `IndexBuffer::create` given data, which is how archives load their models) is
+made in SYSTEMMEM, not write-only, and listed in `pendingBuffers` (2026-11-20).
+Creating these in the default pool put a GPU allocation and a driver lock per
+buffer on the loader's decoder threads, inside the archive decode: on a Windows
+NVIDIA machine `stg\102\0000` decoded in 1.6 s on every load against 0.13-0.5 s
+under DXVK, and a match load took 3.3 s against about 1 s, with textures
+costing about 5% of it. That buffers are the cause was inferred, not measured.
+`WarmBuffers` runs once a frame before Present with the same budget rule as
+`WarmTextures` (its own 6 ms while loading, 1 ms otherwise): it creates the
+default-pool write-only buffer, copies the data in, and stores it in the game's
+object (+0x30) in place of the copy. Until then the game draws from the copy,
+which Direct3D allows on a hardware-vertex-processing device and is only slow.
+The GPU buffer keeps the copy alive through private data, as the managed pool
+kept one. The buffer destructors (`0x14079F890`, `0x14079FD30`) take an object
+off the list, and the list stays locked for the whole of a send, so an object
+cannot be destroyed under one.
+
+Not deferred: a buffer created empty (it is filled later through a lock this
+does not see) becomes a default-pool buffer at creation, as before. Not
+handled: the game locking a listed buffer again while it is being sent (the
+copy could be read half-written, and a later edit to the copy would be lost);
+no such lock of a static buffer is known. `[Graphics] D3D9ExStageBuffers=0`
+turns the deferral off. The `D3D9Ex: buffers ...` log line gives counts and
+times for both routes. Not yet run in the game on any driver.
 
 This retains CPU texture copies and adds explicit uploads; it can increase
 upload cost and does not guarantee improved throughput. It does not emulate
