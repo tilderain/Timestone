@@ -166,6 +166,8 @@ static constexpr int32_t GAUGE_LAYOUT_CLIP_FOR[6] = {5, 6, 1, 2, 3, 4};
 static void SyncGaugeLayout(uint64_t gauge, const int32_t (&order)[3])
 {
     const uint64_t layout = *(uint64_t*)(gauge + UBTGAUGELIFE_LAYOUT_OFFSET);
+    // A gauge being torn down has already let its layout go.
+    if (!layout) return;
     const int32_t current = *(int32_t*)(layout + SCHEDULER_SEQUENCE_OFFSET);
     if ((uint32_t)current < GAUGE_LAYOUT_CLIPS &&
         std::memcmp(GAUGE_LAYOUT_ORDER[current], order, sizeof(order)) == 0)
@@ -234,6 +236,13 @@ void Rollback_SyncActiveCharacterUi()
         for (int safety = 512; unit && gaugesFound < 2 && safety-- > 0;
              unit = *(uint64_t*)(unit + 0x18)) {
             if (*(uint64_t*)unit != gaugeVtable) continue;
+            // A gauge that killed itself stays in its lane until a drawn tick
+            // destroys it (the headless cleanup leaves the UI lanes alone),
+            // with its layout scheduler already released: crash 2026-11-19
+            // after a K.O., a rollback as the battle UI was being torn down
+            // for the victory screen, null layout read at +0x7C. Only a live
+            // gauge (unit state 1 or 2) has anything to keep in step.
+            if (((*(uint32_t*)(unit + 0x10) & 7u) - 1u) >= 2u) continue;
             ++gaugesFound;
             uint32_t team = *(uint32_t*)(unit + UBTGAUGELIFE_TEAM_OFFSET);
             // The arcade boss gauge never consumes swap requests.
