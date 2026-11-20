@@ -36,6 +36,7 @@ struct UiPrefs {
     int slot;        // which of the kTeamSlots it is: a preset or a reserve unit
     TeamPreset presets[kTeamPresets];
     int icon;        // lobby icon: kIconSteam or a character id (lobby_canvas.h)
+    int stage;       // preferred stage: a game stage id or kStageAny
     RoomSettings create;
     bool muteMusic;  // in someone else's lobby: do not play its music
 };
@@ -123,6 +124,10 @@ private:
     // Texture for a player's lobby icon: their Steam picture or a portrait.
     Tex IconTex(uint64_t memberId, int icon) const;
     void SetIcon(int icon);
+    void SetStage(int stage);
+    void UpdateStagePicker(const Input& input);
+    void DrawStagePicker(Canvas& canvas) const;
+    const char* StageName(int stage) const;
     void UpdateIconPicker(const Input& input);
     void DrawIconPicker(Canvas& canvas) const;
     void UpdateText(const Input& input);
@@ -200,6 +205,8 @@ private:
     bool iconPickerOpen_ = false; // icon grid on the team screen's ICON row
     int iconCursor_ = 0;          // icon value highlighted in it (0 = Steam picture)
     int iconScroll_ = 0;          // first grid row on screen
+    bool stagePickerOpen_ = false; // stage icons on the team screen's STAGE row
+    int stagePickerCursor_ = 0;    // 0 = any stage, then the roster's stages in order
     bool presetListOpen_ = false; // every team slot, on the team screen's PRESET row
     int presetListCursor_ = 0;    // slot highlighted in it
 

@@ -121,6 +121,7 @@ constexpr int kRoomMenuCount = 5;
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
 constexpr int kCharGridColumns = 10; // faces across in the team screen's character grid
 constexpr int kColorGridColumns = 8; // faces across in the team screen's color grid
+constexpr int kStageGridColumns = 5; // icons across in the team screen's stage grid
 // The art in every select-screen face texture (128x128) is the same 120x84
 // window; the rest is transparent.
 constexpr Uv kFaceUv{4.0f / 128.0f, 42.0f / 128.0f, 124.0f / 128.0f, 126.0f / 128.0f};
@@ -160,8 +161,9 @@ constexpr int kTeamRowFirstSlot = 1;
 constexpr int kTeamRowIcon = 10; // the player's lobby icon
 constexpr int kIconGridColumns = 14;
 constexpr int kIconGridRows = 6;
-constexpr int kTeamRowDone = 11;
-constexpr int kTeamRows = 12;
+constexpr int kTeamRowStage = 11; // the stage the player would like to fight on
+constexpr int kTeamRowDone = 12;
+constexpr int kTeamRows = 13;
 
 // Pre-match prompts: how long each waits for an answer (frames at 60 fps).
 // Picking a delay is the ready-up: with no pick, the seat is given up.
@@ -383,6 +385,7 @@ void LobbyUi::GoTo(Screen screen)
     colorPickerOpen_ = false;
     iconPickerOpen_ = false;
     presetListOpen_ = false;
+    stagePickerOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
     chatFocus_ = false;
@@ -470,6 +473,7 @@ void LobbyUi::ReturnToRoom()
     colorPickerOpen_ = false;
     iconPickerOpen_ = false;
     presetListOpen_ = false;
+    stagePickerOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
     chatFocus_ = false;
@@ -507,6 +511,7 @@ void LobbyUi::SyncWithService()
         // Create/Join completed: publish our team and show the room.
         service_.SetTeam(prefs_.team);
         service_.SetIcon(prefs_.icon);
+        service_.SetStage(prefs_.stage);
         seatSlot_ = 0;
         seatSide_ = 0;
         leftByChoice_ = false;
@@ -1659,7 +1664,7 @@ void LobbyUi::StepTeamField(int delta)
         }
         StoreTeam();
     } else {
-        return; // the icon row opens its grid on confirm
+        return; // the icon and stage rows open their grids on confirm
     }
     Play(SFX_MOVE);
     CommitTeam();
@@ -1703,6 +1708,49 @@ void LobbyUi::UpdateIconPicker(const Input& input)
     iconPickerOpen_ = false;
     Play(SFX_CONFIRM);
     SetIcon(iconCursor_);
+}
+
+void LobbyUi::SetStage(int stage)
+{
+    if (stage == prefs_.stage) return;
+    prefs_.stage = stage;
+    prefsDirty_ = true;
+    if (service_.Room().inRoom) service_.SetStage(stage);
+}
+
+// The stage grid: ANY STAGE first, then every stage as the stage select
+// screen shows it. Directions move a cell (left and right wrap around the
+// ends), confirm makes it the preferred stage.
+void LobbyUi::UpdateStagePicker(const Input& input)
+{
+    const int count = (roster_.stageCount && roster_.stageId ? roster_.stageCount() : 0) + 1;
+    if (input.cancel || input.menu) {
+        stagePickerOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
+    }
+    if (stagePickerCursor_ >= count) stagePickerCursor_ = count - 1;
+    int next = stagePickerCursor_;
+    if (input.left) next -= 1;
+    if (input.right) next += 1;
+    if (input.up) next -= kStageGridColumns;
+    if (input.down) next += kStageGridColumns;
+    if (next < 0) next = input.left ? count - 1 : stagePickerCursor_;
+    if (next >= count) next = input.right ? 0 : stagePickerCursor_;
+    if (next != stagePickerCursor_) {
+        stagePickerCursor_ = next;
+        Play(SFX_MOVE);
+    }
+    if (!input.confirm) return;
+    stagePickerOpen_ = false;
+    Play(SFX_CONFIRM);
+    SetStage(stagePickerCursor_ == 0 ? kStageAny : roster_.stageId(stagePickerCursor_ - 1));
+}
+
+const char* LobbyUi::StageName(int stage) const
+{
+    const char* name = stage != kStageAny && roster_.stageName ? roster_.stageName(stage) : nullptr;
+    return name && name[0] ? name : "ANY STAGE";
 }
 
 void LobbyUi::SetIcon(int icon)
@@ -1844,6 +1892,13 @@ void LobbyUi::UpdateTeam(const Input& input)
         }
         presetListOpen_ = false;
     }
+    if (stagePickerOpen_) {
+        if (!timedOut) {
+            UpdateStagePicker(input);
+            return;
+        }
+        stagePickerOpen_ = false;
+    }
     MoveCursor(teamCursor_, kTeamRows, input);
     const int delta = (input.right ? 1 : 0) - (input.left ? 1 : 0);
     if (delta != 0) StepTeamField(delta);
@@ -1899,6 +1954,15 @@ void LobbyUi::UpdateTeam(const Input& input)
             colorPickerOpen_ = true;
             Play(SFX_CONFIRM);
         }
+        return;
+    }
+    if (teamCursor_ == kTeamRowStage) {
+        stagePickerCursor_ = 0;
+        const int count = roster_.stageCount && roster_.stageId ? roster_.stageCount() : 0;
+        for (int i = 0; i < count; ++i)
+            if (roster_.stageId(i) == prefs_.stage) stagePickerCursor_ = i + 1;
+        stagePickerOpen_ = true;
+        Play(SFX_CONFIRM);
         return;
     }
     if (teamCursor_ == kTeamRowIcon) {
@@ -2019,7 +2083,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_CONFIRM, "Select");
         add(BTN_DPAD, "Move");
         add(BTN_CANCEL, "Close");
-    } else if (screen_ == Screen::Team && (charPickerOpen_ || colorPickerOpen_)) {
+    } else if (screen_ == Screen::Team && (charPickerOpen_ || colorPickerOpen_ || stagePickerOpen_)) {
         add(BTN_CONFIRM, "Select");
         add(BTN_DPAD, "Move");
         add(BTN_CANCEL, "Close");
@@ -2032,7 +2096,9 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         if (colorRow) add(BTN_CONFIRM, "Colors");
         if (teamCursor_ == kTeamRowIcon) add(BTN_CONFIRM, "Icons");
         if (teamCursor_ == kTeamRowPreset) add(BTN_CONFIRM, "Teams");
+        if (teamCursor_ == kTeamRowStage) add(BTN_CONFIRM, "Stages");
         if (!characterRow && !colorRow && teamCursor_ != kTeamRowIcon &&
+            teamCursor_ != kTeamRowStage &&
             teamCursor_ != kTeamRowPreset && teamCursor_ != kTeamRowDone)
             add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Done");
@@ -2958,10 +3024,21 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
         {
             // Both picks are in: the delay the match will run at.
             const int mine = delayValue(local->delayPick), theirs = delayValue(other->delayPick);
-            if (mine >= 0 && theirs >= 0) {
-                snprintf(line, sizeof(line), "Input delay: %d", mine > theirs ? mine : theirs);
-                p.Text(line, cx, selectY + 74.0f, 0.62f, A_MC, kCyan);
-            }
+            // And the stage: one of the two players' preferred stages.
+            char stage[96];
+            if (local->stage == other->stage || other->stage == kStageAny)
+                snprintf(stage, sizeof(stage), "%s", StageName(local->stage));
+            else if (local->stage == kStageAny)
+                snprintf(stage, sizeof(stage), "%s", StageName(other->stage));
+            else
+                snprintf(stage, sizeof(stage), "%s or %s", StageName(local->stage),
+                         StageName(other->stage));
+            if (mine >= 0 && theirs >= 0)
+                snprintf(line, sizeof(line), "Input delay: %d     Stage: %s",
+                         mine > theirs ? mine : theirs, stage);
+            else
+                snprintf(line, sizeof(line), "Stage: %s", stage);
+            p.TextShrink(line, cx, selectY + 74.0f, 0.62f, w - 80.0f, A_MC, kCyan);
         }
         limit = kEntryTimeout;
         break;
@@ -2996,7 +3073,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
 
     char value[96];
     for (int row = 0; row < kTeamRows; ++row) {
-        const float y = panelY + 40.0f + row * 39.0f;
+        const float y = panelY + 40.0f + row * 36.5f;
         const bool selected = row == teamCursor_;
         if (selected) {
             const float pulse = SelectionPulse(frame_);
@@ -3019,6 +3096,10 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
                 snprintf(value, sizeof(value), "STEAM PICTURE");
             else
                 snprintf(value, sizeof(value), "ICON %d", prefs_.icon);
+            valueColor = kYellow;
+        } else if (row == kTeamRowStage) {
+            label = "PREFERRED STAGE";
+            snprintf(value, sizeof(value), "%s", StageName(prefs_.stage));
             valueColor = kYellow;
         } else if (row == kTeamRowDone) {
             p.Text(teamForMatch_ ? "START" : "DONE", panelX + panelW * 0.5f, y, 0.4f, A_MC, kText,
@@ -3045,7 +3126,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
                 valueColor = kDim;
             }
         }
-        const bool header = row == kTeamRowPreset || row == kTeamRowIcon ||
+        const bool header = row == kTeamRowPreset || row == kTeamRowIcon || row == kTeamRowStage ||
                             (row >= kTeamRowFirstSlot && row < kTeamRowIcon &&
                              (row - kTeamRowFirstSlot) % 3 == 0);
         p.Text(label, labelX, y, header ? 0.8f : 0.68f, A_ML,
@@ -3066,7 +3147,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         }
         // Teams, characters, colors and the icon are picked from a list or
         // grid, not stepped.
-        const bool gridRow = row == kTeamRowIcon || row == kTeamRowPreset ||
+        const bool gridRow = row == kTeamRowIcon || row == kTeamRowPreset || row == kTeamRowStage ||
                              (row >= kTeamRowFirstSlot && row < kTeamRowIcon &&
                               (row - kTeamRowFirstSlot) % 3 != 1);
         if (selected && !gridRow) {
@@ -3098,6 +3179,10 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
                               ? "Choose the team to use and edit."
                               : "A free slot starts as a copy of your team.");
     }
+    if (stagePickerOpen_) {
+        DrawStagePicker(canvas);
+        return matchClock("Choose the stage you would like to fight on.");
+    }
     if (charPickerOpen_) {
         DrawCharPicker(canvas);
         return matchClock("Choose a character.");
@@ -3117,6 +3202,8 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         help = "Choose the team to use, or add, rename and delete teams.";
     else if (teamCursor_ == kTeamRowIcon)
         help = "Your Steam profile picture, or one of the game's icons.";
+    else if (teamCursor_ == kTeamRowStage)
+        help = "A match is fought on your stage or your opponent's, picked at random.";
     return matchClock(help);
 }
 
@@ -3173,6 +3260,48 @@ void LobbyUi::DrawPresetList(Canvas& canvas) const
             p.Sprite(CharacterFace(team.chars[i], team.colors[i]), x + 600.0f + i * 76.0f,
                      rowY - face * kFaceAspect * 0.5f, face, face * kFaceAspect, kFaceUv, A_TC);
     }
+}
+
+// The stage grid, centred on the screen: the stage select screen's icons,
+// its RANDOM icon standing for no preference.
+void LobbyUi::DrawStagePicker(Canvas& canvas) const
+{
+    const int stages = roster_.stageCount && roster_.stageId ? roster_.stageCount() : 0;
+    const int count = stages + 1;
+    const Painter p(canvas, 1.0f, 0.0f);
+    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.55f});
+
+    const int rows = (count + kStageGridColumns - 1) / kStageGridColumns;
+    const float cell = 150.0f, cellH = 96.0f, icon = 134.0f;
+    const float w = kStageGridColumns * cell + 72.0f;
+    const float h = rows * cellH + 128.0f;
+    const float x = (kScreenW - w) * 0.5f, y = (kScreenH - h) * 0.5f - 20.0f;
+    // The panel texture is translucent; the team rows under it must not show.
+    p.Fill(x + 4.0f, y + 4.0f, w - 8.0f, h - 8.0f, Color{0.02f, 0.03f, 0.05f, 0.92f});
+    p.Box(TEX_PANEL_DARK, x, y, w, h);
+    p.Text("PREFERRED STAGE", x + w * 0.5f, y + 36.0f, 0.36f, A_MC, kYellow, FONT_HEADING);
+
+    const float gridX = x + 36.0f, gridY = y + 66.0f;
+    const auto stageAt = [&](int index) { return index == 0 ? kStageAny : roster_.stageId(index - 1); };
+    for (int index = 0; index < count; ++index) {
+        const float cx = gridX + (index % kStageGridColumns) * cell + cell * 0.5f;
+        const float cy = gridY + (index / kStageGridColumns) * cellH + cellH * 0.5f;
+        const int stage = stageAt(index);
+        const bool current = stage == prefs_.stage;
+        const bool selected = index == stagePickerCursor_;
+        if (selected) {
+            p.Box(TEX_ROW_SEL, cx - cell * 0.5f - 3.0f, cy - cellH * 0.5f - 3.0f, cell + 6.0f,
+                  cellH + 6.0f);
+        } else if (current) {
+            p.Box(TEX_ROW_SEL, cx - cell * 0.5f, cy - cellH * 0.5f, cell, cellH,
+                  WithAlpha(kCyan, 0.6f));
+        }
+        const float size = selected ? icon + 6.0f : icon;
+        p.Sprite(StageIcon(stage), cx, cy, size, size * kStageIconAspect, kStageIconUv, A_MC);
+    }
+    const int highlighted = stageAt(stagePickerCursor_ < count ? stagePickerCursor_ : 0);
+    p.TextFit(StageName(highlighted), x + w * 0.5f, y + h - 30.0f, 0.8f, w - 120.0f, A_MC,
+              highlighted == prefs_.stage ? kCyan : kText);
 }
 
 // The character grid, centred on the screen: every character's face, the

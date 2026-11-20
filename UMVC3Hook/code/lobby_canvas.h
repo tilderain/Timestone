@@ -100,6 +100,10 @@ enum Tex : uint16_t {
     // a small archive of its own. See CharacterBanner.
     TEX_BANNER_FIRST,
     TEX_BANNER_LAST = TEX_BANNER_FIRST + 50 * 8 - 1,
+    // The stage select screen's icons, 128x128: RANDOM first, then one per
+    // stage. See StageIcon.
+    TEX_STAGE_FIRST,
+    TEX_STAGE_LAST = TEX_STAGE_FIRST + 19,
     TEX_COUNT,
 };
 
@@ -110,6 +114,7 @@ enum Archive : uint8_t {
     ARC_LICENSE,  // ui\lic      - requested by the lobby when a portrait is first drawn
     ARC_LOOSE,    // a file of its own on disk, read when first drawn
     ARC_BANNER,   // ui\res\arc\chr\l<id>_<color>, requested when first drawn
+    ARC_STAGE,    // ui\mnchsstg, the stage select screen's, requested when first drawn
 };
 
 struct TexInfo {
@@ -144,6 +149,12 @@ constexpr float kBannerAspect = 176.0f / 448.0f; // height over width
 // Character id and color of a banner texture.
 constexpr int32_t BannerCharacter(Tex tex) { return (tex - TEX_BANNER_FIRST) / 8 + 1; }
 constexpr int BannerColor(Tex tex) { return (tex - TEX_BANNER_FIRST) % 8; }
+
+// The stage select screen's icon for a game stage id; its RANDOM icon for
+// anything else. The art is the 114x70 window kStageIconUv of the texture.
+Tex StageIcon(int stageId);
+constexpr Uv kStageIconUv{7.0f / 128.0f, 1.0f / 128.0f, 121.0f / 128.0f, 71.0f / 128.0f};
+constexpr float kStageIconAspect = 70.0f / 114.0f; // height over width
 
 // A player's lobby icon as published to the room: kIconSteam for their Steam
 // profile picture, otherwise a license icon's number + 1.

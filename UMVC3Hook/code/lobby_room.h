@@ -22,6 +22,8 @@ struct MatchPairing {
     char opponentName[kNameCapacity];
     Team localTeam;
     Team opponentTeam;
+    int localStage;        // preferred stages: a stage id or kStageAny
+    int opponentStage;
     int localDelayPick;    // see kDelayPickAuto in lobby_model.h
     int opponentDelayPick;
     bool bothReady;        // both players finished the pre-match steps
@@ -63,6 +65,7 @@ public:
     void SetReady(bool ready) override;
     void SetTeam(const Team& team) override;
     void SetIcon(int icon) override;
+    void SetStage(int stage) override;
     Tex AvatarTex(uint64_t memberId) const override;
     void InviteFriends() override;
     void CopyLobbyLink() override;
@@ -115,6 +118,7 @@ private:
         int delayHover = kDelayPickNone;
         Team team = {};
         int icon = kIconSteam;
+        int stage = kStageAny;
         int wins = 0;
         int losses = 0;
         int setWins = 0;

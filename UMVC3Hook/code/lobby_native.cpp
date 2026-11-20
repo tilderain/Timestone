@@ -282,25 +282,34 @@ void* AcquireUnit(Kind kind)
 // the lobby asks for it the first time a portrait is wanted and keeps the
 // handle for good; the textures then resolve on a later retry.
 void* g_licenseArchive = nullptr;
+// ui\mnchsstg holds the stage select screen's icons (and its large previews,
+// about 7 MB in all). It is asked for the first time a stage icon is wanted
+// and given back when the lobby's units are released.
+void* g_stageArchive = nullptr;
 
-void RequestLicenseArchive()
+// Requests a language-specific UI archive by its base name ("ui\\lic").
+void RequestArchive(void*& handle, const char* name)
 {
-    if (g_licenseArchive) return;
+    if (handle) return;
     using GetInstance = void*(__fastcall*)();
     using Compose = void*(__fastcall*)(void*, int, const char*, int);
     using CStr = const char*(__fastcall*)(void*);
     using Create = void*(__fastcall*)(void*, void*, const char*, uint32_t);
     void* resources = Native<GetInstance>(SRESOURCE_GET_INSTANCE)();
     if (!resources) return;
-    alignas(16) uint8_t name[0x120] = {};
-    void* composed = Native<Compose>(COMPOSE_ARCHIVE_NAME)(name, 3, "ui\\lic", 0);
+    alignas(16) uint8_t buffer[0x120] = {};
+    void* composed = Native<Compose>(COMPOSE_ARCHIVE_NAME)(buffer, 3, name, 0);
     const char* path = composed ? Native<CStr>(ARCHIVE_NAME_CSTR)(composed) : nullptr;
     if (!path) return;
     const Create create = *reinterpret_cast<Create*>(
         *reinterpret_cast<uint8_t**>(resources) + SRESOURCE_VT_CREATE);
-    g_licenseArchive = create(resources, reinterpret_cast<void*>(_addr(RARCHIVE_DTI)), path, 2);
-    HookLog("LobbyNative: requested %s archive for character portraits (%p)\n", path,
-            g_licenseArchive);
+    handle = create(resources, reinterpret_cast<void*>(_addr(RARCHIVE_DTI)), path, 2);
+    HookLog("LobbyNative: requested the %s archive (%p)\n", path, handle);
+}
+
+void RequestLicenseArchive()
+{
+    RequestArchive(g_licenseArchive, "ui\\lic");
 }
 
 // The wide character cards (ARC_BANNER) come in an archive per character and
@@ -335,6 +344,8 @@ bool BannerArchiveReady(Tex tex)
 void ReleaseBannerArchives()
 {
     using Release = void(__fastcall*)(void*);
+    if (g_stageArchive) Native<Release>(CRESOURCE_RELEASE_REF)(g_stageArchive);
+    g_stageArchive = nullptr;
     for (void*& archive : g_bannerArchives) {
         if (archive) Native<Release>(CRESOURCE_RELEASE_REF)(archive);
         archive = nullptr;
@@ -355,6 +366,12 @@ void* GetTexture(Tex tex)
     if (info.archive == ARC_LICENSE) RequestLicenseArchive();
     // Asked every frame while it loads: nothing is read from disk here.
     if (info.archive == ARC_BANNER && !BannerArchiveReady(tex)) return nullptr;
+    if (info.archive == ARC_STAGE) {
+        RequestArchive(g_stageArchive, "ui\\mnchsstg");
+        if (!g_stageArchive ||
+            !(Field<uint32_t>(g_stageArchive, CRESOURCE_STATE) & kResourceSettled))
+            return nullptr;
+    }
     if (info.archive == ARC_LOOSE) {
         // These are read from disk on the spot (sResource__createFromDTIPath
         // 0x140516D70, flag bit 0), so only a few are taken per frame; the
@@ -370,8 +387,9 @@ void* GetTexture(Tex tex)
     if (info.localized || info.archive == ARC_BANNER) {
         // The cards are "typeB" art: one for Japanese, "_other" for the rest.
         using Compose = void(__fastcall*)(int, const char*, char*, char);
-        Native<Compose>(COMPOSE_LOCALIZED_NAME)(info.archive == ARC_BANNER ? 2 : 3, info.path,
-                                                path, 1);
+        // The stage select's RANDOM icon is "typeC" art (mode 1).
+        const int mode = info.archive == ARC_BANNER ? 2 : info.archive == ARC_STAGE ? 1 : 3;
+        Native<Compose>(COMPOSE_LOCALIZED_NAME)(mode, info.path, path, 1);
     } else {
         snprintf(path, sizeof(path), "%s", info.path);
     }

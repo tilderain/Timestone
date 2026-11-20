@@ -19,7 +19,8 @@ tool=$root/tools/umvc3_ui/umvc3_ui.py
 
 mkdir -p "$out" "$root/build"
 if [ ! -f "$cache/nrodinpro_BM_HQ_NOMIP.fsd" ] || [ ! -f "$cache/lic_user_i188_BM_HQ_NOMIP.png" ] ||
-   [ ! -f "$cache/f_Ryu00_BM_HQ_NOMIP.png" ] || [ ! -f "$cache/p_Ryu00_BM_HQ_NOMIP.png" ]; then
+   [ ! -f "$cache/f_Ryu00_BM_HQ_NOMIP.png" ] || [ ! -f "$cache/p_Ryu00_BM_HQ_NOMIP.png" ] ||
+   [ ! -f "$cache/chs_stgm05_BM_HQ_NOMIP.png" ]; then
     python3 "$tool" extract "$game" "$cache"
 fi
 

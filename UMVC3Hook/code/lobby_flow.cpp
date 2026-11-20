@@ -396,10 +396,44 @@ bool RosterSetPreset(int index, const Team& team)
     return true;
 }
 
+int RosterStageCount() { return kStageCount; }
+int32_t RosterStageId(int index)
+{
+    return index >= 0 && index < kStageCount ? kStages[index].id : lobby::kStageAny;
+}
+const char* RosterStageName(int32_t id)
+{
+    for (int i = 0; i < kStageCount; ++i)
+        if (kStages[i].id == id) return kStages[i].name;
+    return "";
+}
+
+// The stage a match is fought on: one of the two players' preferred stages,
+// picked at random by player 1. A player with no preference goes along with
+// the other's; when neither has one it is any stage but the training room.
+int32_t PickMatchStage(int localStage, int opponentStage)
+{
+    LARGE_INTEGER counter = {};
+    QueryPerformanceCounter(&counter);
+    const uint32_t roll = static_cast<uint32_t>(counter.QuadPart ^ (counter.QuadPart >> 17) ^
+                                                GetTickCount64() * 2654435761u);
+    const bool localSet = RosterStageName(localStage)[0] != '\0';
+    const bool opponentSet = RosterStageName(opponentStage)[0] != '\0';
+    if (localSet && opponentSet) return (roll >> 8) & 1 ? localStage : opponentStage;
+    if (localSet) return localStage;
+    if (opponentSet) return opponentStage;
+    int32_t pool[32];
+    int count = 0;
+    for (int i = 0; i < kStageCount && count < 32; ++i)
+        if (kStages[i].id != 0) pool[count++] = kStages[i].id;
+    return count ? pool[(roll >> 8) % count] : g_rosterPrefs.stageId;
+}
+
 const RosterSource kRosterSource = {
     RosterCharacterCount, RosterCharacterId, RosterCharacterName, RosterAssistName,
     RosterColorCount,     RosterPresetCount, RosterPreset,
     RosterSetPreset,
+    RosterStageCount,     RosterStageId,     RosterStageName,
 };
 
 // ---------------------------------------------------------------------------
@@ -514,6 +548,10 @@ UiPrefs LoadPrefs()
     if (prefs.slot < lobby::kTeamPresets) prefs.team = prefs.presets[prefs.slot].team;
     prefs.icon = GetPrivateProfileIntA("Lobby", "Icon", lobby::kIconSteam, path);
     if (prefs.icon < lobby::kIconSteam || prefs.icon > lobby::kIconMax) prefs.icon = lobby::kIconSteam;
+    // The preferred stage starts as Bonne Wonderland.
+    constexpr int kDefaultStage = 105;
+    prefs.stage = GetPrivateProfileIntA("Lobby", "Stage", kDefaultStage, path);
+    if (!RosterStageName(prefs.stage)[0]) prefs.stage = lobby::kStageAny;
     GetPrivateProfileStringA("Lobby", "RoomName", "", prefs.create.name,
                              sizeof(prefs.create.name), path);
     prefs.create.maxMembers = GetPrivateProfileIntA("Lobby", "RoomSize", kMaxMembers, path);
@@ -543,6 +581,7 @@ void SavePrefs(const UiPrefs& prefs)
     std::vector<IniSafe_Entry> entries = {
         {"Lobby", "TeamSlot", std::to_string(prefs.slot)},
         {"Lobby", "Icon", std::to_string(prefs.icon)},
+        {"Lobby", "Stage", std::to_string(prefs.stage)},
         {"Lobby", "RoomName", prefs.create.name},
         {"Lobby", "RoomSize", std::to_string(prefs.create.maxMembers)},
         {"Lobby", "RoomSlots", std::to_string(prefs.create.slotCount)},
@@ -1343,7 +1382,9 @@ bool SendLaunchAsHost()
         launch.p2Colors[i] = g_pairing.opponentTeam.colors[i];
         launch.p2Assists[i] = g_pairing.opponentTeam.assists[i];
     }
-    launch.stageId = g_rosterPrefs.stageId;
+    launch.stageId = PickMatchStage(g_pairing.localStage, g_pairing.opponentStage);
+    HookLog("LobbyFlow: stage %d from preferences local=%d opponent=%d\n", launch.stageId,
+            g_pairing.localStage, g_pairing.opponentStage);
 
     ENetPacket* settingsPacket =
         enet_packet_create(&settings, sizeof(settings), ENET_PACKET_FLAG_RELIABLE);

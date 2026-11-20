@@ -3553,10 +3553,10 @@ static void PopulateStageCombo(HWND hCombo, int defaultStageId)
 {
     if (!hCombo) return;
 
-    const int visibleStageIds[] = {STAGE_BONNE_WONDERLAND, 0, 100};
+    // Every stage, in the game's order.
     int selectIdx = 0;
-    for (int stageId : visibleStageIds) {
-        const int stageIndex = FindStageIndex(stageId);
+    for (int stageIndex = 0; stageIndex < kStageCount; ++stageIndex) {
+        const int stageId = kStages[stageIndex].id;
         int idx = (int)SendMessageA(hCombo, CB_ADDSTRING, 0,
                                     (LPARAM)kStages[stageIndex].name);
         SendMessageA(hCombo, CB_SETITEMDATA, idx, stageId);

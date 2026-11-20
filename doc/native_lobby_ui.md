@@ -917,6 +917,23 @@ in use. On the first run the team so far becomes preset 1; the old
   main menu while the save runs and sets the byte again should the pre-menu
   end without doing so. **Unverified in game.**
 
+### Preferred stage
+
+Confirm on the team screen's PREFERRED STAGE row opens a grid of the stage select
+screen's icons: its RANDOM icon for ANY STAGE, then the launcher's stage list
+(`kStages`). The icons are `ui\chs\chs_stgt\chs_st_m\chs_stgm<NN>_BM_HQ_NOMIP`
+(`_b` after the number for stage ids 100 and up, `99` with `_typeC` for
+RANDOM): 128x128, the art in x 7..120, y 1..70. They are in `ui\mnchsstg`
+(about 7 MB with the large previews), which the backend requests the first
+time one is drawn and releases with its units. The choice is saved as `[Lobby] Stage` (a stage id, -1 for
+any; it starts as Bonne Wonderland, 105) and published as its own member value
+`tg`: 0 for no preference, else the stage id + 1; anything else reads as 0.
+When player 1 sends the launch (`SendLaunchAsHost`) the stage is one of the
+two players' preferred stages picked at random (`PickMatchStage`); a player
+with no preference goes along with the other's, and when neither has one it
+is any stage but the training room. The start prompt names the stage or the
+two candidates. **Unverified in game.**
+
 ### The cards
 
 `ui\res\res_stgm\stgm_p\p_<Name><NN>_BM_HQ_NOMIP_typeB` (Japanese) and

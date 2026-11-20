@@ -79,7 +79,7 @@ private:
         const TexInfo& info = GetTexInfo(tex);
         std::string path;
         for (const char* c = info.path; *c; ++c) path += *c == '\\' ? '/' : *c;
-        if (info.localized) path += "_typeD";
+        if (info.localized) path += info.archive == ARC_STAGE ? "_typeC" : "_typeD";
         char line[1024];
         snprintf(line, sizeof(line),
                  "{\"type\":\"%s\",\"tex\":\"%s\",\"pos\":[%.2f,%.2f],\"size\":[%.2f,%.2f],"
@@ -132,8 +132,25 @@ bool SetPreset(int index, const Team& team)
     g_reserveUnits[index] = team;
     return true;
 }
+const char* const kStageNames[] = {
+    "Training Room", "Daily Bugle", "Metro City", "Demon Village", "Kattlelox Island",
+    "Hand Hideout", "S.H.I.E.L.D. Helicarrier", "Asgard", "Tricell Labs", "Fate of the World",
+    "Danger Room", "City That Never Sleeps", "Days of Future Past", "Demon Village Redux",
+    "Bonne Wonderland", "Shadowland", "S.H.I.E.L.D. Air Show", "Asgard: Sea of Space",
+    "Chaos at Tricell",
+};
+const int32_t kStageIds[] = {0, 2, 3, 4, 5, 6, 7, 9, 10, 11, 100, 102, 103, 104, 105, 106, 107, 109, 110};
+int StageCount() { return 19; }
+int32_t StageId(int index) { return index >= 0 && index < 19 ? kStageIds[index] : kStageAny; }
+const char* StageName(int32_t id)
+{
+    for (int i = 0; i < 19; ++i)
+        if (kStageIds[i] == id) return kStageNames[i];
+    return "";
+}
 const RosterSource kRoster = {CharacterCount, CharacterId, CharacterName, AssistName,
-                              ColorCount, PresetCount, Preset, SetPreset};
+                              ColorCount, PresetCount, Preset, SetPreset,
+                              StageCount, StageId, StageName};
 
 class FakeService final : public RoomService {
 public:
@@ -201,6 +218,10 @@ public:
     void SetTeam(const Team& team) override
     {
         if (Member* local = Local()) local->team = team;
+    }
+    void SetStage(int stage) override
+    {
+        if (Member* local = Local()) local->stage = static_cast<int16_t>(stage);
     }
     void SetIcon(int icon) override
     {
@@ -280,6 +301,7 @@ public:
         Preset(static_cast<int>(id % 3), &member.team);
         // Every other member has picked a game icon instead of a Steam picture.
         member.icon = static_cast<int16_t>(id % 2 ? kIconSteam : 40 + id * 7 % 190);
+        member.stage = static_cast<int16_t>(id % 2 ? 9 : kStageAny);
         return member;
     }
     void Seat(int memberIndex, int slot, int side, bool ready, MemberStatus status)
@@ -368,6 +390,7 @@ UiPrefs DefaultPrefs()
                  preset.name);
     }
     prefs.slot = 0;
+    prefs.stage = 105;
     prefs.team = prefs.presets[0].team;
     snprintf(prefs.create.name, sizeof(prefs.create.name), "tilderain's Lobby");
     prefs.create.maxMembers = 8;
@@ -699,6 +722,13 @@ int main(int argc, char** argv)
         for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down)); // ICON row
         Settle(ui, 2);
         ok &= Capture(ui, directory, "team_icon");
+        ui.Update(Press(&Input::down));    // STAGE row
+        ui.Update(Press(&Input::confirm)); // stage grid
+        ui.Update(Press(&Input::up));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_stages");
+        ui.Update(Press(&Input::cancel));
+        ui.Update(Press(&Input::up));
         ui.Update(Press(&Input::confirm)); // icon grid
         ui.Update(Press(&Input::down));
         ui.Update(Press(&Input::down));

@@ -43,6 +43,9 @@ struct TeamPreset {
     Team team;
 };
 
+// A player's preferred stage when they have none: any stage will do.
+constexpr int kStageAny = -1;
+
 // Input delay choices offered before a match. A pick is stored as an index:
 // kDelayPickNone until chosen, kDelayPickAuto to follow the measured ping,
 // otherwise delay frames + 1.
@@ -92,6 +95,8 @@ struct Member {
     // Lobby icon: kIconSteam for the Steam profile picture, else the id of
     // the character whose portrait they picked (lobby_canvas.h).
     int16_t icon;
+    // The stage they would like to fight on: a game stage id, or kStageAny.
+    int16_t stage;
     int16_t wins;   // sets won in this room
     int16_t losses;
     int8_t setWins; // games won in the set being played right now
@@ -218,6 +223,9 @@ public:
     virtual void SetTeam(const Team& team) = 0;
     // The local player's lobby icon (see Member::icon), shown to the room.
     virtual void SetIcon(int icon) = 0;
+    // The local player's preferred stage (see Member::stage). A match is
+    // fought on one of its two players' preferred stages, picked at random.
+    virtual void SetStage(int stage) = 0;
     // Texture holding a member's Steam profile picture (0 = the local
     // player); the default player icon until one is available.
     virtual Tex AvatarTex(uint64_t memberId) const = 0;
@@ -255,6 +263,10 @@ struct RosterSource {
     bool (*preset)(int index, Team* team);
     // Puts a team in a reserve unit; the provider sees to the game's save.
     bool (*setPreset)(int index, const Team& team);
+    // The stages a player can prefer, in the game's order.
+    int (*stageCount)();
+    int32_t (*stageId)(int index);
+    const char* (*stageName)(int32_t id);
 };
 
 // One frame of menu input, already merged across pads and keyboard.

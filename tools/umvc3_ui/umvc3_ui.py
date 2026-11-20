@@ -41,9 +41,10 @@ TYPE_SDL = 0x4C0DB839
 TYPE_FSD = 0x1DB58B09
 UNIT_KINDS = {0x7942324B: 'sprite', 0x4AF926B7: 'frame', 0x518E722D: 'text'}
 # Archives the lobby draws from, relative to nativePCx64/ui.
-LOBBY_ARCHIVES = ('cmn', 'netroom', 'mnmain', 'lic')
+LOBBY_ARCHIVES = ('cmn', 'netroom', 'mnmain', 'lic', 'mnchsstg')
 # Of the license archive only the icon set is used (character portraits).
-ARCHIVE_FILTER = {'lic': 'lic_user_i'}
+# and of the stage select archive only the stage icons.
+ARCHIVE_FILTER = {'lic': 'lic_user_i', 'mnchsstg': 'chs_stgm'}
 UNDERLAY = 'meku_menu_co00_BM_NOMIP'
 DEFAULT_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'build', 'ui_cache')
 

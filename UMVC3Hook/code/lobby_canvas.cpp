@@ -71,6 +71,11 @@ const char* const kFaceNames[50] = {
     "X23", "Nova", "RRaccoon", "GhostRider", "IronFist", "DrStrange", "HawkEye",
 };
 
+// Game stage id of each stage icon slot; slot 0 is the RANDOM icon.
+const int16_t kStageIconIds[TEX_STAGE_LAST - TEX_STAGE_FIRST + 1] = {
+    -1, 0, 2, 3, 4, 5, 6, 7, 9, 10, 11, 100, 102, 103, 104, 105, 106, 107, 109, 110,
+};
+
 // Paths for the icon, avatar and face ranges, built on first use.
 TexInfo g_generated[TEX_COUNT - TEX_ICON_FIRST];
 char g_generatedPaths[TEX_COUNT - TEX_ICON_FIRST][64];
@@ -86,7 +91,17 @@ void BuildGenerated()
             snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
                      "ui\\lic\\lic_flag_i\\lic_flag_%s_BM_HQ_NOMIP",
                      kAvatarHosts[i - kLicenseIcons]);
-        else if (i >= TEX_BANNER_FIRST - TEX_ICON_FIRST) {
+        else if (i >= TEX_STAGE_FIRST - TEX_ICON_FIRST) {
+            // Slot 0 is the RANDOM icon ("99", localized as typeC); the
+            // second set of stages (ids 100 and up) is the "_b" art.
+            const int stage = i - (TEX_STAGE_FIRST - TEX_ICON_FIRST);
+            const int id = stage == 0 ? 99 : kStageIconIds[stage];
+            snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
+                     "ui\\chs\\chs_stgt\\chs_st_m\\chs_stgm%02d%s_BM_HQ_NOMIP", id % 100,
+                     stage != 0 && id >= 100 ? "_b" : "");
+            g_generated[i] = TexInfo{g_generatedPaths[i], 128, 128, ARC_STAGE, stage == 0};
+            continue;
+        } else if (i >= TEX_BANNER_FIRST - TEX_ICON_FIRST) {
             // The game adds "_typeB" or "_typeB_other" for its language.
             const int banner = i - (TEX_BANNER_FIRST - TEX_ICON_FIRST);
             snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
@@ -184,6 +199,13 @@ Tex CharacterBanner(int32_t characterId, int color)
     if (characterId < 1 || characterId > 50) return TEX_USER_ICON;
     if (color < 0 || color > 7) color = 0;
     return static_cast<Tex>(TEX_BANNER_FIRST + (characterId - 1) * 8 + color);
+}
+
+Tex StageIcon(int stageId)
+{
+    for (int i = 1; i <= TEX_STAGE_LAST - TEX_STAGE_FIRST; ++i)
+        if (kStageIconIds[i] == stageId) return static_cast<Tex>(TEX_STAGE_FIRST + i);
+    return TEX_STAGE_FIRST;
 }
 
 const TexInfo& GetTexInfo(Tex tex)

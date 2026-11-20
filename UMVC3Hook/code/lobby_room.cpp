@@ -20,6 +20,18 @@ constexpr char kMemberKey[] = "ts";      // per-member room state
 // Per-member lobby icon, on its own key so the member string keeps its
 // format: a decimal number, kIconSteam or a character id.
 constexpr char kIconKey[] = "ti";
+// Per-member preferred stage, likewise: a decimal number, 0 for no
+// preference, else the game's stage id + 1. Anything else reads as 0.
+constexpr char kStageKey[] = "tg";
+
+// A stage id as published by another player: one of the game's stages, or
+// kStageAny for anything else.
+int KnownStage(int id)
+{
+    for (int i = 0; i < kStageCount; ++i)
+        if (kStages[i].id == id) return id;
+    return kStageAny;
+}
 constexpr char kMusicKey[] = "bgm";      // lobby data: the host's music choice
 // Lobby data read by the lobby list: the host's Steam id (decimal) and icon.
 constexpr char kHostIdKey[] = "hid";
@@ -507,6 +519,16 @@ void SteamRoomService::SetTeam(const Team& team)
     PublishLocal();
 }
 
+void SteamRoomService::SetStage(int stage)
+{
+    local_.stage = KnownStage(stage);
+    if (!SteamRoom_IsActive()) return;
+    char value[8];
+    snprintf(value, sizeof(value), "%d", local_.stage + 1);
+    SteamRoom_SetLocalData(kStageKey, value);
+    RefreshRoom();
+}
+
 void SteamRoomService::SetIcon(int icon)
 {
     local_.icon = icon < kIconSteam || icon > kIconMax ? kIconSteam : icon;
@@ -772,6 +794,7 @@ void SteamRoomService::RefreshRoom()
             member.delayHover = static_cast<int8_t>(local_.delayHover);
             member.team = local_.team;
             member.icon = static_cast<int16_t>(local_.icon);
+            member.stage = static_cast<int16_t>(local_.stage);
             member.wins = static_cast<int16_t>(local_.wins);
             member.losses = static_cast<int16_t>(local_.losses);
             member.setWins = static_cast<int8_t>(local_.setWins);
@@ -802,6 +825,8 @@ void SteamRoomService::RefreshRoom()
             const char* iconText = SteamRoom_GetMemberData(id, kIconKey);
             const int icon = iconText ? atoi(iconText) : kIconSteam;
             member.icon = static_cast<int16_t>(icon < kIconSteam || icon > kIconMax ? kIconSteam : icon);
+            const char* stageText = SteamRoom_GetMemberData(id, kStageKey);
+            member.stage = static_cast<int16_t>(KnownStage(stageText ? atoi(stageText) - 1 : kStageAny));
             if (member.slot >= next.settings.slotCount) member.slot = -1;
             if (member.watchSlot >= next.settings.slotCount) member.watchSlot = -1;
             if (member.queueSlot >= next.settings.slotCount) member.queueSlot = -1;
@@ -949,6 +974,8 @@ bool SteamRoomService::FindPairing(MatchPairing& pairing) const
         snprintf(pairing.opponentName, sizeof(pairing.opponentName), "%s", member.name);
         pairing.localTeam = local_.team;
         pairing.opponentTeam = member.team;
+        pairing.localStage = local_.stage;
+        pairing.opponentStage = member.stage;
         pairing.localDelayPick = local_.delayPick;
         pairing.opponentDelayPick = member.delayPick;
         pairing.bothReady = local_.ready && member.ready;
