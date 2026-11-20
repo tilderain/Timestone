@@ -384,6 +384,20 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
     }
 }
 
+// UI lanes (doc/sunit_categories.md: 22-31 are the battle-UI hierarchy). Their
+// units hold raw pointers to one another and drop a dying one in their own
+// move, which a headless tick does not run: uBtStatusGaugeManager (lane 28)
+// prunes its uBtStatusGauge array (lane 29) by unit state at the start of its
+// move. Destroying a dying gauge here leaves the manager with a freed pointer;
+// over a long spectator catch-up the block is reused by a live unit, passes
+// the manager's state check, and it reads a null owner (0x14030EC63). Their
+// teardown therefore waits for the next drawn tick, where native
+// sUnit::moveLine runs it in lane order behind those observers.
+static bool IsHeadlessDeferredTeardownCategory(uint32_t category)
+{
+    return category >= 22;
+}
+
 // Omitted lanes still receive eligible state-3/4 unlink and destruction work.
 template <bool ProfilingEnabled>
 static void HeadlessUnitCategoryCleanup(uint64_t sMain, uint64_t sUnit,
@@ -543,7 +557,8 @@ static void HeadlessUnitPass(uint64_t sMain, uint64_t sUnit,
                 ? IsHeadlessGameplayUnitCategory(category)
                 : IsHeadlessGameplaySyncCategory(category);
             if (!enabled) {
-                if (phase == RollbackUnitProfilePhase::Move) {
+                if (phase == RollbackUnitProfilePhase::Move &&
+                    !IsHeadlessDeferredTeardownCategory(category)) {
                     if constexpr (ProfilingEnabled) {
                         const uint64_t start = Profile_NowEnabled();
                         HeadlessUnitCategoryCleanup<true>(sMain, sUnit, category);

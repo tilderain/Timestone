@@ -102,6 +102,21 @@ fully synchronized or is transitioning through a restart:
   deleting destructor. The cleanup-only pass reproduces those native lifecycle
   transitions without moving, synchronizing, initializing, or drawing active
   objects.
+- The cleanup-only pass skips the battle-UI lanes 22-31
+  (`IsHeadlessDeferredTeardownCategory`, 2026-11-19). UI units hold raw
+  pointers to one another and drop a dying one in their own move, which a
+  headless tick never runs. `uBtStatusGaugeManager` (lane 28) prunes its
+  `uBtStatusGauge` array (`+0x40`, lane 29) by unit state at the start of its
+  move, then reads each gauge's owner character (`+0xB8`) unchecked at
+  `0x14030EC63`. A gauge that killed itself on a drawn tick was destroyed by
+  the next two headless ticks, so the manager kept a freed pointer. After an
+  8-frame correction the block still reads as state 0 and is pruned; during a
+  spectator catch-up, which re-simulates hundreds of frames per drawn frame,
+  it was reused by a live unit and the manager crashed on its null owner
+  (read at `0x2D9C`, `umvc3.exe+0x21E40`). Their retired units now wait for
+  the next drawn tick, where native `sUnit::moveLine` runs the state 3/4 passes
+  in lane order behind those observers. Not reproduced or re-tested in a
+  spectated match.
 
 The scheduler rebuild hook and hand-written scheduler allocator were removed.
 Native scheduler allocation and rebuild behavior is left intact instead of
