@@ -54,7 +54,13 @@ public:
     void Stand() override;
     void JoinQueue(int slot) override;
     void LeaveQueue() override;
-    void SetWatchIntent(int slot) override { watchIntent_ = slot; }
+    void SetWatchIntent(int slot) override
+    {
+        watchIntent_ = slot;
+        // A decision made while unseated replaces what a seat set aside. One
+        // made for a seated player is only the watching that the seat ended.
+        if (local_.slot < 0) resumeWatch_ = -1;
+    }
     int WatchIntent() const override { return watchIntent_; }
     void Watch(int slot) override;
     void StopWatching() override;
@@ -157,6 +163,7 @@ private:
     int hostIconPublished_ = -1;
     uint64_t hostIconRoom_ = 0;
     int watchIntent_ = -1;      // setup whose matches the player wants to watch
+    int resumeWatch_ = -1;      // watchIntent_ as it was when a seat was taken; back on standing
     int32_t pendingMusic_ = -1; // track to publish once the created room exists
     int pendingFirstTo_ = -1;   // likewise the set length
     int pendingVisibility_ = -1; // likewise who can find the room

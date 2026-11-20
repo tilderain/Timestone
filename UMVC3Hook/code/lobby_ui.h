@@ -214,6 +214,9 @@ private:
     int roomMenuCursor_ = 0;
     bool slotMenuOpen_ = false; // line up, watch or both, for a setup that is taken
     int slotMenuCursor_ = 0;
+    bool slotMenuQueued_ = false; // opened on the setup the player is in line for
+    // The setup menu's entries for how it was opened; returns how many.
+    int SlotMenuItems(const char* items[3]) const;
     bool quickChatOpen_ = false;
     int quickChatCursor_ = 0; // kept between openings, like the last phrase used
     bool memberFocus_ = false;    // cursor is in the player list, not on a seat

@@ -275,6 +275,7 @@ void SteamRoomService::Leave()
     local_.watchSlot = -1;
     local_.upstream = 0;
     watchIntent_ = -1;
+    resumeWatch_ = -1;
     local_.status = MemberStatus::Idle;
     local_.wins = 0;
     local_.losses = 0;
@@ -389,6 +390,9 @@ void SteamRoomService::Sit(int slot, int side)
     local_.queueSlot = -1;
     local_.watchSlot = -1; // a seat ends any watching
     local_.upstream = 0;
+    // Only for as long as the seat is held: watching is the player's standing
+    // choice, and it picks up again when they stand or are rotated out.
+    if (watchIntent_ >= 0) resumeWatch_ = watchIntent_;
     watchIntent_ = -1;
     ClearHandshake();
     local_.status = MemberStatus::Seated;
@@ -399,6 +403,8 @@ void SteamRoomService::Sit(int slot, int side)
 void SteamRoomService::Stand()
 {
     if (local_.status == MemberStatus::Fighting) return;
+    if (local_.slot >= 0 && resumeWatch_ >= 0) watchIntent_ = resumeWatch_;
+    resumeWatch_ = -1;
     local_.slot = -1;
     local_.side = 0;
     ClearHandshake();
@@ -1042,6 +1048,8 @@ void SteamRoomService::Pump()
         local_.queueSlot = -1;
         local_.watchSlot = -1;
         local_.upstream = 0;
+        watchIntent_ = -1;
+        resumeWatch_ = -1;
         local_.status = MemberStatus::Idle;
         local_.wins = 0;
         local_.losses = 0;

@@ -951,33 +951,52 @@ void LobbyUi::UpdateRoom(const Input& input)
     // Nothing to do on one's own seat: readying up happens in the prompt that
     // appears once the opposite seat is taken.
     if (onOwnSeat) return;
-    if (seated) {
-        // One place at a time: give the seat up first.
-        Play(SFX_CANCEL);
-        return;
-    }
     if (queued && local->queueSlot == seatSlot_) {
-        service_.LeaveQueue();
-        Play(SFX_CANCEL);
+        // Already in line here: watch its matches meanwhile, or step out.
+        slotMenuOpen_ = true;
+        slotMenuQueued_ = true;
+        slotMenuCursor_ = 0;
+        Play(SFX_CONFIRM);
         return;
     }
     // A seat is taken directly only when it is free and nobody is waiting
     // for this slot; otherwise confirm lines up for it.
     const bool full = SeatOccupant(seatSlot_, 0) && SeatOccupant(seatSlot_, 1);
-    if (!full && SlotQueueLength(seatSlot_) == 0 && !SeatOccupant(seatSlot_, seatSide_) &&
-        room.slots[seatSlot_] < SlotState::Starting) {
+    const bool open = !full && SlotQueueLength(seatSlot_) == 0 &&
+                      !SeatOccupant(seatSlot_, seatSide_) &&
+                      room.slots[seatSlot_] < SlotState::Starting;
+    if (seated && (open || local->slot == seatSlot_)) {
+        // One place at a time: give the seat up first.
+        Play(SFX_CANCEL);
+        return;
+    }
+    if (open) {
         service_.Sit(seatSlot_, seatSide_);
     } else {
-        // Line up, watch, or both.
+        // Line up, watch, or both. From a seat at another setup too: picking
+        // one gives that seat up.
         slotMenuOpen_ = true;
+        slotMenuQueued_ = false;
         slotMenuCursor_ = 0;
     }
     Play(SFX_CONFIRM);
 }
 
+int LobbyUi::SlotMenuItems(const char* items[3]) const
+{
+    if (slotMenuQueued_) {
+        items[0] = service_.WatchIntent() == seatSlot_ ? "STOP SPECTATING" : "SPECTATE";
+        items[1] = "LEAVE QUEUE";
+        return 2;
+    }
+    for (int i = 0; i < kSlotMenuCount; ++i) items[i] = kSlotMenuItems[i];
+    return kSlotMenuCount;
+}
+
 void LobbyUi::UpdateSlotMenu(const Input& input)
 {
-    MoveCursor(slotMenuCursor_, kSlotMenuCount, input);
+    const char* items[3];
+    MoveCursor(slotMenuCursor_, SlotMenuItems(items), input);
     if (input.cancel || input.menu) {
         slotMenuOpen_ = false;
         Play(SFX_CANCEL);
@@ -986,6 +1005,20 @@ void LobbyUi::UpdateSlotMenu(const Input& input)
     if (!input.confirm) return;
     slotMenuOpen_ = false;
     Play(SFX_CONFIRM);
+    if (slotMenuQueued_) {
+        const int watching = service_.WatchIntent();
+        if (slotMenuCursor_ == 0) {
+            service_.SetWatchIntent(watching == seatSlot_ ? -1 : seatSlot_);
+        } else {
+            // Leaving the line is not a decision about watching.
+            service_.LeaveQueue();
+            service_.SetWatchIntent(watching);
+        }
+        return;
+    }
+    // Chosen from a seat: one place at a time.
+    const Member* local = LocalMember();
+    if (local && local->slot >= 0) service_.Stand();
     switch (slotMenuCursor_) {
     case 0: // queue and watch
         service_.JoinQueue(seatSlot_); // moves over from any other queue
@@ -2847,7 +2880,9 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     } else if (slotMenuOpen_) {
         char title[16];
         snprintf(title, sizeof(title), "SETUP %d", seatSlot_ + 1);
-        DrawListMenu(canvas, title, kSlotMenuItems, kSlotMenuCount, slotMenuCursor_);
+        const char* slotItems[3];
+        const int slotItemCount = SlotMenuItems(slotItems);
+        DrawListMenu(canvas, title, slotItems, slotItemCount, slotMenuCursor_);
     } else if (quickChatOpen_)
         DrawListMenu(canvas, "CHAT", kQuickChat, kQuickChatCount, quickChatCursor_);
     else if (musicOpen_)

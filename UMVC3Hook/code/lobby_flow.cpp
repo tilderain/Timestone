@@ -2198,6 +2198,7 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
                 // seat, and no place in its queue either.
                 g_service->Stand();
                 g_service->LeaveQueue();
+                g_service->SetWatchIntent(-1); // nor watching it
                 HookLog("LobbyFlow: left the match by choice; seat given up\n");
             }
             ResetSet(1);
