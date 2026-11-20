@@ -60,7 +60,7 @@ float g_holdMs = 0.0f;                 // the hold in use, for display
 // TEMPORARY (2026-11-19): one summary line every two seconds while even
 // pacing is being tuned. A line costs about 0.3 ms in the frame it is written
 // from. Remove with the PACING block in FramePacing_OnPresent.
-constexpr bool kPacingLog = true;
+constexpr bool kPacingLog = false;
 struct PacingLogWindow {
     int frames = 0, held = 0, exceeded = 0;
     float holdMin = 0.0f, holdMax = 0.0f, overMax = 0.0f;
