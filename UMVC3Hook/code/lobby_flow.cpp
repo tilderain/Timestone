@@ -840,12 +840,19 @@ __attribute__((noinline)) bool __fastcall Hook_SessionReady(void* library)
     return g_originalSessionReady(library);
 }
 
+void FollowActivePad();
+
 uint64_t __fastcall Hook_MenuNavigation(void* menu, int32_t* out)
 {
     // No menu takes input while the title area is being rebuilt.
     if (g_titleReloadPending) return 1;
     if (!IsReleasedMainMenu(menu)) return g_originalMenuNavigation(menu, out);
     if (g_onlineChosen) return 1;
+
+    // Only on the top menu: under Offline, the 2P controller select assigns
+    // the second pad itself, and following it would make both pads player 1.
+    if (!*reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(menu) + MENU_CHILD))
+        FollowActivePad();
 
     // Take the decide on Online before the menu sees it: its own handler
     // would start the native network entry.
@@ -2013,8 +2020,6 @@ bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea)
         HookLog("LobbyFlow: main menu ready (area=%llx)\n",
                 static_cast<unsigned long long>(titleArea));
     }
-
-    FollowActivePad();
 
     // An invite accepted on the main menu opens the lobby as Online does.
     // Once per invite: one that cannot be joined (Steam is down) must not
