@@ -3024,21 +3024,10 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
         {
             // Both picks are in: the delay the match will run at.
             const int mine = delayValue(local->delayPick), theirs = delayValue(other->delayPick);
-            // And the stage: one of the two players' preferred stages.
-            char stage[96];
-            if (local->stage == other->stage || other->stage == kStageAny)
-                snprintf(stage, sizeof(stage), "%s", StageName(local->stage));
-            else if (local->stage == kStageAny)
-                snprintf(stage, sizeof(stage), "%s", StageName(other->stage));
-            else
-                snprintf(stage, sizeof(stage), "%s or %s", StageName(local->stage),
-                         StageName(other->stage));
-            if (mine >= 0 && theirs >= 0)
-                snprintf(line, sizeof(line), "Input delay: %d     Stage: %s",
-                         mine > theirs ? mine : theirs, stage);
-            else
-                snprintf(line, sizeof(line), "Stage: %s", stage);
-            p.TextShrink(line, cx, selectY + 74.0f, 0.62f, w - 80.0f, A_MC, kCyan);
+            if (mine >= 0 && theirs >= 0) {
+                snprintf(line, sizeof(line), "Input delay: %d", mine > theirs ? mine : theirs);
+                p.Text(line, cx, selectY + 74.0f, 0.62f, A_MC, kCyan);
+            }
         }
         limit = kEntryTimeout;
         break;

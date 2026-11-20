@@ -931,8 +931,7 @@ any; it starts as Bonne Wonderland, 105) and published as its own member value
 When player 1 sends the launch (`SendLaunchAsHost`) the stage is one of the
 two players' preferred stages picked at random (`PickMatchStage`); a player
 with no preference goes along with the other's, and when neither has one it
-is any stage but the training room. The start prompt names the stage or the
-two candidates. **Unverified in game.**
+is any stage but the training room. **Unverified in game.**
 
 ### The cards
 
