@@ -8,8 +8,10 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <unordered_map>
 
 extern void HookLog(const char*, ...);
+extern "C" bool FrameStepper_IsBattleSynchronized();
 
 namespace {
 bool enabled = false;
@@ -19,7 +21,29 @@ bool enabled = false;
 bool immediatePresent = false;
 constexpr DWORD kForceImmediate = 0x00000100; // D3DPRESENT_FORCEIMMEDIATE; not in these headers
 bool forceImmediateRefused = false;
+// VSync on. With a one-frame queue an ordinary Present waits inside Direct3D
+// for the queue to empty, about a whole frame, and holds the device's lock
+// while it does (the device is created MULTITHREADED). The game's loader
+// thread creates and fills textures through the same device, so it got the
+// lock for about a millisecond a frame: on one Windows machine a character's
+// textures took seconds to appear (2026-11-19, a 0.6.3 report: 363 textures,
+// 845 ms inside the native create against 56 ms once Present stopped holding
+// the lock, while every Present took 16 ms).
+//
+// The frame is still presented by the driver's own VSync, which is what keeps
+// it evenly paced; only where the waiting happens changes. A first try with
+// DONOTWAIT presents the frame if the queue has room. If it is full, the wait
+// for the next refresh is spent in DwmFlush, outside Direct3D, and then an
+// ordinary waiting Present is made, which now has little or nothing left to
+// wait for. Polling the queue with a timer instead was tried and measured:
+// it started frames up to 1.9 ms late.
+constexpr DWORD kDoNotWait = 0x00000001; // D3DPRESENT_DONOTWAIT
+constexpr HRESULT kStillDrawing = static_cast<HRESULT>(0x8876021CL); // D3DERR_WASSTILLDRAWING
+bool doNotWaitRefused = false;
 bool fellBack = false; // wanted, but the Ex device could not be created
+// [Graphics] ExperimentalD3D9Ex=2: use the Ex device even where it is known
+// to be a bad idea (see OnTranslationLayer).
+bool forced = false;
 IDirect3DDevice9Ex* exDevice = nullptr; // Borrowed from the native renderer.
 HWND deviceWindow = nullptr;
 const GUID stagingKey = {0x8cad6d71, 0xb8b5, 0x482c, {0xb2,0x14,0x71,0x73,0x65,0x78,0x30,0x31}};
@@ -38,13 +62,24 @@ void Check(HRESULT result, const char* operation)
     }
 }
 
+// Which GPU textures have a staging copy, by texture. Every native texture
+// map and unmap asks, adapted texture or not, and asking the texture itself
+// (GetPrivateData) is a COM call with a GUID search and a reference count
+// each time. A staging object lists itself when it is attached and takes
+// itself out as it dies, which is while its GPU texture is being released.
+struct Staging;
+SRWLOCK stagingLock = SRWLOCK_INIT;
+std::unordered_map<IDirect3DBaseTexture9*, Staging*> stagingByTexture;
+
 // The real GPU texture owns this via private data. Shared native texture views
 // automatically share its staging storage, and final COM release frees it.
 struct Staging final : IUnknown {
     std::atomic<ULONG> refs {1};
     IDirect3DBaseTexture9* texture;
+    IDirect3DBaseTexture9* gpu = nullptr; // set once attached; its key in stagingByTexture
     SRWLOCK mutex = SRWLOCK_INIT;
     unsigned locks = 0;
+    bool pending = false; // nothing has gone up to the GPU texture yet
     explicit Staging(IDirect3DBaseTexture9* value) : texture(value) {}
     HRESULT WINAPI QueryInterface(REFIID iid, void** out) override {
         if (!out) return E_POINTER;
@@ -55,18 +90,65 @@ struct Staging final : IUnknown {
     ULONG WINAPI AddRef() override { return ++refs; }
     ULONG WINAPI Release() override {
         const ULONG left = --refs;
-        if (!left) { texture->Release(); delete this; }
+        if (!left) {
+            if (gpu) {
+                AcquireSRWLockExclusive(&stagingLock);
+                const auto found = stagingByTexture.find(gpu);
+                if (found != stagingByTexture.end() && found->second == this)
+                    stagingByTexture.erase(found);
+                ReleaseSRWLockExclusive(&stagingLock);
+            }
+            texture->Release();
+            delete this;
+        }
         return left;
     }
 };
 
+// Textures created but not yet sent to the GPU, by GPU texture. The managed
+// pool the game was written for uploads a texture when it is first drawn, not
+// when it is created; uploading at creation instead put the whole cost of a
+// character or stage into its load (2026-11-19: loads noticeably longer than
+// on the ordinary backend). So a new texture waits here until it is bound
+// (SetTexture) or the per-frame warm-up reaches it. The set holds a reference
+// on both objects, so neither can go away while it is listed.
+SRWLOCK pendingLock = SRWLOCK_INIT;
+std::unordered_map<IDirect3DBaseTexture9*, Staging*> pendingTextures;
+std::atomic<unsigned> pendingCount {0};
+
+// Since the last log line; see LogTextureStats. Counters only, added to
+// without a lock from whichever thread creates, binds or presents; times are
+// whole microseconds.
+struct TextureStats {
+    std::atomic<unsigned> created {0}, boundUploads {0}, warmUploads {0}, dropped {0};
+    std::atomic<int64_t> fillUs {0}, gpuCreateUs {0}, boundUs {0}, boundWorstUs {0}, warmUs {0};
+    std::atomic<bool> changed {false}; // anything to report
+};
+TextureStats textureStats;
+
+void AddStat(std::atomic<unsigned>& count, std::atomic<int64_t>& total, double ms)
+{
+    count.fetch_add(1, std::memory_order_relaxed);
+    total.fetch_add(static_cast<int64_t>(ms * 1000.0), std::memory_order_relaxed);
+    textureStats.changed.store(true, std::memory_order_relaxed);
+}
+
+// The staging copy of a GPU texture, with a reference the caller releases,
+// or null for a texture that has none.
 Staging* GetStaging(IDirect3DBaseTexture9* texture)
 {
+    if (!texture) return nullptr;
     Staging* staging = nullptr;
-    DWORD size = sizeof(staging);
-    if (texture && SUCCEEDED(texture->GetPrivateData(stagingKey, &staging, &size)))
-        return staging; // D3DSPD_IUNKNOWN returns an owned reference.
-    return nullptr;
+    AcquireSRWLockShared(&stagingLock);
+    const auto found = stagingByTexture.find(texture);
+    if (found != stagingByTexture.end()) {
+        // One on its way out (count already zero) is as good as gone.
+        ULONG count = found->second->refs.load();
+        while (count && !found->second->refs.compare_exchange_weak(count, count + 1)) {}
+        if (count) staging = found->second;
+    }
+    ReleaseSRWLockShared(&stagingLock);
+    return staging;
 }
 
 void Upload(Staging* staging, IDirect3DBaseTexture9* gpu)
@@ -122,6 +204,173 @@ void UploadSubresource(Staging* staging, IDirect3DBaseTexture9* gpu, unsigned su
     Check(result, "upload managed texture level");
 }
 
+double NowMs()
+{
+    static double toMs = 0.0;
+    LARGE_INTEGER value;
+    if (toMs == 0.0) {
+        QueryPerformanceFrequency(&value);
+        toMs = 1000.0 / static_cast<double>(value.QuadPart);
+    }
+    QueryPerformanceCounter(&value);
+    return static_cast<double>(value.QuadPart) * toMs;
+}
+
+// A new texture: its first upload is owed.
+void Defer(Staging* staging, IDirect3DBaseTexture9* gpu)
+{
+    staging->pending = true;
+    staging->AddRef();
+    gpu->AddRef();
+    AcquireSRWLockExclusive(&pendingLock);
+    pendingTextures.emplace(gpu, staging);
+    pendingCount.store(static_cast<unsigned>(pendingTextures.size()), std::memory_order_relaxed);
+    ReleaseSRWLockExclusive(&pendingLock);
+}
+
+// Takes a texture out of the waiting set: `gpu` itself, or any one when it is
+// null. The caller then owns the set's two references.
+bool TakePending(IDirect3DBaseTexture9*& gpu, Staging*& staging)
+{
+    AcquireSRWLockExclusive(&pendingLock);
+    const auto found = gpu ? pendingTextures.find(gpu) : pendingTextures.begin();
+    const bool taken = found != pendingTextures.end();
+    if (taken) {
+        gpu = found->first;
+        staging = found->second;
+        pendingTextures.erase(found);
+        pendingCount.store(static_cast<unsigned>(pendingTextures.size()), std::memory_order_relaxed);
+    }
+    ReleaseSRWLockExclusive(&pendingLock);
+    return taken;
+}
+
+enum class Flush { Uploaded, Dropped, Mapped };
+
+// Sends a taken texture up and lets go of the set's references. One the game
+// still has mapped cannot be read yet and goes back in the set; one nobody
+// else holds any more (`binding` rules that out) is simply released.
+Flush FlushPending(IDirect3DBaseTexture9* gpu, Staging* staging, bool binding)
+{
+    Flush outcome = Flush::Uploaded;
+    AcquireSRWLockExclusive(&staging->mutex);
+    bool unused = false;
+    if (!binding) {
+        gpu->AddRef();
+        unused = gpu->Release() == 1; // only the set's own reference is left
+    }
+    if (unused) {
+        outcome = Flush::Dropped;
+        staging->pending = false;
+    } else if (staging->locks) {
+        outcome = Flush::Mapped;
+    } else {
+        Upload(staging, gpu);
+        staging->pending = false;
+    }
+    ReleaseSRWLockExclusive(&staging->mutex);
+    if (outcome == Flush::Mapped) {
+        AcquireSRWLockExclusive(&pendingLock);
+        pendingTextures.emplace(gpu, staging);
+        pendingCount.store(static_cast<unsigned>(pendingTextures.size()), std::memory_order_relaxed);
+        ReleaseSRWLockExclusive(&pendingLock);
+        return outcome;
+    }
+    staging->Release();
+    gpu->Release();
+    return outcome;
+}
+
+// Most time a frame gives to uploading textures ahead of their first use. In
+// a running battle a frame has little to spare; anywhere else (menus, loading
+// screens, waiting for the opponent) nothing is lost by a longer frame.
+constexpr double kWarmBattleMs = 1.0;
+constexpr double kWarmIdleMs = 6.0;
+
+// Once a frame, before it is presented: upload waiting textures until the
+// frame's budget is spent, so few are left to be uploaded at their first draw.
+void WarmTextures()
+{
+    unsigned left = pendingCount.load(std::memory_order_relaxed);
+    if (!left) return;
+    const double budget = FrameStepper_IsBattleSynchronized() ? kWarmBattleMs : kWarmIdleMs;
+    const double start = NowMs();
+    double now = start;
+    for (; left && now - start < budget; --left) {
+        IDirect3DBaseTexture9* gpu = nullptr;
+        Staging* staging = nullptr;
+        if (!TakePending(gpu, staging)) break;
+        const Flush outcome = FlushPending(gpu, staging, false);
+        const double after = NowMs();
+        if (outcome == Flush::Uploaded) {
+            AddStat(textureStats.warmUploads, textureStats.warmUs, after - now);
+        } else if (outcome == Flush::Dropped) {
+            textureStats.dropped.fetch_add(1, std::memory_order_relaxed);
+            textureStats.changed.store(true, std::memory_order_relaxed);
+        }
+        now = after;
+    }
+}
+
+// What the texture path cost since the last line, at most every two seconds.
+// A frame with nothing to report pays one load. Temporary: it is how a load
+// on a real Windows driver gets compared with the ordinary backend.
+void LogTextureStats()
+{
+    if (!textureStats.changed.load(std::memory_order_relaxed)) return;
+    static ULONGLONG lastLog = 0;
+    const ULONGLONG tick = GetTickCount64();
+    if (tick - lastLog < 2000) return;
+    lastLog = tick;
+    textureStats.changed.store(false, std::memory_order_relaxed);
+    const auto count = [](std::atomic<unsigned>& value) {
+        return value.exchange(0, std::memory_order_relaxed);
+    };
+    const auto ms = [](std::atomic<int64_t>& value) {
+        return static_cast<double>(value.exchange(0, std::memory_order_relaxed)) / 1000.0;
+    };
+    const unsigned created = count(textureStats.created);
+    const unsigned bound = count(textureStats.boundUploads);
+    const unsigned warm = count(textureStats.warmUploads);
+    const unsigned dropped = count(textureStats.dropped);
+    const double fill = ms(textureStats.fillUs), gpuCreate = ms(textureStats.gpuCreateUs);
+    const double boundMs = ms(textureStats.boundUs), worst = ms(textureStats.boundWorstUs);
+    const double warmMs = ms(textureStats.warmUs);
+    HookLog("D3D9Ex: textures created=%u (fill %.1f ms, GPU create %.1f ms) "
+            "uploaded at first draw=%u (%.1f ms, longest %.1f) ahead of use=%u (%.1f ms) "
+            "released unused=%u waiting=%u\n",
+            created, fill, gpuCreate, bound, boundMs, worst, warm, warmMs, dropped,
+            pendingCount.load(std::memory_order_relaxed));
+}
+
+// Waits for the desktop compositor's next pass, which follows the display's
+// refresh. Not a Direct3D call, so the device's lock is free meanwhile. Where
+// there is no compositor to wait for it returns at once and the Present that
+// follows does the waiting, as it always did.
+void WaitForRefresh()
+{
+    using Flush = HRESULT(WINAPI*)();
+    static const Flush flush = [] {
+        const HMODULE module = LoadLibraryW(L"dwmapi.dll");
+        return module ? reinterpret_cast<Flush>(GetProcAddress(module, "DwmFlush")) : nullptr;
+    }();
+    if (flush) flush();
+}
+
+// Direct3D 9 running through Microsoft's D3D9On12 layer: GPUs with no
+// Direct3D 9 driver of their own (Intel Arc, Iris Xe, UHD). The one machine
+// where 0.6.3 loaded slowly was an Arc A750 (2026-11-19: a character on the
+// character select took about five seconds to appear, still after texture
+// creation and Present had been shown not to be the wait), and the layer is
+// known for trouble with this game on other programs. What the Ex device and
+// its default-pool resources cost there is not understood, so on that layer
+// the game stays on the ordinary backend, which 0.6.2 ran on without the
+// problem.
+bool OnTranslationLayer()
+{
+    return GetModuleHandleA("d3d9on12.dll") != nullptr;
+}
+
 using TextureCreate = void(__fastcall*)(void*, void*, uint64_t, void*);
 using TextureMap = void*(__fastcall*)(void*, void*, unsigned, int, void*);
 using TextureUnmap = void(__fastcall*)(void*, unsigned);
@@ -141,9 +390,11 @@ void __fastcall CreateTexture(void* object, void* shared, uint64_t flags, void* 
     // upload logic intact, but have it populate a CPU texture instead of MANAGED.
     auto*& slot = Field<IDirect3DBaseTexture9*>(object, 0x48);
     IDirect3DBaseTexture9* const before = slot;
+    const double createStart = NowMs();
     Field<int>(object, 0x18) = 3; // Native USAGE_STAGING -> D3DPOOL_SYSTEMMEM.
     originalTextureCreate(object, nullptr, flags, data);
     Field<int>(object, 0x18) = usage;
+    const double filled = NowMs();
     // The native function creates nothing for texture kinds 0 and 8 (it
     // leaves or clears the slot): there is then nothing to adapt.
     if (!slot || slot == before) return;
@@ -180,11 +431,19 @@ void __fastcall CreateTexture(void* object, void* shared, uint64_t flags, void* 
     default: D3D9Reset_AbortStartup("Unsupported native managed texture type");
     }
     auto* staging = new Staging(slot); // Takes the native CPU texture reference.
-    Upload(staging, gpu);
     Check(gpu->SetPrivateData(stagingKey, staging, sizeof(IUnknown*), D3DSPD_IUNKNOWN),
         "attach managed texture storage");
+    staging->gpu = gpu;
+    AcquireSRWLockExclusive(&stagingLock);
+    stagingByTexture[gpu] = staging;
+    ReleaseSRWLockExclusive(&stagingLock);
     slot = gpu;
+    // Nothing is uploaded here: see pendingTextures.
+    Defer(staging, gpu);
     staging->Release();
+    AddStat(textureStats.created, textureStats.fillUs, filled - createStart);
+    textureStats.gpuCreateUs.fetch_add(static_cast<int64_t>((NowMs() - filled) * 1000.0),
+                                       std::memory_order_relaxed);
 }
 
 void* __fastcall MapTexture(void* object, void* result, unsigned subresource, int type, void* rect)
@@ -251,7 +510,8 @@ void __fastcall UnmapTexture(void* object, unsigned subresource)
         }
         Check(hr, "unmap managed texture");
         --staging->locks;
-        UploadSubresource(staging, gpu, subresource);
+        // A texture still waiting for its first upload goes up whole then.
+        if (!staging->pending) UploadSubresource(staging, gpu, subresource);
         ReleaseSRWLockExclusive(&staging->mutex);
     }
     staging->Release();
@@ -260,9 +520,35 @@ void __fastcall UnmapTexture(void* object, unsigned subresource)
 using VertexCreate = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, DWORD, DWORD, D3DPOOL, IDirect3DVertexBuffer9**, HANDLE*);
 using IndexCreate = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DIndexBuffer9**, HANDLE*);
 using Present = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
+using TextureBind = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DBaseTexture9*);
 VertexCreate originalVertexCreate = nullptr;
 IndexCreate originalIndexCreate = nullptr;
 Present originalPresent = nullptr;
+TextureBind originalSetTexture = nullptr;
+
+// A texture about to be drawn with: if its first upload is still owed, it
+// happens now. With nothing waiting this is one load and a compare.
+HRESULT WINAPI SetTexture(IDirect3DDevice9* device, DWORD stage, IDirect3DBaseTexture9* texture)
+{
+    if (texture && device == exDevice && pendingCount.load(std::memory_order_relaxed)) {
+        IDirect3DBaseTexture9* gpu = texture;
+        Staging* staging = nullptr;
+        if (TakePending(gpu, staging)) {
+            const double start = NowMs();
+            const Flush outcome = FlushPending(gpu, staging, true);
+            const double took = NowMs() - start;
+            if (outcome == Flush::Uploaded) {
+                AddStat(textureStats.boundUploads, textureStats.boundUs, took);
+                // Binds come from one thread; a lost update here would only
+                // understate the longest one.
+                const int64_t us = static_cast<int64_t>(took * 1000.0);
+                if (us > textureStats.boundWorstUs.load(std::memory_order_relaxed))
+                    textureStats.boundWorstUs.store(us, std::memory_order_relaxed);
+            }
+        }
+    }
+    return originalSetTexture(device, stage, texture);
+}
 
 HRESULT WINAPI CreateVertex(IDirect3DDevice9* device, UINT size, DWORD usage, DWORD fvf,
     D3DPOOL pool, IDirect3DVertexBuffer9** output, HANDLE* shared)
@@ -280,6 +566,11 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
     HWND window, const RGNDATA* dirty)
 {
     HRESULT result;
+    if (device == exDevice) {
+        // Before the pacing hold, so the hold absorbs the time this takes.
+        WarmTextures();
+        LogTextureStats();
+    }
     const int64_t pacing = FramePacing_BeforePresent(device);
     {
         // This hook owns Present on an Ex device, so the backend timing that
@@ -291,6 +582,21 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
                 // Not accepted here: present the ordinary way from now on.
                 forceImmediateRefused = true;
                 HookLog("D3D9Ex: FORCEIMMEDIATE refused; using ordinary Present\n");
+                result = originalPresent(device, src, dst, window, dirty);
+            }
+        } else if (device == exDevice && !doNotWaitRefused) {
+            result = exDevice->PresentEx(src, dst, window, dirty, kDoNotWait);
+            if (result == kStillDrawing) {
+                static bool reported = false;
+                if (!reported) {
+                    reported = true;
+                    HookLog("D3D9Ex: waiting for the refresh outside Present\n");
+                }
+                WaitForRefresh();
+                result = originalPresent(device, src, dst, window, dirty);
+            } else if (result == D3DERR_INVALIDCALL) {
+                doNotWaitRefused = true;
+                HookLog("D3D9Ex: DONOTWAIT refused; using ordinary Present\n");
                 result = originalPresent(device, src, dst, window, dirty);
             }
         } else {
@@ -333,7 +639,9 @@ bool D3D9Ex_Initialize()
     char path[MAX_PATH] = {};
     LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
     // On unless the ini turns it off.
-    enabled = !path[0] || GetPrivateProfileIntA("Graphics", "ExperimentalD3D9Ex", 1, path) != 0;
+    const int setting = path[0] ? GetPrivateProfileIntA("Graphics", "ExperimentalD3D9Ex", 1, path) : 1;
+    enabled = setting != 0;
+    forced = setting == 2;
     if (!enabled) return true;
     const Hook hooks[] = {
         {(void*)_addr(0x140782060), (void*)CreateTexture, (void**)&originalTextureCreate},
@@ -376,6 +684,7 @@ void D3D9Ex_Prepare(D3DPRESENT_PARAMETERS& p)
     p.Flags &= ~D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
     immediatePresent = p.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE;
     forceImmediateRefused = false;
+    doNotWaitRefused = false;
     HookLog("D3D9Ex: presentation interval=0x%08X force-immediate presents=%d\n",
             (unsigned)p.PresentationInterval, immediatePresent ? 1 : 0);
 }
@@ -404,10 +713,34 @@ HRESULT D3D9Ex_Create(UINT adapter, D3DDEVTYPE type, HWND window, DWORD behavior
     IDirect3D9Ex* core = nullptr;
     HRESULT result = create(D3D_SDK_VERSION, &core);
     if (FAILED(result)) return result;
+    if (!forced && OnTranslationLayer()) {
+        HookLog("D3D9Ex: Direct3D 9 runs through D3D9On12 here; using the ordinary backend "
+                "(set [Graphics] ExperimentalD3D9Ex=2 to use 9Ex anyway)\n");
+        core->Release();
+        return E_FAIL;
+    }
     IDirect3DDevice9Ex* device = nullptr;
     result = core->CreateDeviceEx(adapter, type, window, behavior, parameters, nullptr, &device);
+    // Which driver this really is. Some GPUs have no Direct3D 9 driver of
+    // their own and run it through Microsoft's D3D9On12 layer (Intel Arc; seen
+    // 2026-11-19 on the one machine where loads were slow), which behaves
+    // differently enough to need telling apart in a log.
+    D3DADAPTER_IDENTIFIER9 identifier = {};
+    if (SUCCEEDED(core->GetAdapterIdentifier(adapter, 0, &identifier)))
+        HookLog("D3D9Ex: adapter \"%s\" driver %s vendor=0x%04lX device=0x%04lX "
+                "d3d9on12=%d d3d12=%d dxvk=%d\n",
+                identifier.Description, identifier.Driver, identifier.VendorId, identifier.DeviceId,
+                GetModuleHandleA("d3d9on12.dll") ? 1 : 0, GetModuleHandleA("d3d12.dll") ? 1 : 0,
+                GetModuleHandleA("dxvk_d3d9.dll") || GetModuleHandleA("winevulkan.dll") ? 1 : 0);
     core->Release();
     if (FAILED(result)) return result;
+    // The layer may only be loaded once a device exists.
+    if (!forced && OnTranslationLayer()) {
+        HookLog("D3D9Ex: Direct3D 9 runs through D3D9On12 here; using the ordinary backend "
+                "(set [Graphics] ExperimentalD3D9Ex=2 to use 9Ex anyway)\n");
+        device->Release();
+        return E_FAIL;
+    }
     // Nothing below may leave a half-adopted device behind: the caller falls
     // back to an ordinary one.
     result = device->SetMaximumFrameLatency(1);
@@ -423,6 +756,7 @@ HRESULT D3D9Ex_Create(UINT adapter, D3DDEVTYPE type, HWND window, DWORD behavior
         {vtable[26], (void*)CreateVertex, (void**)&originalVertexCreate},
         {vtable[27], (void*)CreateIndex, (void**)&originalIndexCreate},
         {vtable[17], (void*)PresentFrame, (void**)&originalPresent},
+        {vtable[65], (void*)SetTexture, (void**)&originalSetTexture},
     };
     if (!Install(hooks, sizeof(hooks) / sizeof(hooks[0]))) {
         exDevice = nullptr;

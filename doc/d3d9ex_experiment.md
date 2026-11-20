@@ -14,7 +14,12 @@ ExperimentalD3D9Ex=0
 ```
 
 Absent or non-zero means the D3D9Ex backend; zero means the previous D3D9
-backend. Changing the setting requires a complete game restart. If the Ex device
+backend. Where Direct3D 9 runs through Microsoft's D3D9On12 layer (`d3d9on12.dll`
+loaded: Intel Arc, Iris Xe and UHD graphics, which have no Direct3D 9 driver of
+their own) the previous backend is used unless the setting is `2`. Added
+2026-11-19 after an Arc A750 was the one machine where 0.6.3 loaded slowly; that
+the layer is the cause, and that the fallback cures it, is not yet confirmed
+there. Changing the setting requires a complete game restart. If the Ex device
 cannot be created (old Windows, a driver without FLIPEX, a non-system
 `d3d9.dll`, a failed hook or latency call) the game falls back to the previous
 backend for that run and logs why. A failure after the device is running (a
@@ -61,6 +66,37 @@ one-frame total latency or a one-frame reduction.
 - Additional swapchains are not converted. Their native Present path supplies
   a destination HWND, which is invalid for FLIPEX.
 
+## Present with VSync on must not wait inside Direct3D
+
+Found 2026-11-19 from a Windows 0.6.3 log. The device is created MULTITHREADED
+(behavior 0x46), so every call takes the device's lock, and the game's loader
+thread creates and fills textures through it while the game thread presents.
+With VSync on and a one-frame queue, `Present` waits inside Direct3D for the
+queue to empty: 16 ms of every 16.7 ms frame (`present_max=16.3`, work about
+1 ms). If that wait holds the lock, the loader gets it for about a millisecond a
+frame. The log fits: 363 textures took 845 ms inside the native create (2.3 ms
+each, up to 7 ms each in other windows) while GPU creation and uploads together
+took 64 ms; under Proton with VSync off 2338 textures took 100 ms. On the
+character select a character's textures took about 5 s to appear. The ordinary
+backend queues up to three frames, the game's own 60 fps pacing keeps that
+queue from filling, and `Present` there rarely waits.
+
+`PresentFrame` first tries the Ex device with `D3DPRESENT_DONOTWAIT` when VSync
+is on, which presents the frame if the queue has room. On
+`D3DERR_WASSTILLDRAWING` it waits for the next refresh in `DwmFlush`, which is
+not a Direct3D call and leaves the lock free, and then makes the ordinary
+waiting `Present`. The frame is therefore still paced by the driver's VSync;
+only where the wait is spent changes. Without a compositor to wait for, the
+ordinary `Present` does all the waiting as before. A runtime that refuses the
+flag is presented the ordinary way from then on (logged once).
+
+Polling the queue with a timer was tried first and is not used: with 1 ms
+sleeps a Windows log showed frames starting up to 1.9 ms late (5 to 38 of every
+120 more than a millisecond off, against none before), and the texture create
+time fell from 845 ms to 56 ms for a similar batch. The `DwmFlush` version has
+not run on Windows: the checks are `late=0` in the `PACING` lines again and the
+`fill` figure in the `D3D9Ex: textures created=` lines staying low.
+
 ## Managed resource adaptation
 
 The native game cannot run on a bare Ex device because it uses MANAGED resources.
@@ -79,18 +115,46 @@ resources. It never returns fake COM textures to the renderer.
 
 For managed texture creation, the adapter temporarily selects native staging
 usage (3), allowing the existing engine code to perform format-specific initial
-uploads into SYSTEMMEM. It then creates a matching DEFAULT GPU texture and calls
-UpdateTexture. The staging texture is retained in an IUnknown private-data object
-owned by the GPU texture. This keeps shared native texture views consistent and
-releases the CPU copy automatically on final GPU texture release.
+uploads into SYSTEMMEM. It then creates a matching DEFAULT GPU texture. The
+staging texture is retained in an IUnknown private-data object owned by the GPU
+texture. This keeps shared native texture views consistent and releases the CPU
+copy automatically on final GPU texture release.
 
-Later native map/unmap calls use staging storage. On unmap, a 2D or cube
-texture uploads only the mip (and face) that was mapped, with `UpdateSurface`,
+Nothing is uploaded at creation (2026-11-19). The managed pool the game was
+written for sends a texture to the GPU when it is first drawn; uploading every
+texture whole inside the create call instead put that cost into each character
+and stage load. 0.6.3, the first release with this backend on by default, was
+reported as loading noticeably longer in character select and into matches,
+and in netplay the opponent reached the start barrier more than 1.5 s after a
+Proton machine on every rematch (0 of 6 before, 5 of 5 after). That the upload
+is the cause was not measured on a Windows driver. A new texture is now listed
+in `pendingTextures` and goes up whole by `UpdateTexture`:
+
+- when it is first bound (the `SetTexture` hook, device vtable 65), as the
+  managed pool does; or
+- before that, in `WarmTextures`, which runs once a frame ahead of Present and
+  uploads waiting textures for up to 6 ms (1 ms while a netplay battle is
+  synchronized), so that few are left for their first draw.
+
+A texture the game still has mapped is skipped until it is unmapped, and one
+the game released before any use is dropped without an upload. The list holds
+a reference on the GPU texture and its staging object, so neither can be freed
+while listed. `SetTexture` costs one atomic load when nothing is waiting.
+
+Later native map/unmap calls use staging storage. While a texture's first
+upload is still owed an unmap sends nothing. After it, a 2D or cube texture
+uploads only the mip (and face) that was mapped, with `UpdateSurface`,
 even while other levels are still mapped. Volume textures have no per-level
 surface copy: they are marked dirty and uploaded whole with `UpdateTexture`
 once nothing is mapped. The adapter preserves the native static-map behavior,
 including ignoring the rectangle argument for volume textures. Unadapted
 textures retain native map and unmap paths.
+
+A temporary log line (`D3D9Ex: textures created=...`, at most every two
+seconds) gives the time spent filling CPU textures, creating GPU textures, and
+uploading at first draw and ahead of use, for comparing a load on a real
+driver. Not yet run in the game on any driver; `tools/test_d3d9ex.py` covers
+the paths against mocks.
 
 The CPU copy is kept for the life of the texture, as the managed pool itself
 does: a default-pool texture cannot be read back, and native callers map

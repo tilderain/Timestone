@@ -19,6 +19,7 @@ MOCKS = r'''
 #include <cstring>
 #include <set>
 #include <stdexcept>
+#include <unordered_map>
 #define WINAPI
 #define __fastcall
 using HRESULT = int;
@@ -30,6 +31,9 @@ using SRWLOCK = bool;
 #define SRWLOCK_INIT false
 void AcquireSRWLockExclusive(bool* p) { assert(!*p); *p = true; }
 void ReleaseSRWLockExclusive(bool* p) { assert(*p); *p = false; }
+void AcquireSRWLockShared(bool* p) { assert(!*p); *p = true; }
+void ReleaseSRWLockShared(bool* p) { assert(*p); *p = false; }
+int privateDataReads = 0;
 constexpr int S_OK = 0, E_POINTER = -1, E_NOINTERFACE = -2, D3DERR_INVALIDCALL = -3;
 constexpr int D3D_OK = 0, D3DERR_DEVICELOST = -4, D3DERR_DEVICENOTRESET = -5;
 constexpr int S_PRESENT_OCCLUDED = 1, S_PRESENT_MODE_CHANGED = 2;
@@ -93,6 +97,7 @@ struct FakeTexture {
     }
     HRESULT GetPrivateData(int key, void* out, DWORD* size) {
         assert(key == stagingKey && *size == sizeof(void*));
+        ++privateDataReads;
         if (!metadata) return E_NOINTERFACE;
         metadata->AddRef(); *static_cast<IUnknown**>(out) = metadata; return S_OK;
     }
@@ -128,7 +133,11 @@ using IDirect3DBaseTexture9 = FakeTexture;
 using IDirect3DTexture9 = FakeTexture;
 using IDirect3DCubeTexture9 = FakeTexture;
 using IDirect3DVolumeTexture9 = FakeTexture;
-constexpr unsigned kForceImmediate = 0x100;
+constexpr unsigned kForceImmediate = 0x100, kDoNotWait = 1;
+constexpr int kStillDrawing = -6;
+bool doNotWaitRefused = false;
+unsigned refreshWaits = 0;
+void WaitForRefresh() { ++refreshWaits; }
 struct RGNDATA;
 struct Device {
     HRESULT resetResult = S_OK, state = S_OK;
@@ -138,9 +147,14 @@ struct Device {
     }
     HRESULT SetMaximumFrameLatency(unsigned value) { assert(value == 1); ++latencySets; return S_OK; }
     HRESULT CheckDeviceState(HWND) { return state; }
-    HRESULT forcedResult = S_OK;
-    unsigned forcedPresents = 0;
+    HRESULT forcedResult = S_OK, polledResult = S_OK;
+    unsigned forcedPresents = 0, polledPresents = 0, busyPolls = 0;
     HRESULT PresentEx(const RECT*, const RECT*, HWND, const RGNDATA*, unsigned flags) {
+        if (flags == kDoNotWait) {
+            ++polledPresents;
+            if (busyPolls) { --busyPolls; return kStillDrawing; }
+            return polledResult;
+        }
         assert(flags == kForceImmediate); ++forcedPresents; return forcedResult;
     }
     HRESULT TestCooperativeLevel() { return state; }
@@ -188,7 +202,8 @@ HRESULT BufferCreate(Device*, UINT, DWORD, unsigned, D3DPOOL pool, void**, HANDL
 auto originalVertexCreate = BufferCreate;
 auto originalIndexCreate = BufferCreate;
 HRESULT presentResult = S_OK;
-HRESULT NativePresent(Device*, const RECT*, const RECT*, HWND, const RGNDATA*) { return presentResult; }
+unsigned nativePresents = 0;
+HRESULT NativePresent(Device*, const RECT*, const RECT*, HWND, const RGNDATA*) { ++nativePresents; return presentResult; }
 auto originalPresent = NativePresent;
 bool Matches(void*, void*) { return true; }
 uintptr_t _addr(uintptr_t address) { assert(address == 0x140781FD0); return (uintptr_t)Matches; }
@@ -203,6 +218,15 @@ struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
 int64_t FramePacing_BeforePresent(Device*) { return 0; }
 void FramePacing_OnPresent(Device*, int64_t) {}
 bool immediatePresent = false, forceImmediateRefused = false;
+int binds = 0;
+HRESULT NativeBind(Device*, DWORD, FakeTexture*) { ++binds; return S_OK; }
+auto originalSetTexture = NativeBind;
+bool battle = false;
+bool FrameStepper_IsBattleSynchronized() { return battle; }
+// A clock that moves on by `clockStep` every time it is read.
+double clockNow = 0, clockStep = 0;
+double NowMs() { clockNow += clockStep; return clockNow; }
+void LogTextureStats() {}
 constexpr unsigned D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000u;
 '''
 
@@ -252,13 +276,41 @@ int main() {
     assert(seenPool == D3DPOOL_MANAGED);
     CreateIndex(&device, 64, 0, 101, D3DPOOL_SYSTEMMEM, nullptr, nullptr);
     assert(seenPool == D3DPOOL_SYSTEMMEM);
+    // VSync on: the Ex device is presented without waiting inside Direct3D.
     presentResult = S_PRESENT_OCCLUDED;
+    device.polledResult = S_PRESENT_OCCLUDED;
     assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK);
+    assert(device.polledPresents == 1 && nativePresents == 0);
     assert(PresentFrame(&helper, nullptr, nullptr, nullptr, nullptr) == S_PRESENT_OCCLUDED);
-    presentResult = S_PRESENT_MODE_CHANGED;
+    assert(helper.polledPresents == 0 && nativePresents == 1);
+    device.polledResult = S_PRESENT_MODE_CHANGED;
     assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3DERR_DEVICELOST);
-    presentResult = D3DERR_INVALIDCALL;
+    // A full queue: the refresh is waited for outside Direct3D, once, and the
+    // frame then goes out through the ordinary waiting Present.
+    device.polledResult = S_OK;
+    device.busyPolls = 5;
+    presentResult = S_OK;
+    assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK);
+    assert(refreshWaits == 1 && device.polledPresents == 3 && nativePresents == 2);
+    device.busyPolls = 0;
+    // Room in the queue: one try, no wait.
+    assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK);
+    assert(refreshWaits == 1 && device.polledPresents == 4 && nativePresents == 2);
+    // A failure stops the game, as before.
+    device.polledResult = D3DERR_DEVICELOST;
     bool presentStopped = false;
+    try { PresentFrame(&device, nullptr, nullptr, nullptr, nullptr); }
+    catch (const std::runtime_error&) { presentStopped = true; }
+    assert(presentStopped);
+    // A runtime that refuses the flag is presented the ordinary way from then on.
+    device.polledResult = D3DERR_INVALIDCALL;
+    const unsigned polledBefore = device.polledPresents;
+    assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK);
+    assert(doNotWaitRefused && device.polledPresents == polledBefore + 1 && nativePresents == 3);
+    assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK);
+    assert(device.polledPresents == polledBefore + 1 && nativePresents == 4);
+    presentResult = D3DERR_INVALIDCALL;
+    presentStopped = false;
     try { PresentFrame(&device, nullptr, nullptr, nullptr, nullptr); }
     catch (const std::runtime_error&) { presentStopped = true; }
     assert(presentStopped);
@@ -282,9 +334,10 @@ int main() {
         CreateTexture(object.data(), nullptr, 123, &initial);
         auto* gpu = Field<FakeTexture*>(object.data(), 0x48);
         assert(Field<int>(object.data(), 0x18) == 0 && aliveTextures == 2);
-        assert(gpu->data[0] == 7 && updates == before + 1);
+        // Creation uploads nothing: the texture waits for its first use.
+        assert(gpu->data[0] == 0 && updates == before && pendingCount == 1 && gpu->refs == 2);
         Staging* stage = GetStaging(gpu);
-        assert(stage && stage->refs == 2 && stage->texture != gpu);
+        assert(stage && stage->refs == 3 && stage->texture != gpu && stage->pending);
         stage->Release();
         CreateTexture(alias.data(), object.data(), 123, nullptr);
         assert(Field<FakeTexture*>(alias.data(), 0x48) == gpu && aliveTextures == 2);
@@ -295,6 +348,28 @@ int main() {
         assert(Field<int>(mapped.data(), 8) == 32);
         assert(Field<int>(mapped.data(), 12) == (kind == D3DRTYPE_VOLUMETEXTURE ? 256 : 32));
         *Field<int*>(mapped.data(), 0) = 42;
+        // Bound while the game still has it mapped: it cannot be read yet, and stays waiting.
+        const int bindsBefore = binds;
+        const int surfacesStart = surfaceUploads;
+        assert(SetTexture(&device, 0, gpu) == S_OK && binds == bindsBefore + 1);
+        assert(updates == before && pendingCount == 1 && gpu->refs == 2);
+        // Unmapping a texture that has never gone up sends nothing by itself.
+        UnmapTexture(alias.data(), subresource);
+        assert(updates == before && surfaceUploads == surfacesStart && pendingCount == 1);
+        // Another device binding it changes nothing.
+        assert(SetTexture(&helper, 0, gpu) == S_OK && updates == before && pendingCount == 1);
+        // The first bind uploads it whole, once.
+        assert(SetTexture(&device, 0, gpu) == S_OK && binds == bindsBefore + 3);
+        assert(updates == before + 1 && pendingCount == 0 && gpu->refs == 1);
+        assert(gpu->data[0] == 7 && gpu->data[subresource] == 42);
+        assert(SetTexture(&device, 0, gpu) == S_OK && updates == before + 1);
+        stage = GetStaging(gpu);
+        assert(stage->refs == 2 && !stage->pending);
+        stage->Release();
+
+        // From here on an edit goes up as it is unmapped.
+        MapTexture(alias.data(), mapped.data(), subresource, 0, nullptr);
+        *Field<int*>(mapped.data(), 0) = 43;
         MapTexture(object.data(), another.data(), 0, 0, nullptr);
         *Field<int*>(another.data(), 0) = 12;
         const int surfacesBefore = surfaceUploads;
@@ -303,16 +378,57 @@ int main() {
             assert(updates == before + 1); // A volume waits for every level to be unmapped.
         } else {
             // Only the written level goes up, at once, with another still mapped.
-            assert(surfaceUploads == surfacesBefore + 1 && gpu->data[subresource] == 42);
+            assert(surfaceUploads == surfacesBefore + 1 && gpu->data[subresource] == 43);
             assert(gpu->data[0] == 7);
         }
         UnmapTexture(object.data(), 0);
-        assert(gpu->data[subresource] == 42 && gpu->data[0] == 12);
+        assert(gpu->data[subresource] == 43 && gpu->data[0] == 12);
         if (kind == D3DRTYPE_VOLUMETEXTURE) assert(updates == before + 2 && surfaceUploads == surfacesBefore);
         else assert(updates == before + 1 && surfaceUploads == surfacesBefore + 2);
         assert(gpu->metadata && static_cast<Staging*>(gpu->metadata)->refs == 1);
         gpu->Release();
         assert(aliveTextures == 0); // Private data releases staging on final GPU release.
+    }
+
+    // The per-frame warm-up: waiting textures go up ahead of their first use,
+    // within the frame's budget, and one the game already released is dropped.
+    {
+        std::array<std::array<uint64_t, 16>, 4> objects = {};
+        int initial = 9;
+        for (auto& object : objects) {
+            Field<unsigned>(object.data(), 0x38) = D3DRTYPE_TEXTURE;
+            CreateTexture(object.data(), nullptr, 123, &initial);
+        }
+        assert(pendingCount == 4 && aliveTextures == 8);
+        Field<FakeTexture*>(objects[3].data(), 0x48)->Release(); // released before any use
+        assert(aliveTextures == 8);
+        const int before = updates;
+        battle = true;   // 1 ms a frame
+        clockStep = 2.0; // every upload takes longer than that
+        WarmTextures();
+        assert(pendingCount == 3);
+        WarmTextures();
+        assert(pendingCount == 2);
+        battle = false;  // 6 ms a frame: the rest fit
+        WarmTextures();
+        assert(pendingCount == 0);
+        clockStep = 0;
+        assert(updates == before + 3 && aliveTextures == 6);
+        for (int i = 0; i < 3; ++i) {
+            auto* gpu = Field<FakeTexture*>(objects[i].data(), 0x48);
+            assert(gpu->data[0] == 9 && gpu->refs == 1);
+            gpu->Release();
+        }
+        assert(aliveTextures == 0);
+        // A frame is presented with nothing waiting and with something waiting.
+        Field<unsigned>(objects[0].data(), 0x38) = D3DRTYPE_TEXTURE;
+        CreateTexture(objects[0].data(), nullptr, 123, &initial);
+        presentResult = S_OK;
+        assert(PresentFrame(&helper, nullptr, nullptr, nullptr, nullptr) == D3D_OK && pendingCount == 1);
+        assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK && pendingCount == 0);
+        assert(updates == before + 4);
+        Field<FakeTexture*>(objects[0].data(), 0x48)->Release();
+        assert(aliveTextures == 0);
     }
     assert(nativeMaps == 0 && nativeUnmaps == 0);
     std::array<uint64_t, 16> ordinary = {};
@@ -322,6 +438,9 @@ int main() {
     UnmapTexture(ordinary.data(), 0);
     assert(nativeMaps == 1 && nativeUnmaps == 1);
     texture->Release();
+    // Looking a staging copy up never asks the texture, and the table is
+    // empty again once every adapted texture is gone.
+    assert(privateDataReads == 0 && stagingByTexture.empty());
 
     // A failed upload must not silently publish an apparently usable resource.
     Staging* stage = new Staging(new FakeTexture(D3DRTYPE_TEXTURE));
@@ -339,12 +458,16 @@ int main() {
 class D3D9ExTests(unittest.TestCase):
     def test_native_resource_adapter(self):
         source = (ROOT / "UMVC3Hook/code/d3d9ex.cpp").read_text()
-        staging = source[source.index("struct Staging final"):source.index("Staging* GetStaging")]
+        staging = source[source.index("struct Staging;"):source.index("// The staging copy of a GPU texture")]
         unit = MOCKS + function(source, "Field") + function(source, "Check") + staging
-        for name in ("GetStaging", "Upload", "UploadSubresource", "CreateTexture", "MapTexture", "UnmapTexture", "D3D9Ex_Prepare",
+        for name in ("GetStaging", "Upload", "UploadSubresource", "Defer", "TakePending"):
+            unit += function(source, name)
+        # FlushPending, the warm-up budgets and WarmTextures.
+        unit += source[source.index("enum class Flush"):source.index("// What the texture path cost")]
+        for name in ("CreateTexture", "MapTexture", "UnmapTexture", "D3D9Ex_Prepare",
                      "D3D9Ex_IsDevice", "D3D9Ex_Reset", "D3D9Ex_Check"):
             unit += function(source, name)
-        for name in ("CreateVertex", "CreateIndex", "PresentFrame"):
+        for name in ("CreateVertex", "CreateIndex", "SetTexture", "PresentFrame"):
             unit += function(source, name)
         unit += CASES
         with tempfile.TemporaryDirectory(prefix="d3d9ex-", dir="/tmp/opencode") as tmp:
