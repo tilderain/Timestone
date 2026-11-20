@@ -85,6 +85,7 @@ constexpr float kFooterY = 664.0f;
 
 constexpr int kBrowseRows = 7;
 constexpr int kChatRows = 5;
+constexpr int kChatExpandFrames = 12; // the chat panel's slide open or shut
 constexpr uint32_t kTransitionFrames = 9;
 
 // Button glyph cells inside the 4x4 glyph sheets (mai_hlp03 / mai_hlp04).
@@ -557,6 +558,10 @@ void LobbyUi::Update(const Input& input)
         chatHoverFrames_ = chatHoverFrames_ < 100000 ? chatHoverFrames_ + 1 : chatHoverFrames_;
     else
         chatHoverFrames_ = 0;
+    // The chat panel slides open and shut rather than jumping.
+    if (screen_ != Screen::Room) chatExpandFrames_ = 0;
+    else if (chatExpanded_ && chatExpandFrames_ < kChatExpandFrames) ++chatExpandFrames_;
+    else if (!chatExpanded_ && chatExpandFrames_ > 0) --chatExpandFrames_;
 
     // A match becoming ready closes whatever modal is up so the delay pick
     // (the ready-up) is seen at once; UpdateHandshake then clears the room's
@@ -1178,7 +1183,9 @@ int ChatRowCount(const ChatLine& line)
 }
 
 // Cursor on the chat panel. Confirm expands it over the player list; expanded,
-// up/down scroll a line and the shoulder buttons a page.
+// up/down scroll kChatScrollStep lines and the shoulder buttons a page.
+constexpr int kChatScrollStep = 5;
+
 void LobbyUi::UpdateChatFocus(const Input& input)
 {
     if (!chatExpanded_) {
@@ -1215,8 +1222,8 @@ void LobbyUi::UpdateChatFocus(const Input& input)
     chatSeenCount_ = count;
 
     int next = chatScroll_;
-    if (input.up) ++next;
-    if (input.down) --next;
+    if (input.up) next += kChatScrollStep;
+    if (input.down) next -= kChatScrollStep;
     if (input.pageLeft) next += kChatExpandedRows - 2;
     if (input.pageRight) next -= kChatExpandedRows - 2;
     if (next == chatScroll_) return;
@@ -2335,12 +2342,24 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
                     const float barX = ix + icon + 6.0f;
                     const float barW = cell - icon - 6.0f - 12.0f;
                     if (barW < 12.0f) continue;
-                    p.Fill(barX, cy + 13.0f, barW, 8.0f, Color{0.0f, 0.0f, 0.0f, 0.75f});
+                    // The native lobby's own bar (HP_Bat1P_blk/yel in
+                    // net_room_player1): on the 256x32 sheet the black track
+                    // is columns 3..204 of rows 5..10 and the yellow fill
+                    // columns 4..203 of rows 22..25. The fill is cut, not
+                    // squeezed, to the life left.
+                    p.Sprite(TEX_HP_BAR, barX, cy + 17.0f, barW, 8.0f,
+                             Uv{4.0f / 256.0f, 6.0f / 32.0f, 204.0f / 256.0f, 10.0f / 32.0f}, A_ML);
                     if (health == kHealthUnknown || down) continue;
                     const float ratio = health / 100.0f;
-                    const Color fill = ratio > 0.5f ? Rgb(0xFFD63A)
-                                     : ratio > 0.25f ? Rgb(0xFF9A2E) : Rgb(0xF0453A);
-                    p.Fill(barX + 1.0f, cy + 14.0f, (barW - 2.0f) * ratio, 6.0f, fill);
+                    // The tint multiplies the sheet's yellow: untouched above
+                    // half, then orange, then red.
+                    const Color tint = ratio > 0.5f ? kWhite
+                                     : ratio > 0.25f ? Color{1.0f, 0.65f, 0.6f, 1.0f}
+                                                     : Color{1.0f, 0.3f, 0.3f, 1.0f};
+                    p.Sprite(TEX_HP_BAR, barX + 1.0f, cy + 17.0f, (barW - 2.0f) * ratio, 6.0f,
+                             Uv{5.0f / 256.0f, 22.5f / 32.0f, (5.0f + 198.0f * ratio) / 256.0f,
+                                25.5f / 32.0f},
+                             A_ML, tint);
                 }
             }
             // This player's games in the set being played.
@@ -2364,18 +2383,25 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
     const Painter p(canvas, t, 0.0f);
     // Expanded, the panel grows upward over the player list.
     const float x = kChatX, w = kChatW;
-    const float y = chatExpanded_ ? 110.0f : 516.0f;
-    const float h = chatExpanded_ ? 536.0f : 130.0f;
+    // `open` runs 0..1 as it slides; the bottom edge stays where it is.
+    const float open = EaseOut(chatExpandFrames_ / static_cast<float>(kChatExpandFrames));
+    const float y = 516.0f + (110.0f - 516.0f) * open;
+    const float h = 130.0f + (536.0f - 130.0f) * open;
+    // Space under the last row: the expanded panel keeps a line for the count.
+    const float bottomGap = 24.0f + (52.0f - 24.0f) * open;
     if (chatFocus_ && !chatExpanded_) {
         const float pulse = SelectionPulse(frame_);
         p.Box(TEX_ROW_SEL, x - 4.0f, y - 4.0f, w + 8.0f, h + 8.0f, WithAlpha(kWhite, pulse));
     }
     p.Box(TEX_PANEL_DARK, x, y, w, h);
-    if (chatExpanded_) // twice over: the room behind must not show through text
-        p.Fill(x + 5.0f, y + 5.0f, w - 10.0f, h - 10.0f, Color{0.02f, 0.03f, 0.06f, 0.7f});
+    if (open > 0.0f) // twice over: the room behind must not show through text
+        p.Fill(x + 5.0f, y + 5.0f, w - 10.0f, h - 10.0f, Color{0.02f, 0.03f, 0.06f, 0.7f * open});
 
     const bool typing = textTarget_ == TextTarget::Chat;
-    const int rows = chatExpanded_ ? kChatExpandedRows : kChatRows;
+    // As many rows as the panel has room for at this point of the slide.
+    int rows = static_cast<int>((h - bottomGap - 22.0f) / 21.0f + 0.01f) + 1;
+    if (rows < kChatRows) rows = kChatRows;
+    if (rows > kChatExpandedRows) rows = kChatExpandedRows;
     const int visible = typing ? rows - 1 : rows;
     const int count = service_.ChatCount();
     const int scroll = chatExpanded_ ? chatScroll_ : 0;
@@ -2401,16 +2427,22 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
             window[filled++] = Row{i, spans[r], r == 0};
         }
     }
-    if (chatExpanded_ && scroll > 0) {
+    if (chatExpanded_) {
+        // The line at the bottom of the view, out of every line there is.
+        const int total = ChatRowsFrom(0);
         char position[32];
-        snprintf(position, sizeof(position), "%d rows back", scroll);
-        p.Text(position, x + w - 22.0f, y + h - 16.0f, 0.5f, A_MR, kFaint);
+        snprintf(position, sizeof(position), "%d / %d", total - skipped, total);
+        p.Text(position, x + w - 22.0f, y + h - 16.0f, 0.5f, A_MR, WithAlpha(kFaint, kFaint.a * open));
     }
     // `window` runs newest first; the oldest row goes on the top line.
     for (int slot = 0; slot < filled; ++slot) {
         const Row& row = window[filled - 1 - slot];
         const ChatLine& line = service_.Chat(row.message);
-        const float rowY = y + 22.0f + slot * 21.0f;
+        // A full window hangs from the bottom edge, so its lines hold still
+        // while the panel slides; a short history stays under the top edge.
+        const float rowY = filled == visible
+            ? y + h - bottomGap - (rows - 1 - slot) * 21.0f
+            : y + 22.0f + slot * 21.0f;
         char text[kChatCapacity + 4];
         snprintf(text, sizeof(text), "%.*s", row.span.length, line.text + row.span.start);
         if (line.system) {
@@ -2507,7 +2539,8 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     snprintf(population, sizeof(population), "%d / %d", room.memberCount, room.settings.maxMembers);
     p.Text(population, 1216.0f, 61.0f, 0.86f, A_MR);
 
-    if (!chatExpanded_) DrawRoomMembers(canvas); // the expanded chat covers the list
+    // The fully expanded chat covers the list.
+    if (!chatExpanded_ || chatExpandFrames_ < kChatExpandFrames) DrawRoomMembers(canvas);
     DrawRoomSlots(canvas);
     DrawRoomChat(canvas);
 

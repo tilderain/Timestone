@@ -198,6 +198,7 @@ private:
     bool memberMenuOpen_ = false; // actions for the selected player
     bool chatFocus_ = false;      // cursor is on the chat panel, below the player list
     bool chatExpanded_ = false;   // chat covers the player list and scrolls
+    int chatExpandFrames_ = 0;    // 0 collapsed .. kChatExpandFrames fully open
     int chatScroll_ = 0;          // display rows scrolled back from the newest
     int chatSeenCount_ = 0;       // messages there were when the scroll was last set
     uint32_t chatHoverFrames_ = 0; // frames the cursor has been on the chat panel
