@@ -55,6 +55,16 @@ public:
         commands_.push_back(line);
     }
 
+    void Line(float x0, float y0, float x1, float y1, float width, Color color) override
+    {
+        char line[256];
+        snprintf(line, sizeof(line),
+                 "{\"type\":\"line\",\"from\":[%.2f,%.2f],\"to\":[%.2f,%.2f],\"width\":%.2f,"
+                 "\"color\":[%.3f,%.3f,%.3f,%.3f],\"depth\":%d}",
+                 x0, y0, x1, y1, width, color.r, color.g, color.b, color.a, Depth());
+        commands_.push_back(line);
+    }
+
     bool Save(const char* path) const
     {
         FILE* file = fopen(path, "w");
@@ -545,7 +555,7 @@ int main(int argc, char** argv)
         LobbyUi ui(service, kRoster, DefaultPrefs());
         Settle(ui);
         Populate(service, slots);
-        Settle(ui);
+        Settle(ui, 100); // long enough for the room's backdrop to fade in fully
         char name[32];
         snprintf(name, sizeof(name), "room_%dslot", slots);
         ok &= Capture(ui, directory, name); // cursor on the open seat

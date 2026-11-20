@@ -104,14 +104,19 @@ void EncodeColorBlock(const uint8_t pixels[16][3], uint8_t out[8])
 void EncodeAvatarTexture(const uint8_t rgba[kAvatarRgbaBytes],
                          uint8_t out[kAvatarTextureBytes])
 {
-    for (int by = 0; by < kAvatarSize / 4; ++by) {
-        for (int bx = 0; bx < kAvatarSize / 4; ++bx) {
+    EncodeIconFormat(rgba, kAvatarSize, kAvatarSize, out);
+}
+
+void EncodeIconFormat(const uint8_t* rgba, int width, int height, uint8_t* out)
+{
+    for (int by = 0; by < height / 4; ++by) {
+        for (int bx = 0; bx < width / 4; ++bx) {
             uint8_t luma[16];
             uint8_t chroma[16][3];
             for (int py = 0; py < 4; ++py) {
                 for (int px = 0; px < 4; ++px) {
                     const uint8_t* pixel =
-                        rgba + ((by * 4 + py) * kAvatarSize + bx * 4 + px) * 4;
+                        rgba + (static_cast<size_t>(by * 4 + py) * width + bx * 4 + px) * 4;
                     const float r = pixel[0], g = pixel[1], b = pixel[2];
                     // The inverse of the shader's decode:
                     //   R = Y + 1.402 Cr, G = Y - 0.344 Cb - 0.714 Cr, B = Y + 1.772 Cb
@@ -119,11 +124,11 @@ void EncodeAvatarTexture(const uint8_t rgba[kAvatarRgbaBytes],
                     const int i = py * 4 + px;
                     luma[i] = ClampByte(y);
                     chroma[i][0] = ClampByte((r - y) / 1.402f + 128.0f); // Cr
-                    chroma[i][1] = 255;                                  // opaque
+                    chroma[i][1] = pixel[3];                             // alpha
                     chroma[i][2] = ClampByte((b - y) / 1.772f + 128.0f); // Cb
                 }
             }
-            uint8_t* block = out + (by * (kAvatarSize / 4) + bx) * 16;
+            uint8_t* block = out + (static_cast<size_t>(by) * (width / 4) + bx) * 16;
             EncodeAlphaBlock(luma, block);
             EncodeColorBlock(chroma, block + 8);
         }

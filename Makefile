@@ -111,6 +111,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/steam_lobby.cpp \
 	$(SRCDIR)/code/lobby_canvas.cpp \
 	$(SRCDIR)/code/lobby_avatar.cpp \
+	$(SRCDIR)/code/space_bg.cpp \
 	$(SRCDIR)/code/chr_colors.cpp \
 	$(SRCDIR)/code/lobby_ui.cpp \
 	$(SRCDIR)/code/lobby_native.cpp \
@@ -366,9 +367,10 @@ $(BUILDDIR)/UMVC3Hook.rc: Makefile $(SRCDIR)/Timestone.manifest
 		'    END' \
 		'END' \
 		'' \
-		'2 24 "UMVC3Hook/Timestone.manifest"' > $@
+		'2 24 "UMVC3Hook/Timestone.manifest"' \
+		'SPACE_STARS RCDATA "UMVC3Hook/assets/space_stars_512.dxt1"' > $@
 
-$(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h | $(INCLUDE_FIX_STAMP)
+$(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h $(SRCDIR)/assets/space_stars_512.dxt1 | $(INCLUDE_FIX_STAMP)
 	@mkdir -p $(@D)
 	$(WINDRES) --include-dir $(SRCDIR) --include-dir $(INCLUDE_FIX_DIR) -O coff -i $< -o $@
 

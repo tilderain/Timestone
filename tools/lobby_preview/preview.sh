@@ -27,6 +27,7 @@ fi
 "${HOST_CXX:-c++}" -std=c++17 -O1 -Wall -Wextra -I"$root/UMVC3Hook/code" \
     "$root/tools/lobby_preview/preview.cpp" \
     "$root/UMVC3Hook/code/lobby_ui.cpp" "$root/UMVC3Hook/code/lobby_canvas.cpp" \
+    "$root/UMVC3Hook/code/space_bg.cpp" \
     -o "$root/build/lobby_preview_host"
 "$root/build/lobby_preview_host" "$out"
 

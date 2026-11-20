@@ -23,4 +23,9 @@ constexpr size_t kAvatarTextureBytes = (kAvatarSize / 4) * (kAvatarSize / 4) * 1
 void EncodeAvatarTexture(const uint8_t rgba[kAvatarRgbaBytes],
                          uint8_t out[kAvatarTextureBytes]);
 
+// The same conversion for an image of any size whose sides are multiples of
+// four: `rgba` holds width * height * 4 bytes and `out` receives
+// width * height bytes (16 per 4x4 block). The alpha channel is kept.
+void EncodeIconFormat(const uint8_t* rgba, int width, int height, uint8_t* out);
+
 } // namespace lobby

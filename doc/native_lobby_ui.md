@@ -1082,3 +1082,114 @@ Timestone hooks the bit test and answers "owned" for those gate callers when
 the archive is installed, so nothing is written to the save and real unlocks
 are still recorded. The lobby, the in-match selector and the match boot all
 use the same install-based rule, so both peers resolve a team's colors alike.
+
+## The Xbox 360 lobby backdrop (`ui\lic\lic_bg\a_lic_bg`)
+
+From the Xbox 360 build (`nativeXenon`, `Defaultdec.xex` in Ghidra on 8193),
+2026-11-20. The PC build still packs the scheduler `a_lic_bg` (1177 bytes) but
+none of its model, material or textures.
+
+There is no drawing code for it. `Function_8271E2A0` hands the path
+`ui\lic\lic_bg\a_lic_bg` to the generic scheduler loader `Function_82727B90`,
+which stores the `uUiScheduler` at `this+0x3C`; `Function_82A48888` only names
+the same path in a list of resources it registers (`0x82A33618`,
+`0x8278F160`). Everything else is data, in `ui\netroom.arc` and
+`ui\mnmain_xbox.arc`:
+
+- **Scheduler** (`.sdl`, 0x4C0DB839): a 6000-frame loop (100 s at 60 fps) with
+  two units. `a_lic_bg` is a model unit (`mpModel` = the rModel below, draw
+  view 0x80, no movement of its own). `MaterialVjobCngColor` targets it with
+  four controllers, one per material control id, each with two tracks:
+
+  | id | material | `UVOffset0` over the loop | `BaseMapFactor` |
+  |---|---|---|---|
+  | 1 | stars, bottom plane | v 0 -> -1 | 1.0, rising to 1.4 at frame 4499, back to 1.0 |
+  | 2 | grid, bottom sheet | v 0 -> 25 | (0.4,1,1,0.5) -> (0.7,0.4,1,0.25) -> (1,0.4,0.4,0.5) -> (0.7,1,0.4,0.5) -> back, at frames 0/1499/2999/4499/5999 |
+  | 3 | grid, top sheet | v 0 -> 25 | as id 2 |
+  | 4 | stars, top plane | v 0 -> -1 | as id 1 |
+
+- **Model** (`.mod`, 0x58A15856, v0xCA, 426 vertices, 24-byte vertices:
+  float3 position, packed normal, half2 UV, colour), five meshes:
+  - two star planes, 10 vertices each: x +-1160, y 0..+-1160, sloping from
+    z -700 on the centre line to z -450 at the top and bottom edges; UV
+    u 0.53..2.47, v 0.5..1.5 (edge to centre). The bottom one is the top one
+    turned half a turn.
+  - two grid sheets, 200 vertices each: x +-2381, |y| 127..1387, curved from
+    z -500 near the centre to z -407 at the edge; UV u 0..12, v 0..6.
+  - a band across the centre, 6 vertices: x +-1200, y +-300, z -600..-650,
+    textured with `chs_bg_black` to hide where the halves meet.
+- **Materials** (`.mrl`, 0x2749C8A8): five materials over three textures,
+  `chs_bg_a01` (1024x1024 DXT1 starfield), `chs_bg_grid` (256x256 DXT5, one
+  cross per tile) and `chs_bg_black`. The grid materials are the blended ones
+  (`XfBA_*` in the model's material names).
+
+So the picture is a floor and a ceiling receding to a horizon across the
+middle of the screen: stars drifting slowly on the two planes, and over them
+two grid sheets whose lines run towards the horizon at a quarter of a tile per
+second while their tint cycles cyan, violet, red and yellow-green.
+
+Unpacking: Xbox archives are `\0CRA` big-endian with LZX (XMemCompress) frames,
+`[0xFF, usize16, csize16]` or `[csize16]` for a full 0x8000 frame; the table's
+size field is the true size shifted left three bits. Textures are `\0XET`,
+DXT with 16-bit words swapped and Xbox 360 tiling.
+
+### The grid sheets in detail, and the plugin's version
+
+The grid mesh is a lattice half a tile apart: 25 points across (u 0..12) by
+rows at v 0, 0.5 .. 3 and one more at v 6. Since the cross texture has a line
+on each tile edge and through its middle, the grid's lines are exactly the
+lattice's edges. The rows are arcs, not straight: at v 0 the row runs from
+(x -1269, y 127) at its ends up to y 196 in the middle, and each row out is
+wider (x +-1269 at v 0, +-1825 at v 3) and higher. That is what bends the grid
+like a map's graticule. Vertex colour carries alpha, 0 on the row at v 0 and
+rising by 42 per row to 255 at v 3: the grid fades in from the horizon. With
+the material's own alpha (0.5, dipping to 0.25 a quarter of the way through
+the loop) that is all of its fading.
+
+`space_bg.cpp` draws this from the same numbers (`DrawSpaceBackground`, called
+by `LobbyUi::DrawBackdrop` in a room in place of the comic plate):
+
+- The view is ours, the game's was not recovered: a 45 degree vertical field,
+  876 units in front of the model's origin. At that distance the star planes'
+  far edge exactly spans a 16:9 screen, and their u range 0.53..2.47 comes out
+  edge to edge, which suggests it is close to the original.
+- Stars: 18 horizontal strips per half, each a window of the star texture
+  (`TEX_SPACE_STARS`) sized for its depth.
+- Grid: the lattice (`kGridMesh`, the upper sheet; the lower is its mirror)
+  projected and drawn edge by edge with `Canvas::Line`, about 300 segments a
+  frame. Columns stay put; the rows slide in by `kGridTilesPerLoop`.
+- `Canvas::Line` is a `TEX_WHITE` sprite turned through `uCoord`'s rotation
+  quaternion (`+0x60`, read by `uCoord__updateLocalMatrix 0x140548570`).
+- The star image is the plugin's own (`UMVC3Hook/assets`, CC0 source): the
+  `SPACE_STARS` resource, decoded, laid out 2 x 2, converted to the icon
+  format and put into the `germany` flag texture the way profile pictures
+  are (`EnsureSpaceStars`).
+
+### What is and is not exact in the plugin's backdrop (2026-11-20)
+
+Exact, read from the Xbox files: the timeline (6000 frames), both scroll
+amounts, the five colour keys and their frames, the grid lattice (every
+vertex of rows v 0..3), the vertex alpha ramp, the star planes' geometry and
+texture window, and the cross texture's line (core colour 0.46/0.74/0.86 at
+alpha 230, two texels wide; halo from 72 down over about thirteen texels).
+
+Not recovered:
+
+- **The camera.** The unit is a `uUiModelBase` (DTI hash `0x000E25FF`, as the
+  license cards). `uUiModelBase__ctor` `0x140326200` leaves `m2D` false and
+  the layout does not set it, so `uUiModelBase__draw` `0x140326A70` skips
+  `sPrimitive__buildSpriteCamera` (eye (0,0,990), 40 degrees) and the model
+  is drawn by whatever camera its draw view (`mDrawView` 0x80) has in the
+  lobby scene. That camera was not found. `space_bg.cpp` uses 45 degrees from
+  876 units, where the star planes exactly span the screen; the sprite
+  camera's numbers would overscan them by 6%.
+- **Blend modes.** The materials' blend-state hashes (`62B2D152` stars,
+  `D3B1D158` grid, `23BAF154` band) were not resolved; the plugin blends by
+  alpha. If the grid is additive on the Xbox it is brighter there.
+- **Key interpolation.** The keys carry type 3; treated as linear.
+- **The centre band's texture**, which did not decode to anything usable; the
+  plugin fades black out from the centre line over the band's extent.
+
+Deliberate differences: the star art; the stars' factor, which peaks at 1.4
+on the Xbox and here rests at 1/1.4 and peaks at 1; the lower star plane,
+turned half a turn on the model and here reading further down the tile.

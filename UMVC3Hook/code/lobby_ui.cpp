@@ -1,4 +1,5 @@
 #include "lobby_ui.h"
+#include "space_bg.h"
 #include "lobby_music.h"
 
 #include <algorithm>
@@ -2078,12 +2079,11 @@ void LobbyUi::DrawBackdrop(Canvas& canvas) const
     // pushed far back so panels and text read.
     canvas.Sprite(TEX_WHITE, 0.0f, 0.0f, kScreenW, kScreenH, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
                   Color{0.02f, 0.03f, 0.07f, 0.74f});
-    // In a room the native lobby's comic plate fades in over it, in the tint
-    // its own layout (a_lic_bg) gives it.
+    // In a room the space backdrop fades in over it: stars and a scrolling
+    // grid, after the lobby of the first game (space_bg.cpp).
     if (roomBackdrop_ > 0) {
         const float t = roomBackdrop_ / static_cast<float>(kRoomBackdropFrames);
-        canvas.Sprite(TEX_ROOM_BACKDROP, 0.0f, 0.0f, kScreenW, kScreenH, kFullUv, A_TL,
-                      Color{0.2235f, 0.2235f, 0.2745f, t * t * (3.0f - 2.0f * t)});
+        DrawSpaceBackground(canvas, frame_, t * t * (3.0f - 2.0f * t));
     }
     canvas.Sprite(TEX_WHITE, 0.0f, 0.0f, kScreenW, 132.0f, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
                   Color{0.0f, 0.0f, 0.0f, 0.38f});

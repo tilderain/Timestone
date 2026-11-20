@@ -105,6 +105,10 @@ enum Tex : uint16_t {
     // stage. See StageIcon.
     TEX_STAGE_FIRST,
     TEX_STAGE_LAST = TEX_STAGE_FIRST + 19,
+    // The star layer of the lobby's space backdrop (space_bg.cpp): the one
+    // image the plugin ships. Like a profile picture, its pixels are put into
+    // a country flag texture the lobby never draws.
+    TEX_SPACE_STARS,
     TEX_COUNT,
 };
 
@@ -189,6 +193,11 @@ public:
     // uUiAnmSpriteFrame: the texture's outer thirds are added around it.
     virtual void Frame(Tex tex, float x, float y, float w, float h, Uv uv,
                        Anchor anchor, Color color) = 0;
+
+    // A straight line from (x0, y0) to (x1, y1), `width` across: a flat
+    // coloured quad turned to lie along it. The only primitive that is not
+    // axis-aligned; the space backdrop's curved grid is drawn with it.
+    virtual void Line(float x0, float y0, float x1, float y1, float width, Color color) = 0;
 
     // `scale` is the horizontal scale; the vertical one is scale * stretch
     // (the native main menu draws its labels about 1.3 times taller than wide).

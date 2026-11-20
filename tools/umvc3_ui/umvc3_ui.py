@@ -336,6 +336,24 @@ FONTS = {0: ('nrodinpro_BM_HQ_NOMIP', 32, 32), 1: ('acme_BM_NOMIP', 32, 16),
          4: ('bada_b_BM_HQ_NOMIP', 64, 16)}
 
 
+# The flag texture that hosts the plugin's star image in game (TEX_SPACE_STARS),
+# and the image as the plugin builds it: the embedded tile, 2 x 2.
+SPACE_STARS_HOST = 'lic_flag_germany_BM_HQ_NOMIP'
+SPACE_STARS_TILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                                'UMVC3Hook', 'assets', 'space_stars_512.dxt1')
+
+
+def space_stars_texture():
+    import numpy as np
+    from PIL import Image
+    blocks = np.frombuffer(open(SPACE_STARS_TILE, 'rb').read(), np.uint8).reshape(-1, 8)
+    texels = _dxt_color_blocks(blocks, True)
+    tile = texels.reshape(128, 128, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(512, 512, 4)
+    tile = tile.astype(np.uint8).copy()
+    tile[:, :, 3] = 255
+    return Image.fromarray(np.tile(tile, (2, 2, 1)), 'RGBA')
+
+
 class Renderer:
     def __init__(self, cache):
         self.cache = cache
@@ -344,6 +362,8 @@ class Renderer:
 
     def texture(self, name):
         base = name.replace('\\', '/').split('/')[-1]
+        if base == SPACE_STARS_HOST and base not in self.textures:
+            self.textures[base] = space_stars_texture()
         if base not in self.textures:
             from PIL import Image
             path = os.path.join(self.cache, base + '.png')
@@ -484,6 +504,29 @@ class Renderer:
                     self.frame(canvas, command)
                 elif command['type'] == 'text':
                     self.text(canvas, command)
+                elif command['type'] == 'line':
+                    # Drawn four times the size and scaled down, for edges as
+                    # soft as the game's own filtering gives a thin quad.
+                    from PIL import Image, ImageDraw
+                    box = [min(command['from'][0], command['to'][0]) - 4,
+                           min(command['from'][1], command['to'][1]) - 4,
+                           max(command['from'][0], command['to'][0]) + 4,
+                           max(command['from'][1], command['to'][1]) + 4]
+                    box = [int(box[0]), int(box[1]), int(box[2]) + 1, int(box[3]) + 1]
+                    w, h = box[2] - box[0], box[3] - box[1]
+                    layer = Image.new('RGBA', (w * 4, h * 4), (0, 0, 0, 0))
+                    rgba = tuple(int(max(0.0, min(1.0, c)) * 255) for c in command['color'])
+                    ImageDraw.Draw(layer).line(
+                        [((command['from'][0] - box[0]) * 4, (command['from'][1] - box[1]) * 4),
+                         ((command['to'][0] - box[0]) * 4, (command['to'][1] - box[1]) * 4)],
+                        fill=rgba, width=max(1, int(round(command['width'] * 4))))
+                    # Only the part of the box that is on the canvas.
+                    left, top = max(0, box[0]), max(0, box[1])
+                    right, bottom = min(canvas.width, box[2]), min(canvas.height, box[3])
+                    if right > left and bottom > top:
+                        canvas.alpha_composite(
+                            layer.resize((w, h), Image.LANCZOS), (left, top),
+                            (left - box[0], top - box[1], right - box[0], bottom - box[1]))
             except KeyError as error:
                 missing.add(str(error))
         canvas.convert('RGB').save(out_path)

@@ -92,6 +92,9 @@ void BuildGenerated()
             snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
                      "ui\\lic\\lic_flag_i\\lic_flag_%s_BM_HQ_NOMIP",
                      kAvatarHosts[i - kLicenseIcons]);
+        else if (i == TEX_SPACE_STARS - TEX_ICON_FIRST)
+            snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
+                     "ui\\lic\\lic_flag_i\\lic_flag_germany_BM_HQ_NOMIP");
         else if (i >= TEX_STAGE_FIRST - TEX_ICON_FIRST) {
             // Slot 0 is the RANDOM icon ("99", localized as typeC); the
             // second set of stages (ids 100 and up) is the "_b" art.

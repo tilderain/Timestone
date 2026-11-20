@@ -4,6 +4,7 @@
 #include "../pch.h"
 #include "lobby_native.h"
 #include "lobby_avatar.h"
+#include "space_bg.h"
 #include "steam_lobby.h"
 #include "lobby_ui.h"
 #include "mk10utils.h"
@@ -100,6 +101,7 @@ constexpr uint32_t CUNIT_DRAW = 0x800;
 constexpr size_t UCOORD_PARENT = 0x40;
 constexpr size_t UCOORD_PARENT_NO = 0x48;
 constexpr size_t UCOORD_POS = 0x50;
+constexpr size_t UCOORD_QUAT = 0x60;   // x, y, z, w; identity on every unit but a line
 constexpr size_t UCOORD_SCALE = 0x70;
 constexpr size_t SPRITE_GEOMETRY_DIRTY = 0x108;
 constexpr size_t SPRITE_COLOR = 0x310;       // packed R,G,B,A bytes
@@ -470,9 +472,84 @@ void ReleaseAvatar(int index)
     slot = AvatarSlot{};
 }
 
+// ---------------------------------------------------------------------------
+// The space backdrop's star texture (space_bg.cpp)
+//
+// The plugin's one shipped image, embedded as the SPACE_STARS resource. It is
+// put into a country flag texture exactly as a profile picture is, in the
+// same pixel format, and taken out again with them.
+// ---------------------------------------------------------------------------
+struct SpaceStars {
+    void* original = nullptr; // the flag's own GPU texture
+    void* ours = nullptr;
+    uint32_t nextTry = 0;
+    bool failed = false;      // the resource is missing or malformed: do not retry
+};
+SpaceStars g_spaceStars;
+
+void ReleaseSpaceStars()
+{
+    if (g_spaceStars.ours) {
+        if (void* texture = g_textures[TEX_SPACE_STARS])
+            Field<void*>(texture, RTEXTURE_GPU_TEXTURE) = g_spaceStars.original;
+        using Release = void(__fastcall*)(void*);
+        (*reinterpret_cast<Release*>(*reinterpret_cast<uint8_t**>(g_spaceStars.ours) +
+                                     NDRAW_TEXTURE_VT_RELEASE))(g_spaceStars.ours);
+    }
+    g_spaceStars = SpaceStars{};
+}
+
+// True once `host` (the flag's rTexture, loaded) shows the stars.
+bool EnsureSpaceStars(void* host)
+{
+    if (g_spaceStars.ours) return true;
+    if (g_spaceStars.failed || g_frame < g_spaceStars.nextTry) return false;
+    g_spaceStars.nextTry = g_frame + kAvatarRetryFrames;
+    void* current = Field<void*>(host, RTEXTURE_GPU_TEXTURE);
+    if (!current || Field<uint32_t>(host, RTEXTURE_WIDTH) != kAvatarSize ||
+        Field<uint32_t>(host, RTEXTURE_HEIGHT) != kAvatarSize)
+        return false;
+
+    HMODULE module = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&ReleaseSpaceStars), &module);
+    HRSRC resource = module ? FindResourceA(module, "SPACE_STARS", RT_RCDATA) : nullptr;
+    HGLOBAL loaded = resource ? LoadResource(module, resource) : nullptr;
+    const uint8_t* tile = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
+    const size_t size = resource ? SizeofResource(module, resource) : 0;
+    std::vector<uint8_t> rgba(kSpaceStarsRgbaBytes);
+    if (!BuildSpaceStarsRgba(tile, size, rgba.data())) {
+        g_spaceStars.failed = true;
+        HookLog("LobbyNative: space backdrop star tile missing or wrong size (%u bytes)\n",
+                static_cast<unsigned>(size));
+        return false;
+    }
+    std::vector<uint8_t> encoded(static_cast<size_t>(kSpaceStarsSize) * kSpaceStarsSize);
+    EncodeIconFormat(rgba.data(), kSpaceStarsSize, kSpaceStarsSize, encoded.data());
+
+    using Allocate = void*(__fastcall*)(size_t, uint32_t);
+    using Construct = void*(__fastcall*)(void*, uint16_t, uint32_t, uint8_t, uint32_t, uint32_t,
+                                         int32_t, uint32_t, void*, uint32_t, void*);
+    void* memory = Native<Allocate>(NDRAW_TEXTURE_ALLOC)(NDRAW_TEXTURE_SIZE, 0x10);
+    if (!memory) return false;
+    // As for a profile picture, at this image's size.
+    void* created = Native<Construct>(NDRAW_TEXTURE_CTOR)(
+        memory, kSpaceStarsSize, kSpaceStarsSize, 1, 1, kTexFormatIcon, 0, 0, nullptr, 0,
+        encoded.data());
+    if (!created) return false;
+    g_spaceStars.original = current;
+    g_spaceStars.ours = created;
+    Field<void*>(host, RTEXTURE_GPU_TEXTURE) = created;
+    HookLog("LobbyNative: space backdrop stars uploaded (%dx%d)\n", kSpaceStarsSize,
+            kSpaceStarsSize);
+    return true;
+}
+
 void ReleaseAllAvatars()
 {
     for (int i = 0; i < kAvatarSlots; ++i) ReleaseAvatar(i);
+    ReleaseSpaceStars(); // hosted the same way, released at the same points
 }
 
 bool UploadAvatar(int index)
@@ -572,6 +649,11 @@ void ApplyPlacement(void* unit, float x, float y, float scaleX, float scaleY, An
     Field<float>(unit, UCOORD_POS) = x;
     Field<float>(unit, UCOORD_POS + 4) = y;
     Field<float>(unit, UCOORD_POS + 8) = 0.0f;
+    // Pooled units are reused: one that drew a line last frame is turned.
+    Field<float>(unit, UCOORD_QUAT) = 0.0f;
+    Field<float>(unit, UCOORD_QUAT + 4) = 0.0f;
+    Field<float>(unit, UCOORD_QUAT + 8) = 0.0f;
+    Field<float>(unit, UCOORD_QUAT + 12) = 1.0f;
     Field<float>(unit, UCOORD_SCALE) = scaleX;
     Field<float>(unit, UCOORD_SCALE + 4) = scaleY;
     Field<float>(unit, UCOORD_SCALE + 8) = 1.0f;
@@ -608,6 +690,8 @@ public:
         if (color.a <= 0.004f || w <= 0.0f || h <= 0.0f) return;
         void* texture = GetTexture(tex);
         if (!texture) return;
+        // Never the flag that hosts them: the stars or nothing.
+        if (tex == TEX_SPACE_STARS && !EnsureSpaceStars(texture)) return;
         void* unit = AcquireUnit(KIND_SPRITE);
         if (!unit) return;
         ApplyTextured(unit, tex, texture, w, h, uv);
@@ -619,6 +703,26 @@ public:
         Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
             tex == TEX_ROOM_BACKDROP ? attr & ~SPRITE_PRIMITIVE_ATTR_HQ_ONLY : attr;
         ApplyPlacement(unit, x, y, 1.0f, 1.0f, anchor, color);
+    }
+
+    void Line(float x0, float y0, float x1, float y1, float width, Color color) override
+    {
+        const float dx = x1 - x0, dy = y1 - y0;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        if (color.a <= 0.004f || length <= 0.01f || width <= 0.0f) return;
+        void* texture = GetTexture(TEX_WHITE);
+        if (!texture) return;
+        void* unit = AcquireUnit(KIND_SPRITE);
+        if (!unit) return;
+        // A flat quad as long as the line, centred on its middle and turned
+        // about the screen's axis (uCoord's rotation, a quaternion).
+        ApplyTextured(unit, TEX_WHITE, texture, length, width, Uv{0.25f, 0.25f, 0.75f, 0.75f});
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
+            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        ApplyPlacement(unit, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 1.0f, 1.0f, A_MC, color);
+        const float half = std::atan2(dy, dx) * 0.5f;
+        Field<float>(unit, UCOORD_QUAT + 8) = std::sin(half);
+        Field<float>(unit, UCOORD_QUAT + 12) = std::cos(half);
     }
 
     void Frame(Tex tex, float x, float y, float w, float h, Uv uv, Anchor anchor,
