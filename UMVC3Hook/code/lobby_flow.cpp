@@ -1797,9 +1797,12 @@ void UpdateMatchStart(bool cancelPressed)
         AbortMatchStart(nullptr);
         return;
     }
-    // Teams and delay picks are chosen in the prompts, after the connection.
+    // Teams, preferred stages and delay picks are chosen in the prompts, after
+    // the connection: what the room says now is what the match starts with.
     g_pairing.localTeam = current.localTeam;
     g_pairing.opponentTeam = current.opponentTeam;
+    g_pairing.localStage = current.localStage;
+    g_pairing.opponentStage = current.opponentStage;
     g_pairing.localDelayPick = current.localDelayPick;
     g_pairing.opponentDelayPick = current.opponentDelayPick;
     // The prompts show this in place of the room's estimate, and "Auto" is
