@@ -1379,6 +1379,11 @@ void D3D9ResetDiagnostics_NoteGameThread()
     D3D9ResetDiagnostics_StartStartupWatchdog();
 }
 
+bool D3D9Reset_TransitionInProgress()
+{
+    return g_transitions.load() != 0;
+}
+
 void D3D9ResetDiagnostics_CompleteStartup()
 {
     InterlockedExchange(&g_startupComplete, 1);

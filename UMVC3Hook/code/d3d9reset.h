@@ -20,6 +20,9 @@ bool D3D9Reset_IsNativeCreation(IDirect3DDevice9** output);
 // A successful Begin holds the plugin device lock until End. Never hold this
 // lease across the original EndScene, Reset, or a native UI-thread submission.
 bool D3D9Reset_BeginOverlay(IDirect3DDevice9* device);
+// True while a native graphics transition (start-up, or a change of
+// resolution or mode) is rebuilding the renderer and restyling the window.
+bool D3D9Reset_TransitionInProgress();
 void D3D9Reset_EndOverlay();
 // Call while holding the overlay lease. Setters persist and queue changes;
 // native properties and device resets are applied only at the safe boundary.

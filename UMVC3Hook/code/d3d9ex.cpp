@@ -566,6 +566,20 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
     HWND window, const RGNDATA* dirty)
 {
     HRESULT result;
+    if (device == exDevice && D3D9Reset_TransitionInProgress()) {
+        // The renderer is being rebuilt and the window restyled under it.
+        // DXVK presents on its own thread, so a present issued now is still
+        // in flight while the window changes; at start-up that left
+        // vkQueuePresentKHR blocked for good and the game frozen on its next
+        // buffer lock (Proton, 2026-11-20). Nothing worth showing has been
+        // drawn in a transition, so the frame is simply not presented.
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            HookLog("D3D9Ex: not presenting during a graphics transition\n");
+        }
+        return D3D_OK;
+    }
     if (device == exDevice) {
         // Before the pacing hold, so the hold absorbs the time this takes.
         WarmTextures();

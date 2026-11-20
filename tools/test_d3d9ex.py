@@ -216,6 +216,7 @@ auto originalTextureUnmap = NativeUnmap;
 enum class LagMetric { BackendPresent };
 struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
 int64_t FramePacing_BeforePresent(Device*) { return 0; }
+bool D3D9Reset_TransitionInProgress() { return false; }
 void FramePacing_OnPresent(Device*, int64_t) {}
 bool immediatePresent = false, forceImmediateRefused = false;
 int binds = 0;
