@@ -440,9 +440,16 @@ void SteamRoomService::JoinQueue(int slot)
 void SteamRoomService::LeaveQueue()
 {
     if (local_.queueSlot < 0) return;
-    // Watching that came with the place in line goes with it.
-    if (watchIntent_ == local_.queueSlot) watchIntent_ = -1;
+    // Out of the line is out altogether: no watching either, whichever setup
+    // it was for and whether or not a match is being joined right now.
+    watchIntent_ = -1;
+    resumeWatch_ = -1;
     local_.queueSlot = -1;
+    if (local_.watchSlot >= 0) {
+        local_.watchSlot = -1;
+        local_.upstream = 0;
+        if (local_.status == MemberStatus::Watching) local_.status = MemberStatus::Idle;
+    }
     PublishLocal();
     RefreshRoom();
 }
@@ -720,6 +727,21 @@ void SteamRoomService::RefreshResults()
         const char* hostIcon = SteamRoom_GetLobbyData(result.id, kHostIconKey);
         const int icon = hostIcon ? atoi(hostIcon) : kIconSteam;
         result.hostIcon = static_cast<int16_t>(icon < kIconSteam || icon > kIconMax ? kIconSteam : icon);
+    }
+    // What the lobby list is showing, whenever that set changes.
+    static uint64_t listed = ~0ull;
+    uint64_t signature = static_cast<uint64_t>(resultCount_);
+    for (int i = 0; i < resultCount_; ++i)
+        signature = signature * 1099511628211ull ^ results_[i].id ^
+                    (static_cast<uint64_t>(results_[i].members) << 56);
+    if (signature != listed) {
+        listed = signature;
+        HookLog("LobbyRoom: lobby list shows %d\n", resultCount_);
+        for (int i = 0; i < resultCount_; ++i)
+            HookLog("LobbyRoom:   %llu \"%s\" %d/%d compatible=%d friend=%d\n",
+                    static_cast<unsigned long long>(results_[i].id), results_[i].name,
+                    results_[i].members, results_[i].maxMembers, results_[i].compatible ? 1 : 0,
+                    results_[i].friendLobby ? 1 : 0);
     }
 }
 
@@ -1035,7 +1057,9 @@ void SteamRoomService::Pump()
     const bool pending = SteamLobby_GetPendingKind() != 0;
     if ((joining_ || creating_) && !pending) {
         if (!inRoom && !error_[0])
-            SetError(creating_ ? "Failed to create game session." : "Could not enter the lobby.");
+            SetError(creating_ ? "Failed to create game session."
+                     : SteamLobby_GetLastJoinRefusal() == 4 ? "LOBBY IS FULL"
+                     : "Could not enter the lobby.");
         joining_ = false;
         creating_ = false;
     }

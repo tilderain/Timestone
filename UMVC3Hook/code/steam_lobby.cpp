@@ -112,6 +112,7 @@ size_t g_resultCount = 0;
 uint64_t g_friendLobbyCandidates[kMaxFriendLobbyCandidates] = {};
 size_t g_friendLobbyCandidateCount = 0;
 bool g_resultsChanged = false;
+int g_lastJoinRefusal = 0; // EChatRoomEnterResponse of the last refused join
 uint64_t g_lobbyId = 0;
 bool g_isHost = false;
 // Room mode: the lobby is a multi-player room. Membership no longer implies a
@@ -1221,6 +1222,7 @@ void SteamLobby_Join(uint64_t lobbyId)
         return;
     }
     ClearLobbyRichPresence();
+    g_lastJoinRefusal = 0;
     g_pendingHandle = g_api.JoinLobby(g_matchmaking, lobbyId);
     g_pendingCall = PendingCall::Join;
     g_isHost = false;
@@ -1253,6 +1255,9 @@ void SteamLobby_Pump()
             g_pendingCall = PendingCall::None;
             g_pendingHandle = 0;
             UpdateSearchStatus();
+            HookLog("SteamLobby: search returned %u public lobbies; %u listed with friends'\n",
+                    static_cast<unsigned>(result.m_nLobbiesMatching),
+                    static_cast<unsigned>(g_resultCount));
         }
     } else if (g_pendingCall == PendingCall::Create) {
         LobbyCreated_t result = {};
@@ -1310,6 +1315,13 @@ void SteamLobby_Pump()
             g_pendingCall = PendingCall::None;
             g_pendingHandle = 0;
             if (result.m_EChatRoomEnterResponse != 1 || !result.m_ulSteamIDLobby) {
+                // EChatRoomEnterResponse: 2 gone, 3 not allowed, 4 full, 6 banned,
+                // 7 limited account, 10/11 blocked by or blocking a member.
+                g_lastJoinRefusal = result.m_EChatRoomEnterResponse == 1
+                    ? 2 : static_cast<int>(result.m_EChatRoomEnterResponse);
+                HookLog("SteamLobby: lobby %llu refused the join (response %u)\n",
+                        static_cast<unsigned long long>(result.m_ulSteamIDLobby),
+                        static_cast<unsigned>(result.m_EChatRoomEnterResponse));
                 SetStatus("Could not enter Steam lobby");
                 SteamLobby_Search();
             } else {
@@ -1689,6 +1701,8 @@ void SteamLobby_EndSession()
     else
         SteamLobby_Shutdown(false);
 }
+
+int SteamLobby_GetLastJoinRefusal() { return g_lastJoinRefusal; }
 
 int SteamLobby_GetPendingKind()
 {

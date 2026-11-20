@@ -70,6 +70,9 @@ bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
 void SteamLobby_EndSession();
 // 0 = idle, 1 = searching, 2 = creating, 3 = joining.
 int SteamLobby_GetPendingKind();
+// Steam's EChatRoomEnterResponse for the last join it refused (4 = full), 0 if
+// the last join went through.
+int SteamLobby_GetLastJoinRefusal();
 int SteamLobby_GetResultMemberCount(size_t index);
 int SteamLobby_GetResultMemberLimit(size_t index);
 int SteamLobby_GetResultSlotCount(size_t index);

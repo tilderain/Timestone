@@ -183,6 +183,7 @@ private:
     Screen teamReturn_ = Screen::Top;
     uint32_t frame_ = 0;
     uint32_t screenFrame_ = 0; // frames since the current screen was entered
+    uint32_t roomBackdrop_ = 0; // fade of the room's own backdrop, 0..kRoomBackdropFrames
     uint32_t entranceDelay_ = 0;
     uint32_t sfx_ = 0;
     bool prefsDirty_ = false;
@@ -234,6 +235,7 @@ private:
     Handshake handshake_ = Handshake::None; // step shown last frame
     uint32_t handshakeFrames_ = 0;          // frames spent on it
     uint32_t entryFrames_ = 0;              // frames since both delay picks were in
+    uint32_t teamFrames_ = 0;               // of those, frames spent in character select
     int handshakeCursor_ = 0;
     int delayCursor_ = 0;                   // delay pick being chosen
     bool teamForMatch_ = false;             // team screen opened from the Entry step

@@ -43,6 +43,7 @@ const TexInfo kTextures[TEX_ICON_FIRST] = {
     {"ui\\mainmenu\\mai_hlp\\mai_hlp03_BM_HQ_NOMIP", 256, 256, ARC_COMMON, false},
     {"ui\\mainmenu\\mai_hlp\\mai_hlp04_BM_HQ_NOMIP", 256, 256, ARC_COMMON, false},
     {"ui\\net\\net_sprite\\ga_net_hp_a_BM_HQ_NOMIP", 256, 32, ARC_NETROOM, false},
+    {"ui\\mainmenu\\ma_sprite\\meku_menu_co00_BM_NOMIP", 1280, 720, ARC_NETROOM, false},
 };
 
 // The license icon (ui\lic\lic_user_i, 000..239) showing each character, by

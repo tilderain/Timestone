@@ -115,6 +115,10 @@ constexpr uint32_t SPRITE_ATTR_SHADOW = 0x2;
 constexpr uint32_t SPRITE_ATTR_GRADIENT = 0x10;
 constexpr size_t SPRITE_CENTER_ATTR = 0x368;
 constexpr size_t SPRITE_BLEND_STATE = 0x398;
+constexpr size_t SPRITE_PRIMITIVE_ATTR = 0x39C;
+// Set on the sprite prototype (0x1004) and on no native sprite that shows a
+// plain DXT1 texture: those all keep the constructor's 0x1000.
+constexpr uint32_t SPRITE_PRIMITIVE_ATTR_HQ_ONLY = 0x4;
 constexpr size_t FRAME_ATTR = 0x540;         // bit 0: tile the centre cell
 constexpr size_t FONT_MSG_INDEX = 0x594;     // -1 while showing a raw string
 constexpr size_t FONT_CACHED_MSG_ID = 0x6F0;
@@ -607,6 +611,13 @@ public:
         void* unit = AcquireUnit(KIND_SPRITE);
         if (!unit) return;
         ApplyTextured(unit, tex, texture, w, h, uv);
+        // Pooled units are reused, so this is set on every draw. The comic
+        // plate is the one plain DXT1 texture drawn here; it gets the draw
+        // state the native lobby's own backdrop sprite (a_lic_bg) has.
+        const uint32_t attr =
+            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
+            tex == TEX_ROOM_BACKDROP ? attr & ~SPRITE_PRIMITIVE_ATTR_HQ_ONLY : attr;
         ApplyPlacement(unit, x, y, 1.0f, 1.0f, anchor, color);
     }
 

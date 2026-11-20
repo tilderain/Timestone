@@ -78,6 +78,7 @@ enum Tex : uint16_t {
     TEX_PAD_GLYPHS,      // mai_hlp03       controller button glyphs
     TEX_KEY_GLYPHS,      // mai_hlp04       keyboard key glyphs
     TEX_HP_BAR,          // ga_net_hp_a     life bar: black track above, yellow fill below
+    TEX_ROOM_BACKDROP,   // meku_menu_co00  the native lobby's comic plate, 1280x720 (DXT1)
     // The license card's icon set, ui\lic\lic_user_i000..239: the icons a
     // player can pick, among them one portrait per character. See
     // LicenseIcon and CharacterIcon.

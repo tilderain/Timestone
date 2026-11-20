@@ -88,6 +88,8 @@ constexpr int kBrowseRows = 7;
 constexpr int kChatRows = 5;
 constexpr int kChatExpandFrames = 12; // the chat panel's slide open or shut
 constexpr uint32_t kTransitionFrames = 9;
+// The room's backdrop fades in over the title art, and out faster on leaving.
+constexpr uint32_t kRoomBackdropFrames = 90;
 
 // Button glyph cells inside the 4x4 glyph sheets (mai_hlp03 / mai_hlp04).
 struct GlyphCell { uint8_t col, row; };
@@ -168,8 +170,11 @@ constexpr int kTeamRows = 13;
 // Pre-match prompts: how long each waits for an answer (frames at 60 fps).
 // Picking a delay is the ready-up: with no pick, the seat is given up.
 constexpr uint32_t kDelayTimeout = 20 * 60;
-constexpr uint32_t kEntryTimeout = 30 * 60;   // no answer: start immediately
-constexpr uint32_t kTeamTimeout = 40 * 60;    // team screen before a match
+// The start/character-select choice has 30 seconds, and character select 40
+// of its own: one clock per ready-up (teamFrames_), which backing out and
+// going in again does not reset. entryFrames_ counts both.
+constexpr uint32_t kEntryTimeout = 30 * 60;
+constexpr uint32_t kTeamTimeout = 40 * 60;
 
 float Clamp01(float value) { return value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value; }
 float EaseOut(float t) { t = 1.0f - Clamp01(t); return 1.0f - t * t * t; }
@@ -352,7 +357,7 @@ LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs
     if (FindMusicTrack(prefs_.create.music) < 0) prefs_.create.music = kMusicDefault;
     bool knownFormat = false;
     for (int choice : kFirstToChoices) knownFormat |= choice == prefs_.create.firstTo;
-    if (!knownFormat) prefs_.create.firstTo = 1;
+    if (!knownFormat) prefs_.create.firstTo = 3;
     if (prefs_.create.rotation != Rotation::WinnerLeaves) prefs_.create.rotation = Rotation::WinnerStays;
     // The team in use always belongs to a slot. (A reserve unit is checked
     // once the game's profile can be read: RefreshPreset.)
@@ -465,6 +470,7 @@ void LobbyUi::ReturnToRoom()
     if (!service_.Room().inRoom) return;
     screen_ = Screen::Room;
     screenFrame_ = kTransitionFrames;
+    roomBackdrop_ = kRoomBackdropFrames;
     roomMenuOpen_ = false;
     slotMenuOpen_ = false;
     quickChatOpen_ = false;
@@ -563,6 +569,14 @@ bool LobbyUi::MoveCursor(int& cursor, int count, const Input& input, bool wrap)
 void LobbyUi::Update(const Input& input)
 {
     ++frame_;
+    // The team screen keeps the backdrop of the screen it was opened from.
+    const bool roomBackdrop =
+        screen_ == Screen::Room || (screen_ == Screen::Team && teamReturn_ == Screen::Room);
+    if (roomBackdrop) {
+        if (roomBackdrop_ < kRoomBackdropFrames) ++roomBackdrop_;
+    } else {
+        roomBackdrop_ = roomBackdrop_ > 3 ? roomBackdrop_ - 3 : 0;
+    }
     if (entranceDelay_ > 0) {
         --entranceDelay_;
         screenFrame_ = 0;
@@ -612,8 +626,9 @@ void LobbyUi::Update(const Input& input)
         (textTarget_ == TextTarget::PresetName || confirm_ == Confirm::DeletePreset)) {
         // A team being named or deleted while the opponent waits: the clock
         // still runs, and at its end the match starts with the team as it is.
+        ++handshakeFrames_;
         ++entryFrames_;
-        if (++handshakeFrames_ >= kTeamTimeout) {
+        if (++teamFrames_ >= kTeamTimeout) {
             if (textTarget_ != TextTarget::None) EndText(false);
             confirm_ = Confirm::None;
         }
@@ -728,10 +743,9 @@ void LobbyUi::UpdateBrowse(const Input& input)
             Play(SFX_CANCEL);
             ShowNotice(result.versionNotice[0] ? result.versionNotice
                            : "This lobby is running a different Timestone version.");
-        } else if (result.members >= result.maxMembers) {
-            Play(SFX_CANCEL);
-            ShowNotice("LOBBY IS FULL");
         } else {
+            // A lobby that reads as full is tried all the same: the count in
+            // the list can be stale, and Steam has the final say.
             Play(SFX_CONFIRM);
             service_.Join(result.id);
         }
@@ -910,14 +924,32 @@ void LobbyUi::UpdateRoom(const Input& input)
         return;
     }
 
-    // Seats form a list: up/down walks seats, left/right jumps whole slots.
-    int index = seatSlot_ * 2 + seatSide_;
+    const int index = seatSlot_ * 2 + seatSide_;
     int next = index;
-    if (input.up) --next;
-    if (input.down) ++next;
-    if (input.left) next -= 2;
-    if (input.right) next += 2;
-    next = ((next % seatCount) + seatCount) % seatCount;
+    const int slots = room.settings.slotCount;
+    if (slots > 2) {
+        // Three or four setups sit in a two-column grid, each with its seats
+        // stacked: up/down walks the seats of one column, left/right crosses
+        // to the same seat of the setup alongside.
+        const int column = seatSlot_ % 2;
+        const int inColumn = (slots - column + 1) / 2; // setups in this column
+        if (input.up || input.down) {
+            int place = (seatSlot_ / 2) * 2 + seatSide_ + (input.down ? 1 : -1);
+            place = (place + inColumn * 2) % (inColumn * 2);
+            next = ((place / 2) * 2 + column) * 2 + place % 2;
+        }
+        if (input.right || (input.left && column == 1)) {
+            const int across = seatSlot_ + (column == 0 ? 1 : -1);
+            if (across < slots) next = across * 2 + seatSide_;
+        }
+    } else {
+        // One column: the seats form a list.
+        if (input.up) --next;
+        if (input.down) ++next;
+        if (input.left) next -= 2;
+        if (input.right) next += 2;
+        next = ((next % seatCount) + seatCount) % seatCount;
+    }
     if (next != index) {
         seatSlot_ = next / 2;
         seatSide_ = next % 2;
@@ -952,7 +984,7 @@ void LobbyUi::UpdateRoom(const Input& input)
     // appears once the opposite seat is taken.
     if (onOwnSeat) return;
     if (queued && local->queueSlot == seatSlot_) {
-        // Already in line here: watch its matches meanwhile, or step out.
+        // Already in line here: watch its matches meanwhile, or stop.
         slotMenuOpen_ = true;
         slotMenuQueued_ = true;
         slotMenuCursor_ = 0;
@@ -965,7 +997,18 @@ void LobbyUi::UpdateRoom(const Input& input)
     const bool open = !full && SlotQueueLength(seatSlot_) == 0 &&
                       !SeatOccupant(seatSlot_, seatSide_) &&
                       room.slots[seatSlot_] < SlotState::Starting;
-    if (seated && (open || local->slot == seatSlot_)) {
+    if (seated && local->slot == seatSlot_) {
+        // The other seat of one's own setup: move across when it is free,
+        // whoever is in line (they are waiting for the seat left behind).
+        if (!SeatOccupant(seatSlot_, seatSide_) && room.slots[seatSlot_] < SlotState::Starting) {
+            service_.Sit(seatSlot_, seatSide_);
+            Play(SFX_CONFIRM);
+        } else {
+            Play(SFX_CANCEL);
+        }
+        return;
+    }
+    if (seated && open) {
         // One place at a time: give the seat up first.
         Play(SFX_CANCEL);
         return;
@@ -985,9 +1028,9 @@ void LobbyUi::UpdateRoom(const Input& input)
 int LobbyUi::SlotMenuItems(const char* items[3]) const
 {
     if (slotMenuQueued_) {
+        // Leaving the line is the cancel button's job, not this menu's.
         items[0] = service_.WatchIntent() == seatSlot_ ? "STOP SPECTATING" : "SPECTATE";
-        items[1] = "LEAVE QUEUE";
-        return 2;
+        return 1;
     }
     for (int i = 0; i < kSlotMenuCount; ++i) items[i] = kSlotMenuItems[i];
     return kSlotMenuCount;
@@ -1006,14 +1049,7 @@ void LobbyUi::UpdateSlotMenu(const Input& input)
     slotMenuOpen_ = false;
     Play(SFX_CONFIRM);
     if (slotMenuQueued_) {
-        const int watching = service_.WatchIntent();
-        if (slotMenuCursor_ == 0) {
-            service_.SetWatchIntent(watching == seatSlot_ ? -1 : seatSlot_);
-        } else {
-            // Leaving the line is not a decision about watching.
-            service_.LeaveQueue();
-            service_.SetWatchIntent(watching);
-        }
+        service_.SetWatchIntent(service_.WatchIntent() == seatSlot_ ? -1 : seatSlot_);
         return;
     }
     // Chosen from a seat: one place at a time.
@@ -1090,7 +1126,7 @@ bool LobbyUi::UpdateHandshake(const Input& input)
         handshakeCursor_ = 0;
         if (step == Handshake::Delay) delayCursor_ = kDelayPickAuto;
         // Both players reach the start/character-select choice together.
-        if (step == Handshake::Entry) entryFrames_ = 0;
+        if (step == Handshake::Entry) entryFrames_ = teamFrames_ = 0;
     }
     // The other player watches the highlight move before it is locked in.
     if (step == Handshake::Delay) service_.HoverDelay(delayCursor_);
@@ -1143,7 +1179,8 @@ bool LobbyUi::UpdateHandshake(const Input& input)
         }
         // START carries the team it starts with: left and right change it.
         if (handshakeCursor_ == 0 && input.left != input.right) StepSlot(input.right ? 1 : -1);
-        if (handshakeFrames_ >= kEntryTimeout || (input.confirm && handshakeCursor_ == 0)) {
+        // Time spent in character select does not count against the choice.
+        if (entryFrames_ - teamFrames_ >= kEntryTimeout || (input.confirm && handshakeCursor_ == 0)) {
             service_.SetReady(true);
             Play(SFX_CONFIRM);
         } else if (input.confirm) {
@@ -1152,7 +1189,7 @@ bool LobbyUi::UpdateHandshake(const Input& input)
             teamReturn_ = Screen::Room;
             teamCursor_ = kTeamRowFirstSlot;
             GoTo(Screen::Team);
-            handshakeFrames_ = 0; // the team screen runs its own clock
+            handshakeFrames_ = 0; // the team screen runs on what is left of the entry clock
         }
         break;
     default:
@@ -1894,8 +1931,9 @@ void LobbyUi::UpdateTeam(const Input& input)
             screenFrame_ = kTransitionFrames;
             return;
         }
-        timedOut = ++handshakeFrames_ >= kTeamTimeout;
+        ++handshakeFrames_;
         ++entryFrames_;
+        timedOut = ++teamFrames_ >= kTeamTimeout;
     }
     if (charPickerOpen_) {
         if (!timedOut) {
@@ -2037,10 +2075,16 @@ void LobbyUi::Draw(Canvas& canvas)
 void LobbyUi::DrawBackdrop(Canvas& canvas) const
 {
     // The title area keeps animating its key art behind the lobby; it is
-    // pushed far back so panels and text read. (The native lobby's own comic
-    // plate is a DXT1 texture that the cloned HQ sprite does not draw.)
+    // pushed far back so panels and text read.
     canvas.Sprite(TEX_WHITE, 0.0f, 0.0f, kScreenW, kScreenH, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
                   Color{0.02f, 0.03f, 0.07f, 0.74f});
+    // In a room the native lobby's comic plate fades in over it, in the tint
+    // its own layout (a_lic_bg) gives it.
+    if (roomBackdrop_ > 0) {
+        const float t = roomBackdrop_ / static_cast<float>(kRoomBackdropFrames);
+        canvas.Sprite(TEX_ROOM_BACKDROP, 0.0f, 0.0f, kScreenW, kScreenH, kFullUv, A_TL,
+                      Color{0.2235f, 0.2235f, 0.2745f, t * t * (3.0f - 2.0f * t)});
+    }
     canvas.Sprite(TEX_WHITE, 0.0f, 0.0f, kScreenW, 132.0f, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
                   Color{0.0f, 0.0f, 0.0f, 0.38f});
 }
@@ -2049,8 +2093,8 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
 {
     const Painter p(canvas, 1.0f, 0.0f);
     p.Fill(0.0f, kFooterY - 4.0f, kScreenW, 60.0f, Color{0.0f, 0.0f, 0.0f, 0.62f});
-    p.Sprite(TEX_YELLOW_BAR, 0.0f, kFooterY - 4.0f, kScreenW, 3.0f, Uv{0.1f, 0.2f, 0.9f, 0.8f}, A_TL,
-             WithAlpha(kWhite, 0.9f));
+    // A faint hairline, just enough to define the strip's top edge.
+    p.Fill(0.0f, kFooterY - 4.0f, kScreenW, 1.0f, Color{1.0f, 1.0f, 1.0f, 0.28f});
 
     // Context prompts, laid out right-to-left.
     Prompt prompts[6];
@@ -2224,7 +2268,7 @@ const char* LobbyUi::DrawTop(Canvas& canvas) const
     // "LOBBY" title art (row 0 of ga_room_subtit2), slightly enlarged.
     p.Sprite(TEX_SUBTITLES2, 76.0f, 68.0f, 68.0f * 1.7f, 30.0f * 1.7f,
              Uv{0.0f, 1.0f / 64.0f, 68.0f / 256.0f, 31.0f / 64.0f}, A_ML);
-    p.Label("Timestone v" UMVC3HOOK_VERSION, 204.0f, 76.0f, 0.62f, A_ML, kYellow);
+    p.Label("Timestone v" UMVC3HOOK_VERSION, kSafeRight, 76.0f, 0.62f, A_MR, kYellow);
 
     DrawTeamCard(canvas, 72.0f, 168.0f, 470.0f);
     // Only the reason Steam is unusable; routine status ("Left Steam lobby") is noise here.
@@ -2537,11 +2581,17 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
             localWaiting |= member.isLocal;
             if (member.queuePos == 1) nextUp = &member;
         }
-        // The slot the local player is in line for stands out in dark blue.
+        // The slot the local player is in line for stands out in dark blue;
+        // one they only watch (no place in its line), in green.
+        const bool localWatching = !localWaiting && local && local->slot < 0 &&
+                                   service_.WatchIntent() == slot;
         p.Box(TEX_PANEL_DARK, x, y, cardW, cardH,
-              localWaiting ? Color{0.5f, 0.68f, 1.0f, 1.0f} : kWhite);
+              localWaiting ? Color{0.5f, 0.68f, 1.0f, 1.0f}
+              : localWatching ? Color{0.55f, 1.0f, 0.6f, 1.0f} : kWhite);
         if (localWaiting)
             p.Fill(x + 5.0f, y + 5.0f, cardW - 10.0f, cardH - 10.0f, Color{0.08f, 0.2f, 0.55f, 0.34f});
+        else if (localWatching)
+            p.Fill(x + 5.0f, y + 5.0f, cardW - 10.0f, cardH - 10.0f, Color{0.08f, 0.42f, 0.16f, 0.34f});
 
         // Grid cards (three or four slots) are too narrow for names in the
         // header: the queue is a number only there.
@@ -2790,7 +2840,6 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
         const float right = x + w - 12.0f, cy = y - 6.0f;
         const Painter tag = p.Faded(Clamp01(chatHoverFrames_ / 4.0f));
         tag.Fill(right - tagW, cy - 17.0f * pop, tagW, 34.0f * pop, Color{0.0f, 0.0f, 0.0f, 0.9f});
-        tag.Fill(right - tagW, cy + 15.0f * pop, tagW, 2.0f * pop, WithAlpha(kYellow, 0.9f));
         float at = right - 10.0f;
         for (int i = 1; i >= first; --i) {
             tag.Text(prompts[i].label, at, cy, scale, A_MR, kText);
@@ -2868,7 +2917,7 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     else if (local && local->slot < 0 && service_.WatchIntent() >= 0)
         help = "You will watch this setup's matches. Stop Watching in a match ends it.";
     else if (local && local->slot < 0)
-        help = "Take a seat, or line up for a setup that is full.";
+        help = "Take a seat.";
 
     if (roomMenuOpen_) {
         // Guests get a mute toggle where the host has the music picker.
@@ -3075,15 +3124,16 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
             }
         }
         limit = kEntryTimeout;
+        elapsed = entryFrames_ - teamFrames_;
         break;
     }
     default:
         p.Text("Ready", cx, y + 130.0f, 0.9f, A_MC, kGreen);
         p.Text("Waiting for opponent.", cx, y + 172.0f, 0.74f, A_MC, kDim);
         if (step == Handshake::WaitStart) {
-            // The longest the opponent can still take: their own choice, then
-            // a full character select opened at the last moment.
-            limit = kEntryTimeout + kTeamTimeout;
+            // The opponent's choice first. Still waiting after that means
+            // they are in character select: then the most that can take.
+            limit = entryFrames_ < kEntryTimeout ? kEntryTimeout : kEntryTimeout + kTeamTimeout;
             elapsed = entryFrames_;
         }
         break;
@@ -3196,8 +3246,8 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
     // after the lists and grids so it stays in sight over them.
     const auto matchClock = [&](const char* help) {
         if (!teamForMatch_) return help;
-        const uint32_t left = handshakeFrames_ < kTeamTimeout
-            ? (kTeamTimeout - handshakeFrames_ + 59) / 60 : 0;
+        const uint32_t left = teamFrames_ < kTeamTimeout
+            ? (kTeamTimeout - teamFrames_ + 59) / 60 : 0;
         char clock[16];
         snprintf(clock, sizeof(clock), "%u", left);
         const Painter fixed = p.Fixed();

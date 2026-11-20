@@ -558,6 +558,11 @@ int main(int argc, char** argv)
             ui.Update(Press(&Input::confirm));
             Settle(ui, 3);
             ok &= Capture(ui, directory, "room_4slot_queued");
+            // Watching only: out of the line, the same setup marked in green.
+            service.LeaveQueue();
+            service.SetWatchIntent(1);
+            Settle(ui, 3);
+            ok &= Capture(ui, directory, "room_4slot_watching");
         }
         if (slots == 2) {
             ui.Update(Press(&Input::menu));

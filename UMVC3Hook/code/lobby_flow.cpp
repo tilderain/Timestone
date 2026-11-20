@@ -559,7 +559,7 @@ UiPrefs LoadPrefs()
     const int visibility = GetPrivateProfileIntA("Lobby", "RoomVisibility", 0, path);
     prefs.create.visibility = visibility == 1 ? Visibility::FriendsOnly
                             : visibility == 2 ? Visibility::Private : Visibility::Public;
-    prefs.create.firstTo = GetPrivateProfileIntA("Lobby", "RoomFirstTo", 1, path);
+    prefs.create.firstTo = GetPrivateProfileIntA("Lobby", "RoomFirstTo", 3, path);
     prefs.create.rotation = GetPrivateProfileIntA("Lobby", "RoomRotation", 1, path) == 2
         ? Rotation::WinnerLeaves : Rotation::WinnerStays;
     prefs.create.music = GetPrivateProfileIntA("Lobby", "RoomMusic", lobby::kMusicDefault, path);

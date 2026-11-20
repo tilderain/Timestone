@@ -226,10 +226,19 @@ and last clone of each pool still have the expected vtable and an alive state,
 and rebuilds from scratch if not.
 
 The backdrop is the title area's own animated key art, dimmed with a
-full-screen fill. The native lobby's comic plate
-(`ui\mainmenu\ma_sprite\meku_menu_co00_BM_NOMIP`) loads but did not draw
-through a cloned sprite in game. It is the only DXT1 texture that was tried;
-every `_HQ_` texture (format `0x2A`) draws. The cause is not established.
+full-screen fill. In a room (and on the team screen opened from one) the
+native lobby's comic plate (`ui\mainmenu\ma_sprite\meku_menu_co00_BM_NOMIP`,
+1280x720, DXT1, in `ui\netroom`) fades in over it across 90 frames, in the
+tint its own layout gives it (`a_lic_bg`: one `Sprite_bg`, `mColor`
+0.2235, 0.2235, 0.2745, `mPass` 11, `mBlendState` 1, `mPrimitiveAttr` `0x1000`).
+
+An earlier attempt drew nothing: the plate loaded but did not show through a
+cloned sprite. The clone's prototype (`icon_RoomFriend`) has `mPrimitiveAttr`
+(`+0x39C`) `0x1004`, while every native sprite with a plain `_BM_NOMIP`
+texture keeps the constructor's `0x1000` (`uBaseSprite__ctor` `0x1402C33B0`;
+`mPass` defaults to 22). The backend now clears bit 2 for this texture only.
+What that bit selects is not established, and the fix is **unverified in
+game**; if the plate still does not draw, the room looks as it did before.
 
 ### Rooms
 

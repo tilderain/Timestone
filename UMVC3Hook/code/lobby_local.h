@@ -20,7 +20,7 @@ constexpr bool kLobbyTestBuild = false;
 constexpr bool LocalLobby_Enabled() { return kLobbyTestBuild; }
 // Extra game windows a lobby test build opens: 1 for a match, 2 or more to
 // have players waiting in a queue (each is a full copy of the game).
-constexpr int kLobbyTestExtraInstances = 2;
+constexpr int kLobbyTestExtraInstances = 1;
 bool LocalLobby_IsChild();
 // Starts the extra game processes (first instance only, once).
 void LocalLobby_SpawnSecondInstance();

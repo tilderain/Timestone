@@ -329,7 +329,11 @@ def sdl_summary(path, frame=0):
 # --------------------------------------------------------------------------
 # Renderer (1280x720 UI space, same primitives as lobby::Canvas)
 # --------------------------------------------------------------------------
-FONTS = {0: ('nrodinpro_BM_HQ_NOMIP', 32, 32), 4: ('bada_b_BM_HQ_NOMIP', 64, 16)}
+# uUiAnmSpriteFont font types: (texture, glyph cell, atlas columns). 1..3 hold
+# U+0020..U+005F only (no lower case).
+FONTS = {0: ('nrodinpro_BM_HQ_NOMIP', 32, 32), 1: ('acme_BM_NOMIP', 32, 16),
+         2: ('bada_BM_NOMIP', 64, 16), 3: ('news_BM_NOMIP', 64, 16),
+         4: ('bada_b_BM_HQ_NOMIP', 64, 16)}
 
 
 class Renderer:
