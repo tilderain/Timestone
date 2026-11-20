@@ -43,6 +43,10 @@ void Rollback_InitOnlineBattleHook();
 
 // Clear or flush model-bounds work deferred during resimulation.
 void Rollback_ClearDeferredModelBounds();
+// A restore took X-Factor away from a character without the game's own end of
+// it running. Puts back what that would have: the outline stencil and, when
+// the dark pulse was going, its colour jobs and the material colours.
+void Rollback_EndStaleXFactorPresentation(uint64_t character, bool pulse);
 void Rollback_FlushDeferredModelBounds();
 
 // Queue, consume, or cancel resimulation requests for the main game thread.

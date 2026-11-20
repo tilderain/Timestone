@@ -129,3 +129,33 @@ runs categories 3, 7-16, 18, 21; `sAction.compact` restores `+28..+10F`,
 
 Plate comments on `sGameUI__setTeamCharacterId`, `uBattleUi__moveAfter`, and
 `sAction__stepFighting` (KO/finish-watch flow).
+
+## Hyper Finish Backdrop On A Rolled-Back K.O. (2026-11-20)
+
+Static analysis, Ghidra 8192; not yet confirmed in a running match.
+
+- The full-screen backdrop of a K.O. by hyper combo is `uAkebonoFinishEffect`
+  (ctor `0x140135780`, DTI `0x140D46948`, a `uGameEffect` that only overrides
+  `updateWorldMatrix 0x140136250` to stay on the camera).
+- An animation command spawns it (`0x1401228A6`: `0x140131660` with effect
+  0x68, `sUnit::addPending` category 13, announcer voice 0x6A) and stores it
+  with `sAction__mpAkebonoFinishEffect__setter 0x14014F000` in **`sAction+0x158`**.
+  The command does nothing while the slot is set
+  (`SharedProperty__getObjectAt158 0x14073EA30`), and the two hyper attack-space
+  commands at `0x1401224E1` / `0x14012260C` skip `sAction__createByLevelAndAttach
+  0x14014DB70` for the same reason.
+- `sAction__subStepHelper 0x14014F410` kills the attack space in `+0x148` and
+  the auxiliary object in `+0x160` every frame the slot is set. Nothing but the
+  setter and the round reset (`sAction__resetExAtkSpaceState 0x14014EFA0`)
+  clears it.
+- `sAction.compact` does not restore `+0x158`, and the unit transaction only
+  takes the slot when it holds one of the nine attack-space vtables
+  (`ActionAttackSpaceFields`, `IsAttackSpace`). So a backdrop spawned by a
+  predicted K.O. stayed up after the rollback, and for as long as it lived no
+  hyper background could be created.
+
+Fix: after the effect and shot restore, the snapshot's own `sAction+0x158`
+(the region is saved whole) is compared with the live slot. A different live
+object is killed through vfn `+0x78` when still pending or running, as the
+native setter does to a superseded one, and the slot is cleared. If the replay
+reaches the K.O. again the command spawns a new one.

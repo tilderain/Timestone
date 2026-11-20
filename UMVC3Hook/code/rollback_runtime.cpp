@@ -372,15 +372,48 @@ static void __fastcall hkResetMaterials(uint64_t model)
     }
 }
 
+void Rollback_EndStaleXFactorPresentation(uint64_t character, bool pulse)
+{
+    if (!character) return;
+    // cChrAbility::Prim::reset (140024BC0) calls vfn +0x340 for an X-Factor
+    // slot: uCharacter__restoreChildMaterials, stencil 3 on the model and its
+    // weapons (4 on character 0x32's), undoing the 0x69 that vfn +0x338 sets
+    // on every X-Factor frame. A restore rewrites the slot directly.
+    if (HasVirtualMethod(character, 0x340))
+        ((void(__fastcall*)(uint64_t))(*(uint64_t**)character)[0x340 / 8])(character);
+    if (!pulse) return;
+    // uCharacter__updateTeamMaterialEffect (1400419D0) started three repeating
+    // jobs, slot 1 of the colour, specular and reflective arrays, and its
+    // latch +41FC is now back at 0, so its own cleanup will not run. Stop
+    // those three (vfn +0x88, as the native start and stop both do) and owe
+    // the model the material reset that puts the colours back.
+    using JobAccessor = uint64_t(__fastcall*)(uint64_t, uint32_t);
+    static const uint64_t accessors[] = {0x140042000ull, 0x140042060ull, 0x140042030ull};
+    for (const uint64_t accessor : accessors) {
+        const uint64_t job = ((JobAccessor)_addr(accessor))(character, 1);
+        if (job && HasVirtualMethod(job, 0x88))
+            ((void(__fastcall*)(uint64_t))(*(uint64_t**)job)[0x88 / 8])(job);
+    }
+    MarkMaterialRepairPending(character);
+}
+
 static bool RepairPendingMaterialCache(uint64_t model)
 {
     const size_t pending = FindPendingMaterialRepair(model);
     if (pending == SIZE_MAX)
         return true;
 
-    if (!IsMaterialCacheReady(model)) {
-        hkResetMaterials(model);
-    }
+    // Still replaying: the reset stays owed until the live timeline.
+    if (g_isResimulating)
+        return IsMaterialCacheReady(model);
+
+    // A reset the game asked for inside a replayed frame was only marked.
+    // It is carried out here, not merely checked: native code resets the
+    // materials to undo what a material job wrote (X-Factor's dark pulse ends
+    // with uCharacter vfn +0x438 in uCharacter__updateTeamMaterialEffect
+    // 0x1400419D0). Skipping it left the character at the job's last colour
+    // for good whenever X-Factor ended in a replayed frame.
+    hkResetMaterials(model);
     if (!IsMaterialCacheReady(model))
         return false;
 

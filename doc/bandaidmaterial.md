@@ -314,3 +314,78 @@ are a removal/testing recommendation, not a verified current implementation.
 No source evidence in the inspected runtime establishes the older experimental
 global material-post timing or exact-class skip as currently installed; see
 [`material_post_scope_20261016.md`](material_post_scope_20261016.md).
+
+## Deferred resets are carried out, not only validated (2026-11-20)
+
+Static analysis, Ghidra 8192; not yet confirmed in a running match.
+
+X-Factor's dark pulse is `uCharacter__updateTeamMaterialEffect` `0x1400419D0`
+(called from `uCharacter__moveAfter` `0x14004C360`, which runs in resim). While
+the team flag `cChrTeam::mFlag & 0x8000` is set it starts three repeating
+colour jobs (0.5 -> 0.1 over 60 frames; `uActorGameModel__getMaterialColorJob`
+slot 1 and two siblings), sets `mMaterialEffectFlags (+0x152C) |= 2` and the
+latch `+0x41FC = 1`. When the flag clears it calls vfn `+0x220`
+(`uActorGameModel__initializeSelectedMaterialVjobs` `0x140200430`, stops the
+jobs whose bit is clear) and then vfn `+0x438`
+(`uCharacter__resetMaterialsIfAlive` `0x14004CD80` ->
+`uBaseModel__resetAllMaterial` `0x14055FBC0`), which is what puts the original
+colours back. `uCharacter__move_base` does the same for flag bit 4 at
+`0x14004C030`.
+
+`hkResetMaterials` skips that reset for a live character during resim and
+marks the model. `RepairPendingMaterialCache` then re-ran the reset only if
+the cache failed validation, so with a healthy cache the reset was dropped: the
+jobs were stopped, nothing restored the colours, and the character stayed dark
+whenever X-Factor ended inside a replayed frame. It now performs the marked
+reset on the first live pass (and leaves the mark alone while still replaying).
+
+Cost: a reset marked in a replay whose outcome is later rolled back is still
+carried out once. An active job rewrites its colours the next frame, and the
+X-Factor stencil `0x69` is set again on every X-Factor frame (below). A stencil
+set once by something else (a cut-in) is not re-applied until its owner does.
+
+## X-Factor state audit (2026-11-20)
+
+Static analysis, Ghidra 8192. Where X-Factor lives and what a rollback does
+with it:
+
+| State | Where | Rollback |
+|---|---|---|
+| Active flag, timer, set time, resistance time, level, per-level set times, armour flag, stock count | `cChrTeam::mFlag & 0x8000`, `+0xC0`, `+0xC4`, `mXFactorResAddTime`, `+0xDC`, `+0xC8..+0xD0`, `mArmorXFactor`, `+0x2A8` | Whole team object (`TEAM_SIZE 0x2C0`) is saved and restored |
+| The ability itself: speed, damage and flag payload | `cChrAbility` at `uCharacter+0x1560`, six inline `Prim` of `0x80` from `+0x1570`, type at `Prim+0x0C` (4 = X-Factor) | `Prim+0x08..+0x77` restored; the sound cookie `+0x78` stays live |
+| Dark-pulse latch and its flag bits | `+0x41FC`, `mMaterialEffectFlags +0x152C & 2`, `mNo2F +0x1500 & 0x8000000` | Restored with the character |
+| Dark-pulse jobs | slot 1 of the colour, specular and reflective job arrays (`0x140042000`, `0x140042060`, `0x140042030`) | Not rewound: presentation |
+| Outline stencil `0x69` / `3` | `nDraw::Material` of the model and weapons | Not rewound: presentation |
+| Screen filter | `uXFactorOutlineFilter__move 0x140139750` | Recomputed from the abilities every frame |
+| Aura effect 0x24 | spawned by `getCharacterInstallPointer 0x140023B70` | An ordinary effect; ends itself when the ability is gone |
+
+Activation is `0x140021740` (team): request bit `0x10000` from the character's
+ability flags, then `mFlag |= 0x8000`, level, `initializeCharacterXFactorAbility
+0x140021170` per member, announcer and voice requests, stock decrement. Expiry
+is the tail of `cChrTeam__updateAggregateState 0x140022870`: flag cleared,
+`cChrAbility__resetSlotByType(4)` per member. `Prim::updateAndExpire
+0x140024E90` calls vfn `+0x338` (`uCharacter__hideChildMaterialsIfInactive`,
+stencil `0x69`) on every X-Factor frame and `Prim::reset 0x140024BC0` calls vfn
+`+0x340` (`uCharacter__restoreChildMaterials`, stencil `3`). No shot class
+tests for X-Factor: nothing about projectiles is specific to it.
+
+Two gaps, both presentation and both now closed:
+
+1. The end-of-pulse material reset dropped when it fell in a replayed frame
+   (section above).
+2. A restore that removes X-Factor rewrites the ability slot and the latch
+   directly, so neither `Prim::reset` nor the pulse cleanup runs. When the
+   X-Factor only existed in predicted frames (a local activation that the
+   corrected timeline refuses, for instance because the character was in fact
+   hit first), the stencil stayed `0x69` and the three jobs kept pulsing with
+   the latch at 0, for the rest of the round. The character restore now
+   compares live and saved state and, on that transition, calls
+   `Rollback_EndStaleXFactorPresentation`: vfn `+0x340`, and for a lost pulse
+   vfn `+0x88` on the three jobs plus an owed material reset. If the replay
+   activates X-Factor again the game sets everything up again.
+
+Not covered here: a `uGameEffectModel` with control bit `0x8000000` keeps its
+own stencil latch (`+0x8A8 & 0x10000000`, `updateOwnerState 0x14013B700`); a
+phantom X-Factor can leave such a model at `0x69`, visible only as an outline
+during the opponent's X-Factor. Sounds requested at activation go through the
+sound layer and were not audited.

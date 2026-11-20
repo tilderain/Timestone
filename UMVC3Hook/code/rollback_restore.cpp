@@ -486,6 +486,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
     uint64_t sCollision = *(uint64_t*)_addr(PTR_SCOLLISION);
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
     uint64_t sAction = sMvc3Mgr ? *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET) : 0;
+    uint64_t savedFinishEffect = 0; // sAction+0x158 as the snapshot had it
+    bool haveSavedFinishEffect = false;
     uint64_t modelJointAllocationSlot = 0;
     uint64_t liveModelJointAllocation = 0;
     if (sAction) {
@@ -835,6 +837,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
             }
         } else if ((uint64_t)slot.regions[i].ptr == sAction &&
                    slot.regions[i].size == 0x300) {
+            if (copySize >= 0x160) {
+                savedFinishEffect = *(const uint64_t*)(slot.data + offset + 0x158);
+                haveSavedFinishEffect = true;
+            }
             for (const SnapshotRange& range : SACTION_RESTORE_RANGES) {
                 if ((size_t)range.offset + range.size <= copySize) {
                     std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
@@ -948,6 +954,17 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
                 break;
             }
+            // X-Factor as the live object has it, before the restore: an
+            // ability slot of type 4 (Prim +0x0C) and the dark-pulse latch.
+            const auto hasXFactor = [](const uint8_t* object) {
+                for (uint32_t prim = 0; prim < 6; ++prim)
+                    if (*(const int32_t*)(object + 0x1570 + prim * 0x80 + 0x0C) == 4) return true;
+                return false;
+            };
+            const bool xfState = copySize >= 0x4200;
+            const bool liveXFactor = xfState && hasXFactor((const uint8_t*)slot.regions[i].ptr);
+            const bool livePulse = xfState &&
+                *(const uint32_t*)((const uint8_t*)slot.regions[i].ptr + 0x41FC) == 1;
             const auto status = Rollback_RestoreCharacterFields(
                 slot.regions[i].ptr, slot.regions[i].size, slot.data + offset,
                 copySize, concreteDti, roster);
@@ -1012,6 +1029,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                 savedCharacter + primOffset + sizeof(uint64_t),
                                 0x70);
                 }
+            }
+            // The restore took X-Factor (or its dark pulse) away without the
+            // game ending it: an activation that only happened in the
+            // predicted frames. If the replay activates it again, the game
+            // sets all of this up again.
+            if (xfState) {
+                const bool pulseGone = livePulse && *(const uint32_t*)(savedCharacter + 0x41FC) == 0;
+                if ((liveXFactor && !hasXFactor(savedCharacter)) || pulseGone)
+                    Rollback_EndStaleXFactorPresentation((uint64_t)character, pulseGone);
             }
 
             // Rebind attack ownership and restore its scalar header; handle target tables below.
@@ -1241,6 +1267,25 @@ void Rollback_RestoreSnapshot(int32_t frame)
         RollbackUnit_RestoreEffects(frame);
         lifetimeStage.Next(LagMetric::RestoreShots);
         RollbackUnit_RestoreShots(frame);
+    }
+
+    // sAction::mpAkebonoFinishEffect (+0x158): the full-screen backdrop of a
+    // K.O. by hyper combo, spawned by an animation command (0x1401228A6) and
+    // kept until the round is torn down. While the slot is set sAction kills
+    // every hyper attack space (sAction__subStepHelper 0x14014F410) and the
+    // command will not spawn another. One spawned in the frames this restore
+    // takes back belongs to a K.O. that has not happened: end it the way the
+    // native setter (0x14014F000) ends a superseded one, and free the slot.
+    if (haveSavedFinishEffect && sAction) {
+        uint64_t& finishEffect = *(uint64_t*)(sAction + 0x158);
+        if (finishEffect && finishEffect != savedFinishEffect) {
+            const uint32_t state = *(const uint32_t*)(finishEffect + 0x10) & 7;
+            if (state == 1 || state == 2)
+                ((void(__fastcall*)(uint64_t))(*(uint64_t**)finishEffect)[0x78 / 8])(finishEffect);
+            HookLog("Rollback: ended a hyper finish effect from the rolled-back frames "
+                    "(effect=0x%llX state=%u)\n", finishEffect, state);
+            finishEffect = 0;
+        }
     }
 
     // Characters hold weak references to their shots and effects (Amaterasu's
