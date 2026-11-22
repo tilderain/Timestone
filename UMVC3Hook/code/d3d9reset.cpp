@@ -908,6 +908,26 @@ void __fastcall HookResultHandler(void* app, int32_t result,
         HookLog("D3D9: failure HRESULT=0x%08X operation=%s caller=%p thread=%lu context=%p\n",
             (uint32_t)result, operation ? operation : "<null>",
             __builtin_return_address(0), GetCurrentThreadId(), (void*)context);
+        // The return address above is only the game's own lock or create
+        // wrapper; who called that says which buffer it was (the per-frame
+        // ring, a model being loaded, ...). Game addresses are shown as in
+        // the unrelocated image.
+        void* frames[8] = {};
+        const USHORT count = CaptureStackBackTrace(1, 8, frames, nullptr);
+        const uintptr_t exe = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+        char callers[8 * 20 + 1] = {};
+        size_t used = 0;
+        for (USHORT i = 0; i < count && used + 20 < sizeof(callers); ++i) {
+            uintptr_t address = reinterpret_cast<uintptr_t>(frames[i]);
+            if (address >= exe && address - exe < 0x1000000) address = address - exe + 0x140000000ull;
+            used += std::snprintf(callers + used, sizeof(callers) - used, " %llX",
+                                  static_cast<unsigned long long>(address));
+        }
+        HookLog("D3D9: failure callers:%s\n", callers);
+        D3D9Ex_LogState();
+        // A failure inside a graphics transition is the reset path's to
+        // handle, and says nothing about the backend.
+        if (FAILED(result) && !g_inTransition) D3D9Ex_NoteFailure();
         HookLogFlush();
     }
     if (FAILED(result) && g_inTransition)
@@ -1151,6 +1171,26 @@ DWORD WINAPI StartupWatchdogThread(LPVOID)
         LogThreadBacktrace(g_gameThreadId.load(std::memory_order_relaxed), "game");
         LogGraphicsThreadBacktraces();
         HookLogFlush();
+    }
+
+    // For the rest of the run: a game thread that begins no frame for 10 s
+    // (2026-11-21: a Windows NVIDIA machine hanging for good at menu changes
+    // with nothing in the log). Every thread is listed, since the one that
+    // matters may be the loader or a driver's.
+    lastBeat = g_gameFrameHeartbeat.load(std::memory_order_relaxed);
+    stalledSeconds = 0;
+    for (;;) {
+        Sleep(1000);
+        const uint32_t beat = g_gameFrameHeartbeat.load(std::memory_order_relaxed);
+        if (beat != lastBeat) {
+            if (stalledSeconds >= 10)
+                HookLog("D3D9: game thread is drawing frames again after %us\n", stalledSeconds);
+            lastBeat = beat;
+            stalledSeconds = 0;
+            continue;
+        }
+        if (++stalledSeconds == 10)
+            D3D9ResetDiagnostics_LogAllThreads("no frame begun for 10 s");
     }
     return 0;
 }
@@ -1431,6 +1471,31 @@ void D3D9ResetDiagnostics_NoteGameThread()
 {
     g_gameThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
     D3D9ResetDiagnostics_StartStartupWatchdog();
+}
+
+void D3D9ResetDiagnostics_LogAllThreads(const char* why)
+{
+    static std::atomic<int> dumps {0};
+    if (dumps.fetch_add(1) >= 4) return;
+    HookLog("D3D9: thread listing (%s); game thread %lu, this thread %lu\n", why,
+            g_gameThreadId.load(std::memory_order_relaxed), GetCurrentThreadId());
+    D3D9Ex_LogState();
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        // Ids first: nothing is held open while threads are stopped in turn.
+        DWORD ids[96] = {};
+        int count = 0;
+        const DWORD process = GetCurrentProcessId();
+        THREADENTRY32 entry = {};
+        entry.dwSize = sizeof(entry);
+        for (BOOL more = Thread32First(snapshot, &entry); more && count < 96;
+             more = Thread32Next(snapshot, &entry))
+            if (entry.th32OwnerProcessID == process) ids[count++] = entry.th32ThreadID;
+        CloseHandle(snapshot);
+        for (int i = 0; i < count; ++i) LogThreadBacktrace(ids[i], "listed");
+    }
+    HookLog("D3D9: end of thread listing\n");
+    HookLogFlush();
 }
 
 bool D3D9Reset_TransitionInProgress()

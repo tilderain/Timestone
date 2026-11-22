@@ -13,3 +13,9 @@ HRESULT D3D9Ex_Create(UINT adapter, D3DDEVTYPE type, HWND window, DWORD behavior
 bool D3D9Ex_IsDevice(IDirect3DDevice9* device);
 HRESULT D3D9Ex_Reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* parameters);
 HRESULT D3D9Ex_Check(IDirect3DDevice9* device);
+// One log line of what the Ex backend was doing, written when a Direct3D call
+// has failed: the game treats any such failure as fatal.
+void D3D9Ex_LogState();
+// A Direct3D call failed on the Ex device: the next start steps back towards
+// 0.6.3's behaviour (see safeLevel). Once a run.
+void D3D9Ex_NoteFailure();

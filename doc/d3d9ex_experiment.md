@@ -195,6 +195,50 @@ no such lock of a static buffer is known. `[Graphics] D3D9ExStageBuffers=0`
 turns the deferral off. The `D3D9Ex: buffers ...` log line gives counts and
 times for both routes. Not yet run in the game on any driver.
 
+## Stepping back towards 0.6.3 (2026-11-21)
+
+One Windows machine (RTX 3060, VSync on) ran 0.6.3 without trouble and from
+0.6.4 showed hundreds of frames a second in menus, a black screen that never
+ends at menu changes, and once `E_FAIL : mpVertexBuffer->Lock(0,0,&pbuf,flags)`
+(the game's result checker exits on any failed call) with an access violation
+on an `nvd3dumx.dll` worker thread. A log of a hang has no failed call, no
+staged buffer (`filled in memory=0` throughout) and the `DONOTWAIT` present in
+use. Only that present path can change how fast frames are presented with
+VSync on, so it is off unless asked for; that it is also the hang is not
+shown. Each change since 0.6.3 has a `[Graphics]` switch:
+
+- `D3D9ExPlainPresent` (default 1): one ordinary `Present` a frame. `0` brings
+  back the `DONOTWAIT` try and `DwmFlush` wait (VSync on) and `FORCEIMMEDIATE`
+  (VSync off). With it on, the loader waits behind Present again as in 0.6.3.
+- `D3D9ExDeferTextures=0`: textures uploaded whole at creation.
+- `D3D9ExStageBuffers=0`: no system-memory static buffers.
+
+Nobody is asked to set these by hand. A failed Direct3D call on the Ex device
+outside a graphics transition, or a loader that makes no progress for 20 s
+while frames are drawn (`LoadDiag`), raises `[Graphics] D3D9ExSafeLevel` by one
+(once a run, stored with `D3D9ExSafeVersion`), and each start applies that many
+steps: 1 textures at creation, 2 and no staged buffers, 3 and the ordinary
+backend (`ExperimentalD3D9Ex=2` still forces Ex). The log names the level and
+the three choices at start. A count from another version is ignored.
+
+For a hang the log gets where every thread is (`D3D9: thread listing`): when the
+loader is stuck, when the game thread begins no frame for 10 s, and (temporary)
+when the window is closed. `D3D9Ex: N presents in M ms` is written when frames
+are presented faster than 100 a second.
+
+A failed call also logs `D3D9: failure callers:` (the game's call chain) and
+`D3D9Ex: state at failure:` (present counts, whether the failure fell between
+the two present calls of a frame, device state, waiting and staged counts).
+None of this has run in the game.
+
+Staging covers less than was assumed: `rModel__convert` creates a model's main
+vertex and index buffers empty and fills them through the lock wrappers
+(`0x14079FA40` / `0x14079FEE0`), so they are still made on the GPU on the
+decoder threads. Only the buffers created with data (model `+0x1D0` / `+0x1D8`)
+are staged. Static buffers are locked after creation by `rModel__convert`,
+`rDeformWeightMap__load/save`, `uSky__createBuffer`, `rRibbon__rebuildGeometry`
+and the `sScene` primitive builders.
+
 This retains CPU texture copies and adds explicit uploads; it can increase
 upload cost and does not guarantee improved throughput. It does not emulate
 every managed-resource operation for third-party code. Unknown resource paths,

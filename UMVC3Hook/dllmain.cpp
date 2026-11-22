@@ -870,6 +870,27 @@ fontConfig.SizePixels     = 12.0f; // use exact integer sizes: 9, 10, 12, 14, 16
 	}
 }
 
+// The game's own shutdown has been seen to hang after the window is closed
+// (reported on Linux/Proton: music stops, the process never ends). Nothing is
+// worth waiting for by then: the network is already closed and the log written.
+static DWORD WINAPI ExitWatchdogThread(LPVOID)
+{
+	Sleep(10000);
+	HookLogTryWriteFatal("UMVC3Hook: the game did not finish closing within 10 s; ending the process\n");
+	TerminateProcess(GetCurrentProcess(), 0);
+	return 0;
+}
+
+static void StartExitWatchdog()
+{
+	static volatile LONG started = 0;
+	if (InterlockedExchange(&started, 1) != 0)
+		return;
+	HookLogTryWriteFatal("UMVC3Hook: window closing; exit watchdog armed\n");
+	if (HANDLE thread = CreateThread(nullptr, 0, ExitWatchdogThread, nullptr, 0, nullptr))
+		CloseHandle(thread);
+}
+
 static BOOL WINAPI ConsoleControlHandler(DWORD controlType)
 {
 	switch (controlType)
@@ -892,8 +913,19 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 {
     if (uMsg == WM_QUERYENDSESSION)
         DisableReturnToLaunchMenuOnExit();
-    if (uMsg == WM_CLOSE || uMsg == WM_DESTROY)
+    if (uMsg == WM_CLOSE || uMsg == WM_DESTROY) {
+        // TEMPORARY (2026-11-21): where every thread is as the window is
+        // closed. A game that hung is closed by hand, and this is then the
+        // only record of what it was waiting for. Remove once the 0.6.4
+        // menu-change hang is found.
+        static bool listed = false;
+        if (!listed) {
+            listed = true;
+            D3D9ResetDiagnostics_LogAllThreads("window closing");
+        }
         PrepareForGameExit();
+        StartExitWatchdog();
+    }
     else if (uMsg == WM_ENDSESSION && wParam != FALSE) {
         CleanupNetworkOnExit();
         HookLogFlush();
@@ -2503,6 +2535,16 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		// A rejected process attach must not clean up uninitialized mod systems.
 		if (!g_asiModule)
 			break;
+		if (lpReserved) {
+			// The process is ending and every other thread has already been
+			// killed, possibly while holding the heap lock or one of ours.
+			// Cleanup here, the static destructors after it, and the detach
+			// routines of the DLLs behind this one can then wait forever on a
+			// lock nobody will release. The network was closed and the log
+			// written when the window closed, so end the process outright.
+			HookLogTryWriteFatal("UMVC3Hook: process exit reached DLL detach\n");
+			TerminateProcess(GetCurrentProcess(), 0);
+		}
 		LagDiagnostics_StopWriter();
 		XInputDiscovery_Stop();
 		Exception_RemoveHandler();

@@ -417,7 +417,18 @@ int main() {
     assert(seenPool == D3DPOOL_MANAGED);
     CreateIndex(&device, 64, 0, 101, D3DPOOL_SYSTEMMEM, nullptr, nullptr);
     assert(seenPool == D3DPOOL_SYSTEMMEM);
-    // VSync on: the Ex device is presented without waiting inside Direct3D.
+    // The default: one ordinary Present a frame, whatever the queue holds.
+    assert(plainPresent);
+    presentResult = S_OK;
+    device.busyPolls = 5;
+    assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK);
+    assert(device.polledPresents == 0 && device.forcedPresents == 0 && nativePresents == 1 &&
+           refreshWaits == 0);
+    device.busyPolls = 0;
+    nativePresents = 0;
+    // [Graphics] D3D9ExPlainPresent=0, VSync on: the Ex device is presented
+    // without waiting inside Direct3D.
+    plainPresent = false;
     presentResult = S_PRESENT_OCCLUDED;
     device.polledResult = S_PRESENT_OCCLUDED;
     assert(PresentFrame(&device, nullptr, nullptr, nullptr, nullptr) == D3D_OK);

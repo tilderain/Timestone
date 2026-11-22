@@ -227,6 +227,220 @@ bool IsExecutableAddress(uintptr_t address)
     return (memory.Protect & executable) != 0;
 }
 
+// A stack pointer outside the thread's stack means the frames that led here are
+// not at RSP. Every code address still on the real stack is listed instead, so
+// the call chain can be read back. Entries below the frame that was running
+// are leftovers of earlier, deeper calls.
+void WriteRealStackWhenPivoted(FILE* file, const CONTEXT* context)
+{
+    NT_TIB tib{};
+    SIZE_T bytesRead = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), NtCurrentTeb(), &tib, sizeof(tib), &bytesRead) ||
+        bytesRead != sizeof(tib))
+        return;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(tib.StackBase);
+    const uintptr_t limit = reinterpret_cast<uintptr_t>(tib.StackLimit);
+    if (limit >= base || (context->Rsp >= limit && context->Rsp < base))
+        return;
+
+    std::fprintf(file, "RSP is outside the thread stack; registers that still point into it:");
+    const struct { const char* name; DWORD64 value; } registers[] = {
+        {"RBP", context->Rbp}, {"RBX", context->Rbx}, {"RSI", context->Rsi}, {"RDI", context->Rdi},
+        {"R12", context->R12}, {"R13", context->R13}, {"R14", context->R14}, {"R15", context->R15},
+    };
+    bool any = false;
+    for (const auto& entry : registers) {
+        if (entry.value < limit || entry.value >= base) continue;
+        std::fprintf(file, " %s=0x%016llX", entry.name, static_cast<unsigned long long>(entry.value));
+        any = true;
+    }
+    std::fprintf(file, "%s\n", any ? "" : " none");
+
+    std::fprintf(file, "real stack scan (code addresses, lowest address first):\n");
+    constexpr size_t kMaxEntries = 512;
+    size_t entries = 0;
+    uint64_t page[512];
+    for (uintptr_t address = limit & ~uintptr_t(0xFFF); address < base && entries < kMaxEntries;
+         address += sizeof(page)) {
+        bytesRead = 0;
+        if (!IsReadableRange(address, sizeof(page)) ||
+            !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), page,
+                               sizeof(page), &bytesRead) || bytesRead != sizeof(page))
+            continue;
+        for (size_t i = 0; i < 512 && entries < kMaxEntries; ++i) {
+            const uintptr_t slot = address + i * sizeof(uint64_t);
+            const uint64_t value = page[i];
+            if (slot < limit || slot >= base || value < 0x10000 || value > 0x7FFFFFFFFFFFull ||
+                !IsExecutableAddress(static_cast<uintptr_t>(value)))
+                continue;
+            char tag[40] = {};
+            std::snprintf(tag, sizeof(tag), "  [0x%016llX]: ", static_cast<unsigned long long>(slot));
+            ResolveAddress(file, tag, static_cast<uintptr_t>(value));
+            ++entries;
+        }
+    }
+    if (entries == kMaxEntries) std::fprintf(file, "  <more entries not shown>\n");
+}
+
+// True if a 64-bit base relocation starts at this RVA of the loaded image.
+bool HasBaseRelocationAt(const uint8_t* image, const IMAGE_DATA_DIRECTORY& directory, uint32_t rva)
+{
+    for (uint32_t offset = 0; offset + sizeof(IMAGE_BASE_RELOCATION) <= directory.Size;) {
+        const auto* block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(
+            image + directory.VirtualAddress + offset);
+        if (block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
+            block->SizeOfBlock > directory.Size - offset)
+            return false;
+        if (rva >= block->VirtualAddress && rva - block->VirtualAddress < 0x1000) {
+            const auto* items = reinterpret_cast<const uint16_t*>(block + 1);
+            const size_t count = (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(uint16_t);
+            for (size_t i = 0; i < count; ++i)
+                if ((items[i] >> 12) == IMAGE_REL_BASED_DIR64 &&
+                    block->VirtualAddress + (items[i] & 0xFFFu) == rva)
+                    return true;
+        }
+        offset += block->SizeOfBlock;
+    }
+    return false;
+}
+
+// Compares this plugin's code in memory with its file on disk. A register state
+// that no instruction sequence in the file can produce is either code that was
+// overwritten while running or a processor that executed it wrongly; this tells
+// the two apart. Uses no CRT heap: the crash may have happened inside it.
+void WriteOwnCodeIntegrity(FILE* file)
+{
+    std::fprintf(file, "plugin code check (memory against the file on disk):\n");
+    HMODULE module = nullptr;
+    char path[MAX_PATH] = {};
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCSTR>(&WriteOwnCodeIntegrity), &module) ||
+        !module || !GetModuleFileNameA(module, path, MAX_PATH)) {
+        std::fprintf(file, "  <own module not found>\n");
+        return;
+    }
+    const auto* image = reinterpret_cast<const uint8_t*>(module);
+    if (!IsReadableRange(reinterpret_cast<uintptr_t>(image), 0x1000)) {
+        std::fprintf(file, "  <image headers unreadable>\n");
+        return;
+    }
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 ||
+        size_t(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) > 0x1000) {
+        std::fprintf(file, "  <image headers invalid>\n");
+        return;
+    }
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
+    const auto* sections = IMAGE_FIRST_SECTION(nt);
+    const size_t sectionCount = nt->FileHeader.NumberOfSections;
+    if (reinterpret_cast<const uint8_t*>(sections + sectionCount) > image + 0x1000) {
+        std::fprintf(file, "  <section table invalid>\n");
+        return;
+    }
+    IMAGE_DATA_DIRECTORY relocations = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if (!relocations.VirtualAddress || !relocations.Size ||
+        !IsReadableRange(reinterpret_cast<uintptr_t>(image) + relocations.VirtualAddress, relocations.Size))
+        relocations = {};
+
+    HANDLE disk = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (disk == INVALID_HANDLE_VALUE) {
+        std::fprintf(file, "  <cannot open %s (error %lu)>\n", BaseName(path), GetLastError());
+        return;
+    }
+    // The file can have been replaced by an update since it was loaded, and the
+    // build timestamp is a fixed value, so the on-disk headers are compared whole.
+    uint8_t diskHeaders[0x1000] = {};
+    DWORD got = 0;
+    uint64_t preferredBase = 0;
+    bool sameFile = ReadFile(disk, diskHeaders, sizeof(diskHeaders), &got, nullptr) &&
+        got >= size_t(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64);
+    if (sameFile) {
+        const auto* diskNt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(diskHeaders + dos->e_lfanew);
+        preferredBase = diskNt->OptionalHeader.ImageBase;
+        sameFile = diskNt->Signature == IMAGE_NT_SIGNATURE &&
+            diskNt->FileHeader.NumberOfSections == sectionCount &&
+            diskNt->OptionalHeader.SizeOfImage == nt->OptionalHeader.SizeOfImage &&
+            diskNt->OptionalHeader.CheckSum == nt->OptionalHeader.CheckSum &&
+            size_t(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) + sectionCount * sizeof(IMAGE_SECTION_HEADER) <= got &&
+            std::memcmp(IMAGE_FIRST_SECTION(diskNt), sections, sectionCount * sizeof(IMAGE_SECTION_HEADER)) == 0;
+    }
+    if (!sameFile) {
+        std::fprintf(file, "  <%s on disk is not the image that is loaded; not compared>\n", BaseName(path));
+        CloseHandle(disk);
+        return;
+    }
+    const uint64_t delta = reinterpret_cast<uintptr_t>(image) - preferredBase;
+
+    constexpr size_t kMaxRuns = 24, kRunBytes = 16;
+    for (size_t s = 0; s < sectionCount; ++s) {
+        const IMAGE_SECTION_HEADER& section = sections[s];
+        if (!(section.Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        const uint32_t size = std::min(section.Misc.VirtualSize, section.SizeOfRawData);
+        char name[9] = {};
+        std::memcpy(name, section.Name, 8);
+        auto* fromDisk = static_cast<uint8_t*>(
+            VirtualAlloc(nullptr, size_t(size) * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fromDisk) {
+            std::fprintf(file, "  %s: <no memory for the comparison>\n", name);
+            continue;
+        }
+        uint8_t* fromMemory = fromDisk + size;
+        SIZE_T copied = 0;
+        LARGE_INTEGER position{};
+        position.QuadPart = section.PointerToRawData;
+        got = 0;
+        if (!SetFilePointerEx(disk, position, nullptr, FILE_BEGIN) ||
+            !ReadFile(disk, fromDisk, size, &got, nullptr) || got != size) {
+            std::fprintf(file, "  %s: <file read failed (error %lu)>\n", name, GetLastError());
+        } else if (!ReadProcessMemory(GetCurrentProcess(), image + section.VirtualAddress, fromMemory,
+                                      size, &copied) || copied != size) {
+            std::fprintf(file, "  %s: <loaded code unreadable>\n", name);
+        } else {
+            size_t runs = 0, changedBytes = 0;
+            for (uint32_t i = 0; i < size;) {
+                if (fromDisk[i] == fromMemory[i]) { ++i; continue; }
+                // A relocated address differs by exactly the load offset.
+                bool relocated = false;
+                for (uint32_t start = i >= 7 ? i - 7 : 0; start <= i && start + 8 <= size; ++start) {
+                    uint64_t before = 0, after = 0;
+                    std::memcpy(&before, fromDisk + start, 8);
+                    std::memcpy(&after, fromMemory + start, 8);
+                    if (before + delta == after && relocations.Size &&
+                        HasBaseRelocationAt(image, relocations, section.VirtualAddress + start)) {
+                        i = start + 8;
+                        relocated = true;
+                        break;
+                    }
+                }
+                if (relocated) continue;
+                uint32_t end = i;
+                while (end < size && end - i < kRunBytes && fromDisk[end] != fromMemory[end]) ++end;
+                changedBytes += end - i;
+                if (runs++ < kMaxRuns) {
+                    // Shown with the bytes before it, enough to find the instruction.
+                    const uint32_t from = i >= 8 ? i - 8 : 0, to = std::min(size, end + 8);
+                    std::fprintf(file, "  %s+0x%X (module+0x%X) changed bytes %u, shown from -0x%X\n    file  :",
+                                 name, i, unsigned(section.VirtualAddress + i), end - i, i - from);
+                    for (uint32_t b = from; b < to; ++b) std::fprintf(file, " %02X", fromDisk[b]);
+                    std::fprintf(file, "\n    memory:");
+                    for (uint32_t b = from; b < to; ++b) std::fprintf(file, " %02X", fromMemory[b]);
+                    std::fprintf(file, "\n");
+                }
+                i = end;
+            }
+            if (!runs) std::fprintf(file, "  %s: 0x%X bytes identical\n", name, size);
+            else std::fprintf(file, "  %s: %llu changed bytes in %llu places (%llu shown)\n", name,
+                              static_cast<unsigned long long>(changedBytes),
+                              static_cast<unsigned long long>(runs),
+                              static_cast<unsigned long long>(std::min(runs, kMaxRuns)));
+        }
+        VirtualFree(fromDisk, 0, MEM_RELEASE);
+    }
+    CloseHandle(disk);
+}
+
 bool IsMainModuleAddress(uintptr_t address)
 {
     HMODULE module = nullptr;
@@ -914,6 +1128,8 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly, const char
             std::fprintf(file, "  <stack unreadable>\n");
         }
         WriteRawThreadState(file, context);
+        WriteRealStackWhenPivoted(file, context);
+        WriteOwnCodeIntegrity(file);
         HookLogWriteRecent(file);
         RollbackUnit_WritePending(file);
         WriteLoadedModules(file);

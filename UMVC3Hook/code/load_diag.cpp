@@ -18,6 +18,8 @@
 //   cResource+0x0C     char[0x40]  path
 
 #include "load_diag.h"
+#include "d3d9ex.h"
+#include "d3d9reset.h"
 
 #include "mk10utils.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -129,6 +131,30 @@ void LoadDiag_Tick()
     CopyPath(path, reinterpret_cast<const char*>(resource + RESOURCE_CURRENT_PATH));
 
     const double now = NowMs();
+    // A loader that has work and gets nowhere for 20 s while frames are still
+    // being drawn (2026-11-21: a black screen for good at a menu change on a
+    // Windows NVIDIA machine, 0.6.4 only). Every thread is listed once, and
+    // the Ex backend steps back for the next start as it does for a failed
+    // call. A paused loader is listed too but not blamed on the backend.
+    {
+        static char stuckPath[kPathSize] = {};
+        static uint32_t stuckQueued = 0;
+        static double stuckSince = 0;
+        static bool stuckReported = false;
+        if (!(queued != 0 || busy || path[0]) || queued != stuckQueued ||
+            strcmp(path, stuckPath) != 0 || !stuckSince) {
+            memcpy(stuckPath, path, kPathSize);
+            stuckQueued = queued;
+            stuckSince = now;
+            stuckReported = false;
+        } else if (!stuckReported && now - stuckSince >= 20000.0) {
+            stuckReported = true;
+            HookLog("LoadDiag: loader has made no progress for 20 s: item %s, queued %u, "
+                    "busy %d, paused %d\n", path[0] ? path : "-", queued, busy ? 1 : 0, paused ? 1 : 0);
+            D3D9ResetDiagnostics_LogAllThreads("loader stuck");
+            if (!paused) D3D9Ex_NoteFailure();
+        }
+    }
     BusyStretch& s = g_stretch;
     const bool working = queued != 0 || busy || path[0] != '\0';
     if (!s.active) {

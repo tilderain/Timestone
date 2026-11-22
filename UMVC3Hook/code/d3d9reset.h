@@ -38,3 +38,6 @@ void D3D9ResetDiagnostics_EndAppReset(uint64_t result, uint64_t elapsedMs);
 void D3D9ResetDiagnostics_RecordDeviceReset();
 void D3D9ResetDiagnostics_StartStartupWatchdog();
 void D3D9ResetDiagnostics_CompleteStartup();
+// Where every thread of the game is, for a hang: to the log, with the Ex
+// backend's state. At most a few times a run.
+void D3D9ResetDiagnostics_LogAllThreads(const char* why);

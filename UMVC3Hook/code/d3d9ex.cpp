@@ -4,9 +4,11 @@
 #include "launchmenu_utils.h"
 #include "lag_diagnostics.h"
 #include "frame_pacing.h"
+#include "../IniSafe.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <unordered_map>
 #include <utility>
@@ -151,6 +153,38 @@ struct BufferStats {
     std::atomic<int64_t> stagedUs {0}, directUs {0}, sentUs {0}, sentWorstUs {0};
 };
 BufferStats bufferStats;
+
+// For the failure line (D3D9Ex_LogState). Between a DONOTWAIT try that found
+// the queue full and the waiting Present that follows it, other threads go on
+// making Direct3D calls; whether a failure fell in that gap is recorded.
+std::atomic<bool> betweenPresentTries {false};
+std::atomic<unsigned> presentCalls {0}, presentsStillDrawing {0}, buffersStagedEver {0};
+std::atomic<HRESULT> lastPresentResult {D3D_OK};
+// Switches back to what 0.6.3 did, for finding which change since then a
+// driver objects to (2026-11-21: a vertex buffer Lock failing with E_FAIL on
+// one NVIDIA machine from 0.6.4 on, 0.6.3 being fine there).
+// [Graphics] D3D9ExPlainPresent: every frame is one ordinary Present, with
+// neither the DONOTWAIT try (VSync on) nor FORCEIMMEDIATE (VSync off). On
+// unless set to 0 (2026-11-21): the same machine showed hundreds of frames a
+// second with VSync on from 0.6.4, which only the DONOTWAIT path can do
+// (0.6.3 presented the ordinary way and was held to the refresh rate), and
+// hung for good at menu changes. That path had never run on Windows. The
+// cost is the loader waiting behind Present again (see doNotWaitRefused).
+// [Graphics] D3D9ExDeferTextures=0: a texture is uploaded whole as it is
+// created, not at its first draw or by the per-frame warm-up.
+bool plainPresent = true;
+bool deferTextures = true;
+// Nobody should have to edit an ini to get a game that runs. A failed
+// Direct3D call on the Ex device (which the game exits on) is counted in
+// [Graphics] D3D9ExSafeLevel, and each start applies that many steps back
+// towards what 0.6.3 did, most suspected first:
+//   1  textures uploaded at creation   2  and no buffers in system memory
+//   3  and the ordinary backend
+// The level a machine settles on says which change its driver objected to.
+// D3D9ExSafeVersion holds the version that counted; another version starts
+// again from none, so a fix is not hidden by an old count.
+constexpr int kSafeLevelMost = 3;
+int safeLevel = 0;
 
 // Since the last log line; see LogTextureStats. Counters only, added to
 // without a lock from whichever thread creates, binds or presents; times are
@@ -426,15 +460,14 @@ void WaitForRefresh()
     if (flush) flush();
 }
 
-// Direct3D 9 running through Microsoft's D3D9On12 layer: GPUs with no
-// Direct3D 9 driver of their own (Intel Arc, Iris Xe, UHD). The one machine
-// where 0.6.3 loaded slowly was an Arc A750 (2026-11-19: a character on the
-// character select took about five seconds to appear, still after texture
-// creation and Present had been shown not to be the wait), and the layer is
-// known for trouble with this game on other programs. What the Ex device and
-// its default-pool resources cost there is not understood, so on that layer
-// the game stays on the ordinary backend, which 0.6.2 ran on without the
-// problem.
+// Direct3D 9 running through Microsoft's D3D9On12 layer. The layer is known
+// for trouble with this game on other programs and what the Ex device costs
+// there is not understood, so on it the game stays on the ordinary backend.
+// This was first taken to be what the slow Arc A750 ran on (2026-11-19: a
+// character on the character select took about five seconds to appear on
+// 0.6.3); that machine's 0.6.4 log showed Intel's own driver with the layer
+// absent, so Intel adapters are turned away by vendor in D3D9Ex_Create and
+// this check only covers the layer itself.
 bool OnTranslationLayer()
 {
     return GetModuleHandleA("d3d9on12.dll") != nullptr;
@@ -509,7 +542,8 @@ void __fastcall CreateTexture(void* object, void* shared, uint64_t flags, void* 
     ReleaseSRWLockExclusive(&stagingLock);
     slot = gpu;
     // Nothing is uploaded here: see pendingTextures.
-    Defer(staging, gpu);
+    if (deferTextures) Defer(staging, gpu);
+    else Upload(staging, gpu);
     staging->Release();
     AddStat(textureStats.created, textureStats.fillUs, filled - createStart);
     textureStats.gpuCreateUs.fetch_add(static_cast<int64_t>((NowMs() - filled) * 1000.0),
@@ -698,6 +732,7 @@ void CreateBuffer(BufferCreate original, bool index, void* object, unsigned size
     pendingBufferCount.store(static_cast<unsigned>(pendingBuffers.size()));
     ReleaseSRWLockExclusive(&bufferLock);
     if (replaced) replaced->Release();
+    buffersStagedEver.fetch_add(1, std::memory_order_relaxed);
     AddStat(bufferStats.staged, bufferStats.stagedUs, now - start);
 }
 void __fastcall CreateVertexBuffer(void* object, unsigned size, void* data)
@@ -848,7 +883,7 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
         // This hook owns Present on an Ex device, so the backend timing that
         // dllmain would otherwise bind to the same function is taken here.
         LagDiagnosticScope diagnostic(LagMetric::BackendPresent);
-        if (device == exDevice && immediatePresent && !forceImmediateRefused) {
+        if (device == exDevice && !plainPresent && immediatePresent && !forceImmediateRefused) {
             result = exDevice->PresentEx(src, dst, window, dirty, kForceImmediate);
             if (result == D3DERR_INVALIDCALL) {
                 // Not accepted here: present the ordinary way from now on.
@@ -856,10 +891,12 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
                 HookLog("D3D9Ex: FORCEIMMEDIATE refused; using ordinary Present\n");
                 result = originalPresent(device, src, dst, window, dirty);
             }
-        } else if (device == exDevice && !immediatePresent && !doNotWaitRefused) {
+        } else if (device == exDevice && !plainPresent && !immediatePresent && !doNotWaitRefused) {
             // VSync on only: with it off there is no refresh to wait for.
             result = exDevice->PresentEx(src, dst, window, dirty, kDoNotWait);
             if (result == kStillDrawing) {
+                presentsStillDrawing.fetch_add(1, std::memory_order_relaxed);
+                betweenPresentTries.store(true, std::memory_order_relaxed);
                 static bool reported = false;
                 if (!reported) {
                     reported = true;
@@ -867,6 +904,7 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
                 }
                 WaitForRefresh();
                 result = originalPresent(device, src, dst, window, dirty);
+                betweenPresentTries.store(false, std::memory_order_relaxed);
             } else if (result == D3DERR_INVALIDCALL) {
                 doNotWaitRefused = true;
                 HookLog("D3D9Ex: DONOTWAIT refused; using ordinary Present\n");
@@ -878,6 +916,29 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
     }
     FramePacing_OnPresent(device, pacing);
     if (device != exDevice) return result;
+    presentCalls.fetch_add(1, std::memory_order_relaxed);
+    lastPresentResult.store(result, std::memory_order_relaxed);
+    {
+        // A game presenting far faster than any 60 fps pacing allows is not
+        // being held by VSync or by its own frame wait: say so, at most every
+        // five seconds, with what Present has been answering.
+        static double windowStart = 0.0;
+        static unsigned windowPresents = 0, windowOccluded = 0, windowFull = 0;
+        ++windowPresents;
+        if (result == S_PRESENT_OCCLUDED) ++windowOccluded;
+        const unsigned full = presentsStillDrawing.load(std::memory_order_relaxed);
+        const double tick = NowMs();
+        if (windowStart == 0.0) { windowStart = tick; windowFull = full; }
+        if (tick - windowStart >= 5000.0) {
+            if (windowPresents > 5 * 100)
+                HookLog("D3D9Ex: %u presents in %.0f ms (vsync=%d, occluded %u, queue found full %u)\n",
+                        windowPresents, tick - windowStart,
+                        immediatePresent ? 0 : 1, windowOccluded, full - windowFull);
+            windowStart = tick;
+            windowPresents = windowOccluded = 0;
+            windowFull = full;
+        }
+    }
     if (result == S_PRESENT_OCCLUDED) return D3D_OK;
     if (result == S_PRESENT_MODE_CHANGED) return D3DERR_DEVICELOST;
     Check(result, "D3D9Ex Present (restart required)");
@@ -915,6 +976,18 @@ bool D3D9Ex_Initialize()
     const int setting = path[0] ? GetPrivateProfileIntA("Graphics", "ExperimentalD3D9Ex", 1, path) : 1;
     enabled = setting != 0;
     forced = setting == 2;
+    if (path[0]) {
+        char counted[32] = {};
+        GetPrivateProfileStringA("Graphics", "D3D9ExSafeVersion", "", counted, sizeof(counted), path);
+        if (!strcmp(counted, UMVC3HOOK_VERSION))
+            safeLevel = GetPrivateProfileIntA("Graphics", "D3D9ExSafeLevel", 0, path);
+        if (safeLevel < 0) safeLevel = 0;
+        if (safeLevel > kSafeLevelMost) safeLevel = kSafeLevelMost;
+    }
+    if (enabled && safeLevel)
+        HookLog("D3D9Ex: safe level %d of %d after earlier Direct3D failures in this version "
+                "(delete [Graphics] D3D9ExSafeLevel to start again)\n", safeLevel, kSafeLevelMost);
+    if (safeLevel >= kSafeLevelMost && !forced) enabled = false;
     if (!enabled) return true;
     const Hook hooks[] = {
         {(void*)_addr(0x140782060), (void*)CreateTexture, (void**)&originalTextureCreate},
@@ -928,6 +1001,14 @@ bool D3D9Ex_Initialize()
     stageBuffers = !path[0] || GetPrivateProfileIntA("Graphics", "D3D9ExStageBuffers", 1, path) != 0;
     HookLog("D3D9Ex: backend enabled; set [Graphics] ExperimentalD3D9Ex=0 to revert\n");
     if (!stageBuffers) HookLog("D3D9Ex: static buffers are created on the GPU directly\n");
+    plainPresent = !path[0] || GetPrivateProfileIntA("Graphics", "D3D9ExPlainPresent", 1, path) != 0;
+    deferTextures = !path[0] || GetPrivateProfileIntA("Graphics", "D3D9ExDeferTextures", 1, path) != 0;
+    if (safeLevel >= 1) deferTextures = false;
+    if (safeLevel >= 2) stageBuffers = false;
+    HookLog("D3D9Ex: %s; textures uploaded %s; static buffers %s\n",
+            plainPresent ? "one ordinary Present a frame" : "DONOTWAIT / FORCEIMMEDIATE presents",
+            deferTextures ? "at first use" : "as they are created",
+            stageBuffers ? "staged in memory" : "created on the GPU directly");
     return Install(hooks, sizeof(hooks) / sizeof(hooks[0]));
 }
 
@@ -946,6 +1027,43 @@ const char* D3D9Ex_BackendName()
     if (exDevice) return "Direct3D 9Ex (flip)";
     return fellBack ? "Direct3D 9 (9Ex unavailable)" : "Direct3D 9";
 }
+void D3D9Ex_LogState()
+{
+    if (!exDevice) {
+        HookLog("D3D9Ex: state at failure: backend=\"%s\"\n", D3D9Ex_BackendName());
+        return;
+    }
+    HookLog("D3D9Ex: state at failure: vsync=%d do-not-wait=%d between-present-tries=%d "
+            "presents=%u found-queue-full=%u last-present=0x%08X device-state=0x%08X "
+            "textures-waiting=%u buffers-waiting=%u buffers-staged-this-run=%u stage-buffers=%d "
+            "defer-textures=%d plain-present=%d safe-level=%d\n",
+            immediatePresent ? 0 : 1,
+            !plainPresent && !immediatePresent && !doNotWaitRefused ? 1 : 0,
+            betweenPresentTries.load(std::memory_order_relaxed) ? 1 : 0,
+            presentCalls.load(std::memory_order_relaxed),
+            presentsStillDrawing.load(std::memory_order_relaxed),
+            (unsigned)lastPresentResult.load(std::memory_order_relaxed),
+            (unsigned)exDevice->CheckDeviceState(deviceWindow),
+            pendingCount.load(std::memory_order_relaxed),
+            pendingBufferCount.load(std::memory_order_relaxed),
+            buffersStagedEver.load(std::memory_order_relaxed), stageBuffers ? 1 : 0,
+            deferTextures ? 1 : 0, plainPresent ? 1 : 0, safeLevel);
+}
+
+void D3D9Ex_NoteFailure()
+{
+    static std::atomic<bool> noted {false};
+    if (!exDevice || safeLevel >= kSafeLevelMost || noted.exchange(true)) return;
+    char path[MAX_PATH] = {};
+    LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
+    if (!path[0]) return;
+    char level[8] = {};
+    snprintf(level, sizeof(level), "%d", safeLevel + 1);
+    const bool saved = IniSafe_WriteString("Graphics", "D3D9ExSafeVersion", UMVC3HOOK_VERSION, path) &&
+        IniSafe_WriteString("Graphics", "D3D9ExSafeLevel", level, path);
+    HookLog("D3D9Ex: safe level %s for the next start%s\n", level, saved ? "" : " could not be saved");
+}
+
 bool D3D9Ex_IsDevice(IDirect3DDevice9* device)
 {
     return device && device == exDevice;
@@ -998,19 +1116,28 @@ HRESULT D3D9Ex_Create(UINT adapter, D3DDEVTYPE type, HWND window, DWORD behavior
         core->Release();
         return E_FAIL;
     }
-    IDirect3DDevice9Ex* device = nullptr;
-    result = core->CreateDeviceEx(adapter, type, window, behavior, parameters, nullptr, &device);
-    // Which driver this really is. Some GPUs have no Direct3D 9 driver of
-    // their own and run it through Microsoft's D3D9On12 layer (Intel Arc; seen
-    // 2026-11-19 on the one machine where loads were slow), which behaves
-    // differently enough to need telling apart in a log.
+    // Which driver this really is, asked before any device exists so that an
+    // Intel adapter never gets an Ex device at all. Intel Arc does not always
+    // run Direct3D 9 through D3D9On12: the Arc A750 this was written for
+    // reports its own driver (igd9trinity64.dll) with d3d9on12.dll and
+    // d3d12.dll both absent (0.6.4 log, 2026-11-21), so the module check
+    // alone let it through. The vendor is what identifies it.
     D3DADAPTER_IDENTIFIER9 identifier = {};
-    if (SUCCEEDED(core->GetAdapterIdentifier(adapter, 0, &identifier)))
+    const bool identified = SUCCEEDED(core->GetAdapterIdentifier(adapter, 0, &identifier));
+    if (identified)
         HookLog("D3D9Ex: adapter \"%s\" driver %s vendor=0x%04lX device=0x%04lX "
                 "d3d9on12=%d d3d12=%d dxvk=%d\n",
                 identifier.Description, identifier.Driver, identifier.VendorId, identifier.DeviceId,
                 GetModuleHandleA("d3d9on12.dll") ? 1 : 0, GetModuleHandleA("d3d12.dll") ? 1 : 0,
                 GetModuleHandleA("dxvk_d3d9.dll") || GetModuleHandleA("winevulkan.dll") ? 1 : 0);
+    if (!forced && identified && identifier.VendorId == 0x8086) {
+        HookLog("D3D9Ex: Intel adapter; using the ordinary backend "
+                "(set [Graphics] ExperimentalD3D9Ex=2 to use 9Ex anyway)\n");
+        core->Release();
+        return E_FAIL;
+    }
+    IDirect3DDevice9Ex* device = nullptr;
+    result = core->CreateDeviceEx(adapter, type, window, behavior, parameters, nullptr, &device);
     core->Release();
     if (FAILED(result)) return result;
     // The layer may only be loaded once a device exists.
