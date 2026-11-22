@@ -124,6 +124,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/native_result.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
 	$(SRCDIR)/code/discord_presence_format.cpp \
+	$(SRCDIR)/code/discord_presence.cpp \
 	$(SRCDIR)/code/online_rewards.cpp \
 	$(SRCDIR)/code/load_diag.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
