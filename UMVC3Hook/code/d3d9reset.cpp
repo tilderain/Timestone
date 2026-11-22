@@ -925,9 +925,6 @@ void __fastcall HookResultHandler(void* app, int32_t result,
         }
         HookLog("D3D9: failure callers:%s\n", callers);
         D3D9Ex_LogState();
-        // A failure inside a graphics transition is the reset path's to
-        // handle, and says nothing about the backend.
-        if (FAILED(result) && !g_inTransition) D3D9Ex_NoteFailure();
         HookLogFlush();
     }
     if (FAILED(result) && g_inTransition)

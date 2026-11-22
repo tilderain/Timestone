@@ -18,7 +18,6 @@
 //   cResource+0x0C     char[0x40]  path
 
 #include "load_diag.h"
-#include "d3d9ex.h"
 #include "d3d9reset.h"
 
 #include "mk10utils.h"
@@ -152,7 +151,6 @@ void LoadDiag_Tick()
             HookLog("LoadDiag: loader has made no progress for 20 s: item %s, queued %u, "
                     "busy %d, paused %d\n", path[0] ? path : "-", queued, busy ? 1 : 0, paused ? 1 : 0);
             D3D9ResetDiagnostics_LogAllThreads("loader stuck");
-            if (!paused) D3D9Ex_NoteFailure();
         }
     }
     BusyStretch& s = g_stretch;

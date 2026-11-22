@@ -174,17 +174,6 @@ std::atomic<HRESULT> lastPresentResult {D3D_OK};
 // created, not at its first draw or by the per-frame warm-up.
 bool plainPresent = true;
 bool deferTextures = true;
-// Nobody should have to edit an ini to get a game that runs. A failed
-// Direct3D call on the Ex device (which the game exits on) is counted in
-// [Graphics] D3D9ExSafeLevel, and each start applies that many steps back
-// towards what 0.6.3 did, most suspected first:
-//   1  textures uploaded at creation   2  and no buffers in system memory
-//   3  and the ordinary backend
-// The level a machine settles on says which change its driver objected to.
-// D3D9ExSafeVersion holds the version that counted; another version starts
-// again from none, so a fix is not hidden by an old count.
-constexpr int kSafeLevelMost = 3;
-int safeLevel = 0;
 
 // Since the last log line; see LogTextureStats. Counters only, added to
 // without a lock from whichever thread creates, binds or presents; times are
@@ -976,18 +965,6 @@ bool D3D9Ex_Initialize()
     const int setting = path[0] ? GetPrivateProfileIntA("Graphics", "ExperimentalD3D9Ex", 1, path) : 1;
     enabled = setting != 0;
     forced = setting == 2;
-    if (path[0]) {
-        char counted[32] = {};
-        GetPrivateProfileStringA("Graphics", "D3D9ExSafeVersion", "", counted, sizeof(counted), path);
-        if (!strcmp(counted, UMVC3HOOK_VERSION))
-            safeLevel = GetPrivateProfileIntA("Graphics", "D3D9ExSafeLevel", 0, path);
-        if (safeLevel < 0) safeLevel = 0;
-        if (safeLevel > kSafeLevelMost) safeLevel = kSafeLevelMost;
-    }
-    if (enabled && safeLevel)
-        HookLog("D3D9Ex: safe level %d of %d after earlier Direct3D failures in this version "
-                "(delete [Graphics] D3D9ExSafeLevel to start again)\n", safeLevel, kSafeLevelMost);
-    if (safeLevel >= kSafeLevelMost && !forced) enabled = false;
     if (!enabled) return true;
     const Hook hooks[] = {
         {(void*)_addr(0x140782060), (void*)CreateTexture, (void**)&originalTextureCreate},
@@ -1003,8 +980,6 @@ bool D3D9Ex_Initialize()
     if (!stageBuffers) HookLog("D3D9Ex: static buffers are created on the GPU directly\n");
     plainPresent = !path[0] || GetPrivateProfileIntA("Graphics", "D3D9ExPlainPresent", 1, path) != 0;
     deferTextures = !path[0] || GetPrivateProfileIntA("Graphics", "D3D9ExDeferTextures", 1, path) != 0;
-    if (safeLevel >= 1) deferTextures = false;
-    if (safeLevel >= 2) stageBuffers = false;
     HookLog("D3D9Ex: %s; textures uploaded %s; static buffers %s\n",
             plainPresent ? "one ordinary Present a frame" : "DONOTWAIT / FORCEIMMEDIATE presents",
             deferTextures ? "at first use" : "as they are created",
@@ -1036,7 +1011,7 @@ void D3D9Ex_LogState()
     HookLog("D3D9Ex: state at failure: vsync=%d do-not-wait=%d between-present-tries=%d "
             "presents=%u found-queue-full=%u last-present=0x%08X device-state=0x%08X "
             "textures-waiting=%u buffers-waiting=%u buffers-staged-this-run=%u stage-buffers=%d "
-            "defer-textures=%d plain-present=%d safe-level=%d\n",
+            "defer-textures=%d plain-present=%d\n",
             immediatePresent ? 0 : 1,
             !plainPresent && !immediatePresent && !doNotWaitRefused ? 1 : 0,
             betweenPresentTries.load(std::memory_order_relaxed) ? 1 : 0,
@@ -1047,21 +1022,7 @@ void D3D9Ex_LogState()
             pendingCount.load(std::memory_order_relaxed),
             pendingBufferCount.load(std::memory_order_relaxed),
             buffersStagedEver.load(std::memory_order_relaxed), stageBuffers ? 1 : 0,
-            deferTextures ? 1 : 0, plainPresent ? 1 : 0, safeLevel);
-}
-
-void D3D9Ex_NoteFailure()
-{
-    static std::atomic<bool> noted {false};
-    if (!exDevice || safeLevel >= kSafeLevelMost || noted.exchange(true)) return;
-    char path[MAX_PATH] = {};
-    LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
-    if (!path[0]) return;
-    char level[8] = {};
-    snprintf(level, sizeof(level), "%d", safeLevel + 1);
-    const bool saved = IniSafe_WriteString("Graphics", "D3D9ExSafeVersion", UMVC3HOOK_VERSION, path) &&
-        IniSafe_WriteString("Graphics", "D3D9ExSafeLevel", level, path);
-    HookLog("D3D9Ex: safe level %s for the next start%s\n", level, saved ? "" : " could not be saved");
+            deferTextures ? 1 : 0, plainPresent ? 1 : 0);
 }
 
 bool D3D9Ex_IsDevice(IDirect3DDevice9* device)

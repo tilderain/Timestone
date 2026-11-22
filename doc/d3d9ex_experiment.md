@@ -213,13 +213,7 @@ shown. Each change since 0.6.3 has a `[Graphics]` switch:
 - `D3D9ExDeferTextures=0`: textures uploaded whole at creation.
 - `D3D9ExStageBuffers=0`: no system-memory static buffers.
 
-Nobody is asked to set these by hand. A failed Direct3D call on the Ex device
-outside a graphics transition, or a loader that makes no progress for 20 s
-while frames are drawn (`LoadDiag`), raises `[Graphics] D3D9ExSafeLevel` by one
-(once a run, stored with `D3D9ExSafeVersion`), and each start applies that many
-steps: 1 textures at creation, 2 and no staged buffers, 3 and the ordinary
-backend (`ExperimentalD3D9Ex=2` still forces Ex). The log names the level and
-the three choices at start. A count from another version is ignored.
+Nothing sets these by itself: a failure changes no setting for the next start.
 
 For a hang the log gets where every thread is (`D3D9: thread listing`): when the
 loader is stuck, when the game thread begins no frame for 10 s, and (temporary)
