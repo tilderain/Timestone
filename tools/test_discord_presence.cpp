@@ -131,9 +131,8 @@ int main()
         CHECK(Contains(json, "\"details\":\"Room: a\\\"b\\\\c\\u0001\""));
     }
 
-    // 6. Multi-byte names survive whole: no sequence is cut in half. The 128-byte
-    //    cap is unreachable through a 64-byte name buffer, so this checks the
-    //    pass-through instead.
+    // 6. Multi-byte names survive whole, and text over 128 bytes is cut
+    //    without splitting a sequence.
     {
         PresenceSnapshot s = Room(true, 1, 8);
         std::string name;
@@ -146,6 +145,20 @@ int main()
         for (std::size_t i = 0; i < details.size(); ++i) {
             const unsigned char c = static_cast<unsigned char>(details[i]);
             if (c == 0xC3) CHECK(i + 1 < details.size() && static_cast<unsigned char>(details[i + 1]) == 0xA9);
+        }
+
+        PresenceSnapshot watch = Room(true, 1, 8);
+        watch.activity = PresenceActivity::Spectating;
+        Copy(watch.watchP1, kPresenceNameBytes, name.c_str()); // 62 bytes
+        Copy(watch.watchP2, kPresenceNameBytes, name.c_str());
+        const std::string cut = Value(DiscordPresence_ActivityJson(watch), "details");
+        CHECK(cut.size() <= 128);
+        CHECK(cut.size() > 120);
+        CHECK(cut.compare(0, 9, "Watching ") == 0);
+        for (std::size_t i = 9; i < cut.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(cut[i]);
+            if (c == 0xC3) CHECK(i + 1 < cut.size() && static_cast<unsigned char>(cut[i + 1]) == 0xA9);
+            if (c == 0xA9) CHECK(static_cast<unsigned char>(cut[i - 1]) == 0xC3);
         }
     }
 
@@ -190,6 +203,7 @@ int main()
                                       "code", code));
         CHECK(code == 4006);
         CHECK(!DiscordPresence_JsonInt("{\"code\":\"4006\"}", "code", code));
+        CHECK(!DiscordPresence_JsonInt("{\"code\":99999999999999999999999}", "code", code));
 
         std::string missing;
         CHECK(!DiscordPresence_JsonString("{\"a\":1}", "evt", missing));

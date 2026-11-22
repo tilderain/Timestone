@@ -42,7 +42,8 @@ second and stops the worker; turning it on again starts it.
 | Launcher training | Training mode | — |
 | Launcher direct IP match | Direct online match | — |
 
-Character slots left to chance read `Random` until the match draws them.
+Teams are the ones actually being played, so a member left to chance shows
+the character the launch drew for it.
 
 A **Join** button appears only for a room that is public (neither
 invitation-only nor friends-only) and has a free seat; both players need the

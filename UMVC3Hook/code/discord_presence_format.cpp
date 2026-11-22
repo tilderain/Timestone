@@ -5,9 +5,9 @@
 
 namespace {
 
-// Discord cuts `details` and `state` at 128 characters. Snapshots cannot get
-// there (names are 64 bytes at most), so this is a guard rather than a path the
-// game takes; it still never splits a UTF-8 sequence.
+// Discord rejects `details` and `state` over 128 characters. Two long names
+// can get there ("Watching <63 bytes> vs <63 bytes>"), so text is cut at 128
+// bytes without splitting a UTF-8 sequence.
 constexpr std::size_t kTextLimit = 128;
 
 std::string Quoted(const std::string& raw, std::size_t limit = kTextLimit)
@@ -337,7 +337,9 @@ bool DiscordPresence_JsonInt(const std::string& json, const char* key, long long
     }
     long long value = 0;
     bool any = false;
+    int digits = 0;
     while (i < json.size() && json[i] >= '0' && json[i] <= '9') {
+        if (++digits > 18) return false; // beyond any code Discord sends; no overflow
         value = value * 10 + (json[i] - '0');
         ++i;
         any = true;

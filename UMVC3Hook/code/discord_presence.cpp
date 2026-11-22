@@ -86,7 +86,7 @@ void RegisterLaunchProtocol()
     }
 
     wchar_t command[2200] = {};
-    swprintf(command, sizeof(command) / sizeof(command[0]), L"\"%s\" steam://rungameid/357190",
+    swprintf(command, sizeof(command) / sizeof(command[0]), L"\"%ls\" steam://rungameid/357190",
              steamExe);
 
     const wchar_t* key = L"Software\\Classes\\discord-1544202390536982610";
@@ -104,23 +104,25 @@ void RegisterLaunchProtocol()
         HookLog("Discord: could not register the Join protocol\n");
         return;
     }
-    DWORD written = 0;
-    RegSetKeyValueW(root, nullptr, nullptr, REG_SZ, L"URL:Run game 1544202390536982610 protocol",
-                    static_cast<DWORD>((wcslen(L"URL:Run game 1544202390536982610 protocol") + 1) *
-                                       sizeof(wchar_t)));
-    RegSetKeyValueW(root, nullptr, L"URL Protocol", REG_SZ, L"", 0);
+    const wchar_t* description = L"URL:Run game 1544202390536982610 protocol";
+    bool ok = RegSetKeyValueW(root, nullptr, nullptr, REG_SZ, description,
+                              static_cast<DWORD>((wcslen(description) + 1) * sizeof(wchar_t))) ==
+                  ERROR_SUCCESS &&
+              RegSetKeyValueW(root, nullptr, L"URL Protocol", REG_SZ, L"", 0) == ERROR_SUCCESS;
 
     HKEY commandKey = nullptr;
-    if (RegCreateKeyExW(root, L"shell\\open\\command", 0, nullptr, 0, KEY_WRITE, nullptr,
-                        &commandKey, nullptr) == ERROR_SUCCESS) {
-        RegSetKeyValueW(commandKey, nullptr, nullptr, REG_SZ, command,
-                        static_cast<DWORD>((wcslen(command) + 1) * sizeof(wchar_t)));
+    if (ok && RegCreateKeyExW(root, L"shell\\open\\command", 0, nullptr, 0, KEY_WRITE, nullptr,
+                              &commandKey, nullptr) == ERROR_SUCCESS) {
+        ok = RegSetKeyValueW(commandKey, nullptr, nullptr, REG_SZ, command,
+                             static_cast<DWORD>((wcslen(command) + 1) * sizeof(wchar_t))) ==
+             ERROR_SUCCESS;
         RegCloseKey(commandKey);
     } else {
-        HookLog("Discord: could not register the Join command\n");
+        ok = false;
     }
     RegCloseKey(root);
-    HookLog("Discord: registered the Join protocol\n");
+    HookLog(ok ? "Discord: registered the Join protocol\n"
+               : "Discord: could not register the Join command\n");
 }
 
 // One pipe to the desktop client, and the loop that keeps it current.
@@ -135,6 +137,13 @@ struct PresenceWorker {
     bool sentOnce = false;
     bool missingLogged = false;
     long long lastErrorCode = 0;
+    long long lastCloseCode = 0;
+
+    void Refuse()
+    {
+        HookLog("Discord refused presence without sign-in; presence is off for this session\n");
+        g_refused.store(true);
+    }
 
     void Close()
     {
@@ -145,7 +154,10 @@ struct PresenceWorker {
 
     void Send(const std::string& frame)
     {
-        if (pipe && !WriteAll(pipe, frame)) Close();
+        if (pipe && !WriteAll(pipe, frame)) {
+            Close();
+            nextConnect = GetTickCount64() + kRetryMs;
+        }
     }
 
     void Subscribe(const char* evt) { Send(DiscordPresence_Frame(1, DiscordPresence_SubscribeJson(evt, ++nonce))); }
@@ -155,8 +167,9 @@ struct PresenceWorker {
         for (int i = 0; i < 10 && !pipe; ++i) {
             wchar_t name[64] = {};
             swprintf(name, sizeof(name) / sizeof(name[0]), L"\\\\?\\pipe\\discord-ipc-%d", i);
-            pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0,
-                               nullptr);
+            HANDLE handle = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                        OPEN_EXISTING, 0, nullptr);
+            if (handle != INVALID_HANDLE_VALUE) pipe = handle;
         }
         if (!pipe) {
             if (!missingLogged) {
@@ -180,23 +193,27 @@ struct PresenceWorker {
     void PumpInput(ULONGLONG now)
     {
         for (;;) {
-            DWORD available = 0;
-            if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
-                Close();
-                nextConnect = now + kRetryMs;
-                return;
-            }
-            if (available < 8) return;
+            // Peek the header and read only whole frames, so a slow client
+            // never leaves the worker blocked in ReadFile (Shutdown cannot
+            // interrupt it).
             char header[8] = {};
-            if (!ReadExact(pipe, header, 8)) {
+            DWORD peeked = 0, available = 0;
+            if (!PeekNamedPipe(pipe, header, sizeof(header), &peeked, &available, nullptr)) {
                 Close();
                 nextConnect = now + kRetryMs;
                 return;
             }
+            if (peeked < sizeof(header)) return;
             const uint32_t opcode = ReadLE32(header);
             const uint32_t length = ReadLE32(header + 4);
             if (length > kMaxFrame) {
                 HookLog("Discord: oversized frame, dropping the connection\n");
+                Close();
+                nextConnect = now + kRetryMs;
+                return;
+            }
+            if (available < sizeof(header) + length) return;
+            if (!ReadExact(pipe, header, sizeof(header))) {
                 Close();
                 nextConnect = now + kRetryMs;
                 return;
@@ -210,9 +227,15 @@ struct PresenceWorker {
             if (opcode == 1)
                 HandleDispatch(body);
             else if (opcode == 2) {
+                long long code = 0;
+                DiscordPresence_JsonInt(body, "code", code);
                 std::string message;
                 DiscordPresence_JsonString(body, "message", message);
-                HookLog("Discord: connection closed: %s\n", message.c_str());
+                if (code != lastCloseCode) {
+                    lastCloseCode = code;
+                    HookLog("Discord: connection closed (%lld): %s\n", code, message.c_str());
+                }
+                if (code == 4006) Refuse();
                 Close();
                 nextConnect = now + kRetryMs;
                 return;
@@ -273,10 +296,15 @@ struct PresenceWorker {
 
 void PresenceWorker::HandleDispatch(const std::string& body)
 {
+    // Command replies nest the subscribed event under data.evt, so events are
+    // only taken from DISPATCH messages; errors come back on the failed command.
+    std::string cmd;
     std::string event;
+    if (!DiscordPresence_JsonString(body, "cmd", cmd)) return;
     if (!DiscordPresence_JsonString(body, "evt", event)) return;
+    const bool dispatch = cmd == "DISPATCH";
 
-    if (event == "READY") {
+    if (dispatch && event == "READY") {
         state = 2;
         lastSent.clear();
         sentOnce = false;
@@ -293,16 +321,15 @@ void PresenceWorker::HandleDispatch(const std::string& body)
         DiscordPresence_JsonString(body, "message", message);
         if (code != lastErrorCode) {
             lastErrorCode = code;
-            HookLog("Discord: error %lld: %s\n", code, message.c_str());
+            HookLog("Discord: error %lld on %s: %s\n", code, cmd.c_str(), message.c_str());
         }
-        if (code == 4006) {
-            HookLog("Discord refused presence without sign-in; presence is off for this session\n");
-            g_refused.store(true);
-        }
+        // Only a refused SET_ACTIVITY ends presence; a refused join reply or
+        // subscription leaves a working presence alone.
+        if (code == 4006 && cmd == "SET_ACTIVITY") Refuse();
         return;
     }
 
-    if (event == "ACTIVITY_JOIN") {
+    if (dispatch && event == "ACTIVITY_JOIN") {
         std::string secret;
         if (!DiscordPresence_JsonString(body, "secret", secret)) return;
         if (SteamLobby_QueueJoinConnectString(secret.c_str()))
@@ -312,7 +339,7 @@ void PresenceWorker::HandleDispatch(const std::string& body)
         return;
     }
 
-    if (event == "ACTIVITY_JOIN_REQUEST") {
+    if (dispatch && event == "ACTIVITY_JOIN_REQUEST") {
         const std::size_t user = body.find("\"user\"");
         std::string id;
         if (user == std::string::npos || !DiscordPresence_JsonString(body, "id", id, user)) return;

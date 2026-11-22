@@ -3602,16 +3602,10 @@ bool LobbyFlow_PlayerInCharSelect()
 
 namespace {
 
-// One character name for the presence line; a team slot left to chance reads
-// "Random" (the draw happens as the match launches).
+// One character name for the presence line, empty for an empty slot.
 void CopyTeamName(char* out, size_t size, int32_t id)
 {
-    const char* name = "";
-    if (id > 0)
-        name = RosterCharacterName(id);
-    else if (id == lobby::kCharRandom)
-        name = "Random";
-    snprintf(out, size, "%s", name);
+    snprintf(out, size, "%s", id >= 1 && id <= 50 ? RosterCharacterName(id) : "");
 }
 
 } // namespace
@@ -3669,14 +3663,24 @@ void LobbyFlow_FillPresence(PresenceSnapshot* out)
     }
 
     if (out->activity == PresenceActivity::Spectating) {
-        snprintf(out->watchP1, sizeof(out->watchP1), "%s", g_watchNames[0]);
-        snprintf(out->watchP2, sizeof(out->watchP2), "%s", g_watchNames[1]);
+        // Names are only current once the feed is up; while still joining
+        // they may belong to an earlier match ("Watching a match" instead).
+        if (g_spectating) {
+            snprintf(out->watchP1, sizeof(out->watchP1), "%s", g_watchNames[0]);
+            snprintf(out->watchP2, sizeof(out->watchP2), "%s", g_watchNames[1]);
+        }
     } else if (out->activity == PresenceActivity::InMatch) {
         snprintf(out->opponent, sizeof(out->opponent), "%s", g_pairing.opponentName);
+        // The teams actually being played: random members are drawn into the
+        // boot config at launch (as BeginLaunch reports them to the room), and
+        // g_pairing keeps the players' own choices.
+        const TrainingBootConfig& boot = TrainingBoot_GetConfig();
+        const bool p1 = g_pairing.localSide == 0;
         for (int i = 0; i < 3; ++i) {
-            CopyTeamName(out->localTeam[i], sizeof(out->localTeam[i]), g_pairing.localTeam.chars[i]);
+            CopyTeamName(out->localTeam[i], sizeof(out->localTeam[i]),
+                         p1 ? boot.p1Chars[i] : boot.p2Chars[i]);
             CopyTeamName(out->opponentTeam[i], sizeof(out->opponentTeam[i]),
-                         g_pairing.opponentTeam.chars[i]);
+                         p1 ? boot.p2Chars[i] : boot.p1Chars[i]);
         }
         out->firstTo = g_setFirstTo;
         out->winsLocal = g_setWins[0];
