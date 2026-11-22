@@ -10,6 +10,7 @@
 #include "steam_lobby.h"
 #include "umvc3menu.h"
 #include "d3d9reset.h"
+#include "discord_presence.h"
 #include "d3d9ex.h"
 #include "lag_diagnostics.h"
 #include <Windows.h>
@@ -236,6 +237,16 @@ void EscMenuImGui_Draw()
     // if (saveFailed)
     //     ImGui::TextUnformatted("Could not save; previous setting retained.");
     EscMenuImGui_DrawDisplaySettings();
+    bool discordPresence = DiscordPresence_GetLevel() == DiscordPresenceLevel::Basic;
+    static bool discordSaveFailed = false;
+    if (ImGui::Checkbox("Discord Rich Presence", &discordPresence))
+        discordSaveFailed = !DiscordPresence_SetLevel(
+            discordPresence ? DiscordPresenceLevel::Basic : DiscordPresenceLevel::Off);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Shows your lobby, opponent, characters and match time on your Discord\n"
+                          "profile, with a Join button for public lobbies. Needs the Discord app.");
+    if (discordSaveFailed)
+        ImGui::TextUnformatted("Could not save Discord Rich Presence.");
     ImGui::Separator();
     const auto capture = LagDiagnostics_GetCaptureStatus();
     const bool capturing = capture == LagCaptureStatus::Starting ||
