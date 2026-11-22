@@ -2,6 +2,7 @@
 #include "lobby_flow.h"
 #include "lobby_local.h"
 #include "lobby_music.h"
+#include "discord_presence_format.h"
 
 #include "LaunchMenu.h"
 #include "assist_names.h"
@@ -3597,6 +3598,90 @@ bool LobbyFlow_IsSpectating()
 bool LobbyFlow_PlayerInCharSelect()
 {
     return g_enabled && g_charSelArea && !g_spectating && !g_charSelWatchJoin;
+}
+
+namespace {
+
+// One character name for the presence line; a team slot left to chance reads
+// "Random" (the draw happens as the match launches).
+void CopyTeamName(char* out, size_t size, int32_t id)
+{
+    const char* name = "";
+    if (id > 0)
+        name = RosterCharacterName(id);
+    else if (id == lobby::kCharRandom)
+        name = "Random";
+    snprintf(out, size, "%s", name);
+}
+
+} // namespace
+
+void LobbyFlow_FillPresence(PresenceSnapshot* out)
+{
+    if (!g_enabled || !out) return;
+
+    if (g_releasedToMainMenu) {
+        out->activity = PresenceActivity::OfflineMenu;
+        return;
+    }
+    if (!g_service) {
+        out->activity = PresenceActivity::LobbyMenu;
+        return;
+    }
+
+    const RoomState& room = g_service->Room();
+    if (room.inRoom) {
+        out->lobbyId = room.id;
+        snprintf(out->roomName, sizeof(out->roomName), "%s", room.settings.name);
+        out->memberCount = room.memberCount;
+        out->memberLimit = room.settings.maxMembers;
+        // The host publishes both limits as lobby data: "private" for an
+        // invitation-only room and "vis" for a friends-only one (lobby_room.cpp).
+        // RoomSettings::visibility is never filled by RefreshRoom, so it cannot
+        // answer this.
+        out->roomPublic = strcmp(SteamRoom_GetData("private"), "1") != 0 &&
+                          strcmp(SteamRoom_GetData("vis"), "1") != 0;
+    }
+
+    const Member* local = LocalRoomMember();
+    if (local) {
+        out->seat = local->side < 2 ? local->slot : -1;
+        out->queuePos = local->queueSlot >= 0 && local->queuePos >= 1 ? local->queuePos : -1;
+    }
+
+    switch (g_phase) {
+    case Phase::Lobby:
+    case Phase::Returning:
+        out->activity = room.inRoom ? PresenceActivity::InRoom : PresenceActivity::LobbyMenu;
+        break;
+    case Phase::Connecting:
+    case Phase::Handshake:
+        out->activity = PresenceActivity::InRoom;
+        out->startingMatch = true;
+        break;
+    case Phase::WatchJoining:
+        out->activity = PresenceActivity::Spectating;
+        break;
+    case Phase::Launching:
+    case Phase::InMatch:
+        out->activity = g_spectating ? PresenceActivity::Spectating : PresenceActivity::InMatch;
+        break;
+    }
+
+    if (out->activity == PresenceActivity::Spectating) {
+        snprintf(out->watchP1, sizeof(out->watchP1), "%s", g_watchNames[0]);
+        snprintf(out->watchP2, sizeof(out->watchP2), "%s", g_watchNames[1]);
+    } else if (out->activity == PresenceActivity::InMatch) {
+        snprintf(out->opponent, sizeof(out->opponent), "%s", g_pairing.opponentName);
+        for (int i = 0; i < 3; ++i) {
+            CopyTeamName(out->localTeam[i], sizeof(out->localTeam[i]), g_pairing.localTeam.chars[i]);
+            CopyTeamName(out->opponentTeam[i], sizeof(out->opponentTeam[i]),
+                         g_pairing.opponentTeam.chars[i]);
+        }
+        out->firstTo = g_setFirstTo;
+        out->winsLocal = g_setWins[0];
+        out->winsOpponent = g_setWins[1];
+    }
 }
 
 bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2)

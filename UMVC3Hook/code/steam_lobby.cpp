@@ -2060,6 +2060,14 @@ void SteamLobby_QueueJoin(uint64_t lobbyId)
     QueueJoinLobby(lobbyId);
 }
 
+bool SteamLobby_QueueJoinConnectString(const char* connect)
+{
+    uint64_t lobbyId = 0;
+    if (!connect || !ParseLobbyConnectString(connect, lobbyId)) return false;
+    SteamLobby_QueueJoin(lobbyId);
+    return true;
+}
+
 uint64_t SteamLobby_QueuedJoin()
 {
     if (LocalLobby_Enabled()) return 0;

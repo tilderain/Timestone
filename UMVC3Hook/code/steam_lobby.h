@@ -59,6 +59,9 @@ bool SteamLobby_TakeReplacementJoin(uint64_t* lobbyId);
 // joined by the next SteamLobby_Pump that is free to, like an invite accepted
 // while the game runs. QueuedJoin is that lobby until the pump has taken it.
 void SteamLobby_QueueJoin(uint64_t lobbyId);
+// As above, from a Discord join secret ("+connect_lobby <id>"). Rejects
+// anything the Steam invite parser would reject. Safe from any thread.
+bool SteamLobby_QueueJoinConnectString(const char* connect);
 uint64_t SteamLobby_QueuedJoin();
 bool SteamLobby_ResetHostPeer();
 bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
