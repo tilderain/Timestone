@@ -754,6 +754,45 @@ int main(int argc, char** argv)
         Settle(ui, 2);
         ok &= Capture(ui, directory, "team_icon_picked");
     }
+    {   // A team member left to chance.
+        FakeService service;
+        LobbyUi ui(service, kRoster, DefaultPrefs());
+        Settle(ui);
+        ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::confirm));
+        Settle(ui);
+        for (int i = 0; i < 4; ++i) ui.Update(Press(&Input::down)); // SECOND character
+        ui.Update(Press(&Input::confirm));
+        for (int i = 0; i < 5; ++i) ui.Update(Press(&Input::down)); // under the roster: RANDOM
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_random_pick");
+        ui.Update(Press(&Input::confirm));
+        ui.Update(Press(&Input::down)); // its assist row
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_random");
+        for (int i = 0; i < 5; ++i) ui.Update(Press(&Input::up)); // PRESET row
+        ui.Update(Press(&Input::confirm));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_random_presets");
+    }
+    {   // The pre-match prompt with a random member on the team in use.
+        FakeService service;
+        UiPrefs prefs = DefaultPrefs();
+        prefs.presets[0].team.chars[1] = kCharRandom;
+        prefs.team = prefs.presets[0].team;
+        LobbyUi ui(service, kRoster, prefs);
+        Settle(ui);
+        Populate(service, 4);
+        Settle(ui, 100);
+        ui.Update(Press(&Input::confirm)); // sit opposite Vevota
+        Settle(ui, 90);
+        ui.Update(Press(&Input::confirm)); // delay pick
+        Settle(ui, 3);
+        service.room.members[1].delayPick = kDelayPickAuto;
+        Settle(ui, 3);
+        ok &= Capture(ui, directory, "match_entry_random");
+    }
     {   // Notice modal.
         FakeService service;
         LobbyUi ui(service, kRoster, DefaultPrefs());

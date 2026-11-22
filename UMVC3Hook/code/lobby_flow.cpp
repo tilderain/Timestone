@@ -429,6 +429,42 @@ int32_t PickMatchStage(int localStage, int opponentStage)
     return count ? pool[(roll >> 8) % count] : g_rosterPrefs.stageId;
 }
 
+// Fills in a team's random members (kCharRandom) for a match: a character not
+// already on the team, one of its installed colors and one of its assists.
+// Player 1 does this for both teams as it launches, so the draw happens once
+// for the whole set and both players see the same result.
+void ResolveRandomMembers(Team& team, uint32_t& state)
+{
+    const auto next = [&state] {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return state >> 8;
+    };
+    for (int i = 0; i < 3; ++i) {
+        if (team.chars[i] != lobby::kCharRandom) continue;
+        int32_t pool[50];
+        int count = 0;
+        for (int32_t id = 1; id <= 50; ++id)
+            if (id != team.chars[0] && id != team.chars[1] && id != team.chars[2])
+                pool[count++] = id;
+        const int32_t id = pool[next() % count];
+        const int colors = RosterColorCount(id);
+        team.chars[i] = id;
+        team.colors[i] = static_cast<int32_t>(next() % colors);
+        team.assists[i] = static_cast<int32_t>(next() % 3);
+    }
+}
+
+uint32_t RandomSeed()
+{
+    LARGE_INTEGER counter = {};
+    QueryPerformanceCounter(&counter);
+    const uint32_t seed = static_cast<uint32_t>(counter.QuadPart ^ (counter.QuadPart >> 17) ^
+                                                GetTickCount64() * 2654435761u);
+    return seed ? seed : 0x9E3779B9u;
+}
+
 const RosterSource kRosterSource = {
     RosterCharacterCount, RosterCharacterId, RosterCharacterName, RosterAssistName,
     RosterColorCount,     RosterPresetCount, RosterPreset,
@@ -455,7 +491,8 @@ void RemoveDuplicateCharacters(Team& team)
     for (int i = 1; i < 3; ++i) {
         bool repeated = false;
         for (int j = 0; j < i; ++j) repeated |= team.chars[j] == team.chars[i];
-        if (!repeated) continue;
+        // Any number of members may be left to chance.
+        if (!repeated || team.chars[i] == lobby::kCharRandom) continue;
         for (int32_t id = 1; id <= 50; ++id) {
             if (id == team.chars[0] || id == team.chars[1] || id == team.chars[2]) continue;
             team.chars[i] = id;
@@ -509,9 +546,11 @@ UiPrefs LoadPrefs()
             preset.team.chars[m] = v[m * 3];
             preset.team.assists[m] = v[m * 3 + 1];
             preset.team.colors[m] = v[m * 3 + 2];
-            usable &= preset.team.chars[m] >= 1 && preset.team.chars[m] <= 50 &&
+            const bool random = preset.team.chars[m] == lobby::kCharRandom;
+            usable &= (random || (preset.team.chars[m] >= 1 && preset.team.chars[m] <= 50)) &&
                       preset.team.assists[m] >= 0 && preset.team.assists[m] <= 2;
-            if (usable && !ChrColors_Available(preset.team.chars[m], preset.team.colors[m]))
+            if (usable &&
+                (random || !ChrColors_Available(preset.team.chars[m], preset.team.colors[m])))
                 preset.team.colors[m] = 0;
         }
         if (!usable) continue;
@@ -572,7 +611,11 @@ void SavePrefs(const UiPrefs& prefs)
 {
     char path[MAX_PATH] = {};
     SettingsPath(path, sizeof(path));
-    for (int i = 0; i < 3; ++i) {
+    // The launcher's roster shares these keys and knows no random member: it
+    // keeps a team of real characters, the last one this player used.
+    bool anyRandom = false;
+    for (int i = 0; i < 3; ++i) anyRandom |= prefs.team.chars[i] == lobby::kCharRandom;
+    for (int i = 0; i < 3 && !anyRandom; ++i) {
         g_rosterPrefs.chars[i] = prefs.team.chars[i];
         g_rosterPrefs.assists[i] = prefs.team.assists[i];
         g_rosterPrefs.colors[i] = prefs.team.colors[i];
@@ -1372,15 +1415,29 @@ bool SendLaunchAsHost()
     settings.rollbackFrames = rollback;
     settings.effective_frame = -1;
 
+    // Random members are drawn here, once, for the set that is starting.
+    Team localTeam = g_pairing.localTeam, opponentTeam = g_pairing.opponentTeam;
+    uint32_t randomState = RandomSeed();
+    ResolveRandomMembers(localTeam, randomState);
+    ResolveRandomMembers(opponentTeam, randomState);
+    for (int side = 0; side < 2; ++side) {
+        const Team& asked = side ? g_pairing.opponentTeam : g_pairing.localTeam;
+        const Team& drawn = side ? opponentTeam : localTeam;
+        if (memcmp(&asked, &drawn, sizeof(Team)) != 0)
+            HookLog("LobbyFlow: P%d random members drawn: %d/%d/%d -> %d/%d/%d\n", side + 1,
+                    asked.chars[0], asked.chars[1], asked.chars[2], drawn.chars[0],
+                    drawn.chars[1], drawn.chars[2]);
+    }
+
     LaunchTrainingPacket launch = {};
     launch.type = PACKET_LAUNCH_TRAINING;
     for (int i = 0; i < 3; ++i) {
-        launch.p1Chars[i] = g_pairing.localTeam.chars[i];
-        launch.p1Colors[i] = g_pairing.localTeam.colors[i];
-        launch.p1Assists[i] = g_pairing.localTeam.assists[i];
-        launch.p2Chars[i] = g_pairing.opponentTeam.chars[i];
-        launch.p2Colors[i] = g_pairing.opponentTeam.colors[i];
-        launch.p2Assists[i] = g_pairing.opponentTeam.assists[i];
+        launch.p1Chars[i] = localTeam.chars[i];
+        launch.p1Colors[i] = localTeam.colors[i];
+        launch.p1Assists[i] = localTeam.assists[i];
+        launch.p2Chars[i] = opponentTeam.chars[i];
+        launch.p2Colors[i] = opponentTeam.colors[i];
+        launch.p2Assists[i] = opponentTeam.assists[i];
     }
     launch.stageId = PickMatchStage(g_pairing.localStage, g_pairing.opponentStage);
     HookLog("LobbyFlow: stage %d from preferences local=%d opponent=%d\n", launch.stageId,
@@ -1406,7 +1463,7 @@ bool SendLaunchAsHost()
     TrainingBoot_SetCpuMode(TRAINING_CPU_NONE);
     TrainingBoot_SetFiveBarStart(false);
     TrainingBootConfig config;
-    FillBootConfig(config, g_pairing.localTeam, g_pairing.opponentTeam, launch.stageId);
+    FillBootConfig(config, localTeam, opponentTeam, launch.stageId);
     TrainingBoot_SetConfig(config);
     HookLog("LobbyFlow: sent launch as P1 ping=%u ms settings=%dD/%dR stage=%d\n", rtt, delay,
             rollback, launch.stageId);
@@ -1623,6 +1680,18 @@ void BeginLaunch()
     g_leaveSeatOnReturn.store(false, std::memory_order_relaxed);
     if (g_service) {
         ResetSet(g_service->Room().settings.firstTo);
+        // The room sees the team actually being played, random members
+        // included; the player's own choice goes back up on return
+        // (LobbyUi::ReturnToRoom).
+        const TrainingBootConfig& boot = TrainingBoot_GetConfig();
+        const bool p1 = g_pairing.localSide == 0;
+        Team playing = {};
+        for (int i = 0; i < 3; ++i) {
+            playing.chars[i] = p1 ? boot.p1Chars[i] : boot.p2Chars[i];
+            playing.colors[i] = p1 ? boot.p1Colors[i] : boot.p2Colors[i];
+            playing.assists[i] = p1 ? boot.p1Assists[i] : boot.p2Assists[i];
+        }
+        g_service->SetTeam(playing);
         g_service->SetLocalStatus(MemberStatus::Fighting);
     }
     SetPhase(Phase::Launching);

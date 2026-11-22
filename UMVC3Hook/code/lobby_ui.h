@@ -172,6 +172,7 @@ private:
     void CommitTeam();
     void StepTeamField(int delta);
     void SetTeamCharacter(int member, int32_t id);
+    bool RandomOffered() const;
     void BeginText(TextTarget target, const char* initial);
     void EndText(bool accept);
 
@@ -200,7 +201,8 @@ private:
     int seatSide_ = 0;
     int teamCursor_ = 0;
     bool charPickerOpen_ = false; // character dropdown on a team member row
-    int charPickerCursor_ = 0;    // roster index highlighted in it
+    int charPickerCursor_ = 0;    // roster index highlighted in it; the roster's count is RANDOM
+    int charPickerColumn_ = 0;    // column the cursor left the roster from, to go back up to
     bool colorPickerOpen_ = false; // every color at once, on a team member's COLOR row
     int colorPickerCursor_ = 0;    // color highlighted in it
     bool iconPickerOpen_ = false; // icon grid on the team screen's ICON row

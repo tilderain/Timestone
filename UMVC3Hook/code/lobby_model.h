@@ -23,8 +23,14 @@ constexpr int kFirstToChoices[] = {1, 2, 3, 5, 7, 10, kFirstToEndless};
 constexpr int kFirstToChoiceCount = 7;
 constexpr int kMaxFirstTo = 10;
 
+// A team member left to chance: the character, its color and its assist are
+// drawn when a match is launched (once for the whole set) and are not known
+// before. Only a player's own presets can hold one; the game's reserve units
+// cannot.
+constexpr int32_t kCharRandom = -1;
+
 struct Team {
-    int32_t chars[3];
+    int32_t chars[3];   // a character id, or kCharRandom
     int32_t assists[3]; // 0 = alpha, 1 = beta, 2 = gamma
     int32_t colors[3];  // zero-based archive variant
 };

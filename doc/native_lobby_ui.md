@@ -963,6 +963,31 @@ in use. On the first run the team so far becomes preset 1; the old
   main menu while the save runs and sets the byte again should the pre-menu
   end without doing so. **Unverified in game.**
 
+### Random members
+
+A team member can be `kCharRandom` (-1, `lobby_model.h`): the cell under the
+roster in the character grid, drawn with the stage select's RANDOM icon. Its
+assist and color rows show a dash and cannot be set. Any number of members may
+be random. Only the player's own presets hold one (`[LobbyPresets] TeamN`
+stores -1); the grid does not offer it while a reserve unit is in use, and a
+team with one cannot be copied into a reserve unit.
+
+The room is published the -1, so the opponent sees RANDOM until the match.
+Player 1 draws both teams' random members in `SendLaunchAsHost`
+(`ResolveRandomMembers`: a character not already on that team, one of its
+installed colors, one of three assists) and the launch packet carries real
+ids, so the receiving side and `ApplyTrainingLaunchPacket` are unchanged. A
+set is one launch (rematches stay in the game), so the draw holds for the
+whole set and is made again for the next one. `BeginLaunch` publishes the
+team actually being played for the match slot's portraits and spectators;
+`LobbyUi::ReturnToRoom` publishes the player's own choice again.
+
+A client from before this (0.6.4) fails `IsPlausibleTeam` on a -1 and shows
+that member as not seated; lobbies are matched by version, so this only
+arises between a development build and the release of the same number. Not
+run in the game yet (2026-11-22); screens checked in the offline preview
+(`team_random*`, `match_entry_random`).
+
 ### Preferred stage
 
 Confirm on the team screen's PREFERRED STAGE row opens a grid of the stage select
