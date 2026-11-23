@@ -3685,7 +3685,7 @@ void LobbyFlow_FillPresence(PresenceSnapshot* out)
 
     if (out->activity == PresenceActivity::Spectating) {
         // Names are only current once the feed is up; while still joining
-        // they may belong to an earlier match ("Watching a match" instead).
+        // they may belong to an earlier match, so the line is left out.
         if (g_spectating) {
             snprintf(out->watchP1, sizeof(out->watchP1), "%s", g_watchNames[0]);
             snprintf(out->watchP2, sizeof(out->watchP2), "%s", g_watchNames[1]);

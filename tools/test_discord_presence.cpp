@@ -169,8 +169,8 @@ int main()
         CHECK(Contains(json, "\"secrets\":{\"join\":\"+connect_lobby 109775244080946091\"}"));
         CHECK(Contains(json, "\"party\":{\"id\":\"timestone-"));
         CHECK(Contains(json, "\"size\":[3,8]"));
-        CHECK(Value(json, "details") == "Room: Probe");
-        CHECK(Value(json, "state") == "Hanging out");
+        CHECK(Value(json, "details") == "Lobby: Probe");
+        CHECK(Value(json, "state") == "In Lobby");
 
         const std::size_t idAt = json.find("109775244080946091");
         const std::size_t partyAt = json.find("\"party\":{\"id\":\"timestone-");
@@ -224,8 +224,8 @@ int main()
         Copy(s.version, 16, "0.6.5");
 
         const std::string json = DiscordPresence_ActivityJson(s);
-        CHECK(Value(json, "details") == "vs Bob - 1-0 (FT2)");
-        CHECK(Value(json, "state") == "Ryu/Dante/Zero vs Hulk/Thor/Storm");
+        CHECK(Value(json, "details") == "Playing: versus - 1-0 (FT2)");
+        CHECK(Value(json, "state") == "vs Bob - Ryu/Dante/Zero vs Hulk/Thor/Storm");
         CHECK(Contains(json, "\"timestamps\":{\"start\":1700000000}"));
         CHECK(Contains(json, "\"assets\":{\"large_image\":\"timestone\",\"large_text\":\"Timestone 0.6.5\"}"));
         CHECK(Contains(json, "\"instance\":false"));
@@ -236,7 +236,7 @@ int main()
         PresenceSnapshot s = Room(true, 1, 8);
         std::snprintf(s.roomName, kPresenceNameBytes, "a\"b\\c%c", '\x01');
         const std::string json = DiscordPresence_ActivityJson(s);
-        CHECK(Contains(json, "\"details\":\"Room: a\\\"b\\\\c\\u0001\""));
+        CHECK(Contains(json, "\"details\":\"Lobby: a\\\"b\\\\c\\u0001\""));
     }
 
     // 6. Multi-byte names survive whole, and text over 128 bytes is cut
@@ -248,25 +248,28 @@ int main()
         Copy(s.roomName, kPresenceNameBytes, name.c_str());
         const std::string json = DiscordPresence_ActivityJson(s);
         const std::string details = Value(json, "details");
-        CHECK(details == "Room: " + name);
+        CHECK(details == "Lobby: " + name);
         CHECK(details.size() <= 128);
-        for (std::size_t i = 0; i < details.size(); ++i) {
-            const unsigned char c = static_cast<unsigned char>(details[i]);
-            if (c == 0xC3) CHECK(i + 1 < details.size() && static_cast<unsigned char>(details[i + 1]) == 0xA9);
-        }
 
-        PresenceSnapshot watch = Room(true, 1, 8);
-        watch.activity = PresenceActivity::Spectating;
-        Copy(watch.watchP1, kPresenceNameBytes, name.c_str()); // 62 bytes
-        Copy(watch.watchP2, kPresenceNameBytes, name.c_str());
-        const std::string cut = Value(DiscordPresence_ActivityJson(watch), "details");
+        // A match line is the one long enough to be cut: opponent plus both
+        // teams can pass 128 bytes.
+        PresenceSnapshot match = Room(true, 2, 8);
+        match.activity = PresenceActivity::InMatch;
+        Copy(match.opponent, kPresenceNameBytes, name.c_str()); // 62 bytes
+        std::string slot;
+        for (int i = 0; i < 11; ++i) slot += "\xC3\xA9";
+        for (int i = 0; i < 3; ++i) {
+            Copy(match.localTeam[i], kPresenceCharBytes, slot.c_str());
+            Copy(match.opponentTeam[i], kPresenceCharBytes, slot.c_str());
+        }
+        const std::string cut = Value(DiscordPresence_ActivityJson(match), "state");
         CHECK(cut.size() <= 128);
-        CHECK(cut.size() > 120);
-        CHECK(cut.compare(0, 9, "Watching ") == 0);
-        for (std::size_t i = 9; i < cut.size(); ++i) {
+        CHECK(cut.size() > 100);
+        CHECK(cut.compare(0, 3, "vs ") == 0);
+        for (std::size_t i = 0; i < cut.size(); ++i) {
             const unsigned char c = static_cast<unsigned char>(cut[i]);
             if (c == 0xC3) CHECK(i + 1 < cut.size() && static_cast<unsigned char>(cut[i + 1]) == 0xA9);
-            if (c == 0xA9) CHECK(static_cast<unsigned char>(cut[i - 1]) == 0xC3);
+            if (c == 0xA9) CHECK(i > 0 && static_cast<unsigned char>(cut[i - 1]) == 0xC3);
         }
     }
 

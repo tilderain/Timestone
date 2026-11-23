@@ -51,12 +51,14 @@ again starts it.
 
 | Where | Details | State |
 |---|---|---|
-| Online lobby, no room | In the online lobby | Browsing rooms |
-| In a room | Room: `<name>` | Hanging out / Seated at setup N / Queued (#N) / Starting a match |
-| Playing a room match | vs `<opponent>` - `<wins>-<losses>` (FT`<n>`) | `<your team>` vs `<their team>`, with a match timer |
-| Watching a room match | Watching `<player 1>` vs `<player 2>` | Room: `<name>` |
-| Launcher training | Training mode | — |
-| Launcher direct IP match | Direct online match | — |
+| Online lobby, no room | In Menus | — |
+| In a room | Lobby: `<name>` | In Lobby / Connected P`<n>` / Queued (#`<n>`) / Starting a match |
+| Playing a room match | Playing: versus - `<wins>`-`<losses>` (FT`<n>`) | vs `<opponent>` - `<your team>` vs `<their team>`, with a match timer |
+| Watching a room match | Watching a game | `<player 1>` vs `<player 2>` |
+| In the game's main menu | In Menus | — |
+| Launcher training | Training | — |
+| Launcher two-window training | Training | — |
+| Launcher direct IP match | Playing: versus | with a match timer |
 
 Teams are the ones actually being played, so a member left to chance shows
 the character the launch drew for it.

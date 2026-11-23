@@ -104,60 +104,50 @@ std::string DiscordPresence_ActivityJson(const PresenceSnapshot& s)
 
     switch (s.activity) {
     case PresenceActivity::LobbyMenu:
-        details = "In the online lobby";
-        state = "Browsing rooms";
+        details = "In Menus";
         break;
     case PresenceActivity::InRoom:
-        details = s.roomName[0] ? std::string("Room: ") + s.roomName : std::string("In a room");
+        details = s.roomName[0] ? std::string("Lobby: ") + s.roomName : std::string("In a lobby");
         if (s.startingMatch)
             state = "Starting a match";
         else if (s.seat >= 0)
-            state = "Seated at setup " + Decimal(s.seat + 1);
+            state = "Connected P" + Decimal(s.seat + 1);
         else if (s.queuePos >= 1)
             state = "Queued (#" + Decimal(s.queuePos) + ")";
         else
-            state = "Hanging out";
+            state = "In Lobby";
         break;
     case PresenceActivity::InMatch: {
-        details = s.opponent[0] ? std::string("vs ") + s.opponent : std::string("In a match");
+        details = "Playing: versus";
         if (s.firstTo > 0) {
             details += " - " + Decimal(s.winsLocal) + "-" + Decimal(s.winsOpponent) + " (FT" +
                        Decimal(s.firstTo) + ")";
         } else if (s.winsLocal + s.winsOpponent > 0) {
             details += " - " + Decimal(s.winsLocal) + "-" + Decimal(s.winsOpponent);
         }
+        state = s.opponent[0] ? std::string("vs ") + s.opponent : std::string("In a match");
         const std::string local = JoinNames(s.localTeam);
         const std::string opponent = JoinNames(s.opponentTeam);
-        if (local.empty() && opponent.empty())
-            state = "Fighting";
-        else if (local.empty())
-            state = opponent;
-        else if (opponent.empty())
-            state = local;
-        else
-            state = local + " vs " + opponent;
+        if (!local.empty() && !opponent.empty()) state += " - " + local + " vs " + opponent;
         timer = s.startUnix > 0;
         break;
     }
     case PresenceActivity::Spectating:
+        // Names are only current once the feed is up; the second line is left
+        // out while still joining.
+        details = "Watching a game";
         if (s.watchP1[0] && s.watchP2[0])
-            details = std::string("Watching ") + s.watchP1 + " vs " + s.watchP2;
-        else
-            details = "Watching a match";
-        state = s.roomName[0] ? std::string("Room: ") + s.roomName : std::string("In a room");
+            state = std::string(s.watchP1) + " vs " + s.watchP2;
         break;
     case PresenceActivity::OfflineMenu:
-        details = "Playing offline";
+        details = "In Menus";
         break;
     case PresenceActivity::Training:
-        details = "Training mode";
-        break;
     case PresenceActivity::DualTraining:
-        details = "Training mode";
-        state = "Two-window training";
+        details = "Training";
         break;
     case PresenceActivity::DirectMatch:
-        details = "Direct online match";
+        details = "Playing: versus";
         timer = s.startUnix > 0;
         break;
     case PresenceActivity::None:
