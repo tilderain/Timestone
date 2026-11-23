@@ -52,7 +52,7 @@ std::string Decimal(long long value)
 void AppendField(std::string& out, const char* key, const std::string& value)
 {
     if (value.size() < 2) return;
-    if (!out.empty()) out += ',';
+    if (out.size() > 1) out += ','; // out starts as "{"
     out += '"';
     out += key;
     out += "\":";

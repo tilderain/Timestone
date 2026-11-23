@@ -2,6 +2,7 @@
 //   make DISCORD_PRESENCE_TEST=1 discord-presence-test
 #include "discord_presence_format.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -49,9 +50,116 @@ std::string Value(const std::string& json, const char* key)
     return out;
 }
 
+// A strict JSON reader. Discord's client parses every payload and closes the
+// pipe on the first syntax error, so finding a key in the text is not enough.
+struct JsonReader {
+    const std::string& t;
+    std::size_t i = 0;
+
+    void Space()
+    {
+        while (i < t.size() && (t[i] == ' ' || t[i] == '\n' || t[i] == '\r' || t[i] == '\t')) ++i;
+    }
+    bool Eat(char c)
+    {
+        Space();
+        if (i >= t.size() || t[i] != c) return false;
+        ++i;
+        return true;
+    }
+    bool Digits()
+    {
+        const std::size_t start = i;
+        while (i < t.size() && std::isdigit(static_cast<unsigned char>(t[i]))) ++i;
+        return i > start;
+    }
+    bool String()
+    {
+        if (!Eat('"')) return false;
+        while (i < t.size()) {
+            const unsigned char c = static_cast<unsigned char>(t[i++]);
+            if (c == '"') return true;
+            if (c < 0x20) return false;
+            if (c != '\\') continue;
+            if (i >= t.size()) return false;
+            const char e = t[i++];
+            if (e == 'u') {
+                for (int k = 0; k < 4; ++k)
+                    if (i >= t.size() || !std::isxdigit(static_cast<unsigned char>(t[i++]))) return false;
+            } else if (e == '\0' || !std::strchr("\"\\/bfnrt", e)) {
+                return false;
+            }
+        }
+        return false;
+    }
+    bool Number()
+    {
+        if (i < t.size() && t[i] == '-') ++i;
+        if (i < t.size() && t[i] == '0')
+            ++i;
+        else if (!Digits())
+            return false;
+        if (i < t.size() && t[i] == '.' && (++i, !Digits())) return false;
+        if (i < t.size() && (t[i] == 'e' || t[i] == 'E')) {
+            ++i;
+            if (i < t.size() && (t[i] == '+' || t[i] == '-')) ++i;
+            if (!Digits()) return false;
+        }
+        return true;
+    }
+    bool Word(const char* word)
+    {
+        const std::size_t n = std::strlen(word);
+        if (t.compare(i, n, word) != 0) return false;
+        i += n;
+        return true;
+    }
+    bool Value(int depth)
+    {
+        Space();
+        if (depth > 32 || i >= t.size()) return false;
+        switch (t[i]) {
+        case '{':
+            ++i;
+            if (Eat('}')) return true;
+            do {
+                if (!String() || !Eat(':') || !Value(depth + 1)) return false;
+            } while (Eat(','));
+            return Eat('}');
+        case '[':
+            ++i;
+            if (Eat(']')) return true;
+            do {
+                if (!Value(depth + 1)) return false;
+            } while (Eat(','));
+            return Eat(']');
+        case '"': return String();
+        case 't': return Word("true");
+        case 'f': return Word("false");
+        case 'n': return Word("null");
+        default: return Number();
+        }
+    }
+};
+
+bool IsJson(const std::string& text)
+{
+    JsonReader reader{text};
+    if (!reader.Value(0)) return false;
+    reader.Space();
+    return reader.i == text.size();
+}
+
+void CheckJson(const std::string& json, const char* file, int line)
+{
+    Check(IsJson(json), file, line, "valid JSON");
+    if (!IsJson(json)) std::printf("    %s\n", json.c_str());
+}
+
 } // namespace
 
 #define CHECK(cond) Check((cond), __FILE__, __LINE__, #cond)
+#define CHECK_JSON(json) CheckJson((json), __FILE__, __LINE__)
 
 int main()
 {
@@ -224,6 +332,90 @@ int main()
     CHECK(!DiscordPresence_ShouldAsk(1, 0));
     CHECK(!DiscordPresence_ShouldAsk(0, 1));
     CHECK(!DiscordPresence_ShouldAsk(1, 1));
+
+    // 11. Every payload is whole, valid JSON: the client closes the pipe on
+    //     the first one that is not (seen 2026-11-22: "{," at position 53).
+    {
+        CHECK(IsJson("{\"a\":[1,-2.5e3,true,null],\"b\":{\"c\":\"\\u0001\"}}"));
+        CHECK(!IsJson("{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":6988,\"activity\":{,\"details\":\"x\"}}}"));
+        CHECK(!IsJson("{\"a\":1,}"));
+        CHECK(!IsJson("{\"a\":1}x"));
+
+        PresenceSnapshot all[16];
+        int count = 0;
+        all[count++] = Room(true, 3, 8);
+        all[count++] = Room(false, 3, 8);
+        all[count++] = Room(true, 8, 8);
+        {
+            PresenceSnapshot s = Room(true, 1, 8);
+            std::snprintf(s.roomName, kPresenceNameBytes, "a\"b\\c%c", '\x01');
+            all[count++] = s;
+        }
+        {
+            PresenceSnapshot s = Room(true, 2, 8);
+            s.roomName[0] = '\0';
+            s.seat = 0;
+            all[count++] = s;
+        }
+        {
+            PresenceSnapshot s = Room(true, 2, 8);
+            s.queuePos = 2;
+            all[count++] = s;
+        }
+        {
+            PresenceSnapshot s = Room(true, 2, 8);
+            s.activity = PresenceActivity::InMatch;
+            Copy(s.opponent, kPresenceNameBytes, "Bob");
+            Copy(s.localTeam[0], kPresenceCharBytes, "Ryu");
+            s.firstTo = 2;
+            s.winsLocal = 1;
+            s.startUnix = 1700000000;
+            all[count++] = s;
+        }
+        {
+            PresenceSnapshot s = Room(true, 2, 8);
+            s.activity = PresenceActivity::InMatch; // no names, no timer yet
+            all[count++] = s;
+        }
+        {
+            PresenceSnapshot s = Room(false, 2, 8);
+            s.activity = PresenceActivity::Spectating;
+            Copy(s.watchP1, kPresenceNameBytes, "A");
+            Copy(s.watchP2, kPresenceNameBytes, "B");
+            all[count++] = s;
+        }
+        const PresenceActivity plain[] = {PresenceActivity::LobbyMenu, PresenceActivity::OfflineMenu,
+                                          PresenceActivity::Training, PresenceActivity::DualTraining,
+                                          PresenceActivity::DirectMatch};
+        for (PresenceActivity activity : plain) {
+            PresenceSnapshot s;
+            s.activity = activity;
+            Copy(s.version, 16, "0.6.5");
+            all[count++] = s;
+        }
+        all[count - 1].startUnix = 1700000000; // the direct match's timer
+        {
+            PresenceSnapshot s;
+            s.activity = PresenceActivity::Training; // no version
+            all[count++] = s;
+        }
+
+        for (int n = 0; n < count; ++n) {
+            const std::string activity = DiscordPresence_ActivityJson(all[n]);
+            CHECK(!activity.empty());
+            CHECK_JSON(activity);
+            CHECK_JSON(DiscordPresence_SetActivityJson(activity, 6988, static_cast<uint32_t>(n)));
+        }
+        PresenceSnapshot lobby;
+        lobby.activity = PresenceActivity::LobbyMenu;
+        CHECK(DiscordPresence_ActivityJson(lobby).compare(0, 11, "{\"details\":") == 0);
+
+        CHECK_JSON(DiscordPresence_SetActivityJson("", 6988, 1));
+        CHECK_JSON(DiscordPresence_HandshakeJson("1544202390536982610"));
+        CHECK_JSON(DiscordPresence_SubscribeJson("ACTIVITY_JOIN", 2));
+        CHECK_JSON(DiscordPresence_JoinReplyJson("123", true, 3));
+        CHECK_JSON(DiscordPresence_JoinReplyJson("123", false, 4));
+    }
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
