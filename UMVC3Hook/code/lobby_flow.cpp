@@ -3647,6 +3647,7 @@ void LobbyFlow_FillPresence(PresenceSnapshot* out)
     const RoomState& room = g_service->Room();
     if (room.inRoom) {
         out->lobbyId = room.id;
+        out->ownerId = SteamRoom_GetOwnerId();
         snprintf(out->roomName, sizeof(out->roomName), "%s", room.settings.name);
         out->memberCount = room.memberCount;
         out->memberLimit = room.settings.maxMembers;

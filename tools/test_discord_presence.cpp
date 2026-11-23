@@ -35,6 +35,7 @@ PresenceSnapshot Room(bool pub, int members, int limit)
     PresenceSnapshot s;
     s.activity = PresenceActivity::InRoom;
     s.lobbyId = 109775244080946091ull;
+    s.ownerId = 76561198027378405ull;
     Copy(s.roomName, kPresenceNameBytes, "Probe");
     s.memberCount = members;
     s.memberLimit = limit;
@@ -163,10 +164,15 @@ void CheckJson(const std::string& json, const char* file, int line)
 
 int main()
 {
-    // 1. A public room with three of eight seats: joinable, id never published.
+    // 1. A public room with three of eight seats: a Join lobby button, and no
+    //    join secret.
     {
         const std::string json = DiscordPresence_ActivityJson(Room(true, 3, 8));
-        CHECK(Contains(json, "\"secrets\":{\"join\":\"+connect_lobby 109775244080946091\"}"));
+        CHECK(Contains(json,
+                       "\"buttons\":[{\"label\":\"Join lobby\",\"url\":"
+                       "\"https://mm.b.hero.rehab/joinlobby/357190/109775244080946091/"
+                       "76561198027378405\"}]"));
+        CHECK(!Contains(json, "\"secrets\""));
         CHECK(Contains(json, "\"party\":{\"id\":\"timestone-"));
         CHECK(Contains(json, "\"size\":[3,8]"));
         CHECK(Value(json, "details") == "Lobby: Probe");
@@ -186,7 +192,7 @@ int main()
         const std::size_t partyAt = json.find("\"party\":{\"id\":\"timestone-");
         CHECK(idAt != std::string::npos);
         CHECK(partyAt != std::string::npos);
-        CHECK(idAt > partyAt); // only inside the join secret
+        CHECK(idAt > partyAt); // only inside the join link
         CHECK(partyAt < idAt);
 
         const std::string partyId = Value(json, "id");
@@ -194,10 +200,11 @@ int main()
         CHECK(partyId.compare(0, 10, "timestone-") == 0);
     }
 
-    // 2. A private room: party but no join secret, and no privacy field.
+    // 2. A private room: party but no join button, and no privacy field.
     {
         const std::string json = DiscordPresence_ActivityJson(Room(false, 3, 8));
         CHECK(!Contains(json, "\"secrets\""));
+        CHECK(!Contains(json, "\"buttons\""));
         CHECK(!Contains(json, "\"privacy\""));
         CHECK(Contains(json, "\"size\":[3,8]"));
         CHECK(DiscordPresence_IsJoinable(Room(true, 3, 8)));
@@ -208,6 +215,7 @@ int main()
     {
         const std::string json = DiscordPresence_ActivityJson(Room(true, 8, 8));
         CHECK(!Contains(json, "\"secrets\""));
+        CHECK(!Contains(json, "\"buttons\""));
         CHECK(!DiscordPresence_IsJoinable(Room(true, 8, 8)));
     }
 
@@ -216,6 +224,7 @@ int main()
         PresenceSnapshot s;
         s.activity = PresenceActivity::InMatch;
         s.lobbyId = 109775244080946091ull;
+        s.ownerId = 76561198027378405ull;
         s.roomPublic = true;
         s.memberCount = 2;
         s.memberLimit = 8;
@@ -239,6 +248,13 @@ int main()
         CHECK(Contains(json, "\"timestamps\":{\"start\":1700000000}"));
         CHECK(Contains(json, "\"assets\":{\"large_image\":\"timestone\",\"large_text\":\"Timestone 0.6.5\"}"));
         CHECK(Contains(json, "\"instance\":false"));
+        // A match card keeps the Join lobby button: the room still has seats.
+        CHECK(Contains(json, "\"label\":\"Join lobby\""));
+
+        // Without the host's SteamID there is no link to build: no button.
+        PresenceSnapshot unknown = s;
+        unknown.ownerId = 0;
+        CHECK(!Contains(DiscordPresence_ActivityJson(unknown), "\"buttons\""));
     }
 
     // 5. Escaping of quotes, backslashes and control bytes.

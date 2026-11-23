@@ -91,6 +91,9 @@ void SteamRoom_SetMode(bool enabled);
 bool SteamRoom_IsActive();
 uint64_t SteamRoom_GetLobbyId();
 uint64_t SteamRoom_GetLocalId();
+// Host's SteamID64 of the current room, 0 when there is none: the second
+// half of a web join link.
+uint64_t SteamRoom_GetOwnerId();
 void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const char* name);
 void SteamRoom_Leave();
 int SteamRoom_GetMemberCount();

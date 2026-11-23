@@ -181,10 +181,17 @@ std::string DiscordPresence_ActivityJson(const PresenceSnapshot& s)
         }
         out += '}';
 
-        if (DiscordPresence_IsJoinable(s)) {
-            out += ",\"secrets\":{\"join\":";
-            out += Quoted("+connect_lobby " + id);
-            out += '}';
+        if (DiscordPresence_IsJoinable(s) && s.ownerId != 0) {
+            // A link button, not secrets.join: Discord hands a join secret to
+            // the clicker's own running game, which rules out phones and
+            // anyone whose game or presence is off. The link goes through the
+            // matchmaking service and hands off to Steam instead.
+            char url[160] = {};
+            std::snprintf(url, sizeof(url), "https://mm.b.hero.rehab/joinlobby/357190/%s/%llu",
+                          id.c_str(), static_cast<unsigned long long>(s.ownerId));
+            out += ",\"buttons\":[{\"label\":\"Join lobby\",\"url\":";
+            out += Quoted(url, sizeof(url) - 1);
+            out += "}]";
         }
     }
 

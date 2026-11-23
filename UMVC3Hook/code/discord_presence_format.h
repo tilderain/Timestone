@@ -24,6 +24,7 @@ constexpr int kPresenceCharBytes = 24;
 struct PresenceSnapshot {
     PresenceActivity activity = PresenceActivity::None;
     uint64_t lobbyId = 0;
+    uint64_t ownerId = 0; // host's SteamID64, for the web join link
     char roomName[kPresenceNameBytes] = {};
     int memberCount = 0;
     int memberLimit = 0;

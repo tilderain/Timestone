@@ -63,28 +63,34 @@ again starts it.
 Teams are the ones actually being played, so a member left to chance shows
 the character the launch drew for it.
 
-A **Join** button appears only for a room that is public (neither
-invitation-only nor friends-only) and has a free seat; both players need the
-presence on for it to work in either direction. Asking to join is accepted only
-while that is still true. Private and friends-only rooms publish neither the
-Join button nor the room id.
+A **Join lobby** button appears only for a room that is public (neither
+invitation-only nor friends-only) and has a free seat. It is a link, not
+Discord's built-in Join: it opens
+`https://mm.b.hero.rehab/joinlobby/357190/<lobby>/<steamid>`, whose page hands
+off to `steam://joinlobby/...`, so Steam starts the game if it is not running.
+Private and friends-only rooms publish neither the button nor the room id.
 
-Not published, by design: URL buttons (Discord refuses them together with a
-join secret), character portraits or other Capcom art, and anything about your
-Steam account beyond the persona name other players already see in the room.
+Not published, by design: Discord's built-in Join with a join secret (the two
+cannot be shown together, and a secret can only be delivered to a game that is
+already running on the clicking player's PC), character portraits or other
+Capcom art, and anything about your Steam account beyond the persona name other
+players already see in the room.
 
 ## Join, and what it can and cannot do
 
-Discord's Join starts the game through `steam://rungameid/357190`, and the
-plugin registers the protocol under
-`HKCU\Software\Classes\discord-1544202390536982610` so that works without a
-sign-in. Turning the status off in a settings menu deletes that key; editing
-`ShowDiscordStatus=0` by hand does not, until the next time it is turned off
-in a menu.
+The button needs nothing but Steam on the other player's side: no Timestone
+running, no Discord presence, no particular device. They still need Timestone
+installed to actually play a room.
 
-The cold start cannot carry the room: you land in the lobby, not in the room,
-so click Join once more from the profile. With the game already running, Join
-goes straight to the room.
+Discord still gets a launch registration: the plugin writes
+`HKCU\Software\Classes\discord-1544202390536982610`, which points at
+`steam://rungameid/357190`, so Discord can start the game for a join. Turning the
+status off in a settings menu deletes that key; editing
+`ShowDiscordStatus=0` by hand does not, until the next time it is turned off in
+a menu.
+
+The link carries the room: the page joins it directly, whether or not the game
+was already running.
 
 ## Linux and Proton
 
