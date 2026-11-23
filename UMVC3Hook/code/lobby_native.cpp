@@ -1411,6 +1411,7 @@ void Native_ReadInput(Input& input, bool textActive)
     input.pageRight = (pressed & H_RB) != 0;
     input.quickChat = (pressed & H_QUICK_CHAT) != 0;
     input.usingKeyboard = g_usingKeyboard;
+    input.unfocused = !foreground;
 
     if (textActive && foreground && !g_imeKeysHeld && IsKeyHeld(VK_BACK)) {
         const int frames = g_backspaceFrames++;

@@ -91,7 +91,7 @@ public:
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
     enum class TextTarget : uint8_t { None, RoomName, Chat, PresetName };
-    enum class Confirm : uint8_t { None, LeaveRoom, KickMember, Update, DeletePreset };
+    enum class Confirm : uint8_t { None, LeaveRoom, LeaveSeat, KickMember, Update, DeletePreset };
     // Pre-match steps shown as a modal once both seats of the local player's
     // match slot are taken. Each is answered by both players in turn.
     enum class Handshake : uint8_t {
@@ -114,6 +114,7 @@ private:
     void UpdateSlotMenu(const Input& input);
     void UpdateQuickChat(const Input& input);
     void UpdateMusicMenu(const Input& input);
+    int RoomMenuActions(int* actions) const;
     void UpdateMemberList(const Input& input);
     Handshake HandshakeStep() const;
     bool UpdateHandshake(const Input& input); // true while it owns the input
@@ -238,6 +239,7 @@ private:
     char memberMenuName_[kNameCapacity] = {};
     Handshake handshake_ = Handshake::None; // step shown last frame
     uint32_t handshakeFrames_ = 0;          // frames spent on it
+    uint32_t readyUpHold_ = 0;              // frames the ready-up still takes no input for
     uint32_t entryFrames_ = 0;              // frames since both delay picks were in
     uint32_t teamFrames_ = 0;               // of those, frames spent in character select
     int handshakeCursor_ = 0;
@@ -245,6 +247,13 @@ private:
     bool teamForMatch_ = false;             // team screen opened from the Entry step
     bool musicOpen_ = false; // host's lobby music picker
     int musicCursor_ = 0;
+    // The host changing an open lobby's settings on the create screen: the
+    // values being chosen, applied to the lobby on its last row.
+    bool editingRoom_ = false;
+    RoomSettings roomDraft_ = {};
+    RoomSettings& CreateDraft() { return editingRoom_ ? roomDraft_ : prefs_.create; }
+    const RoomSettings& CreateDraft() const { return editingRoom_ ? roomDraft_ : prefs_.create; }
+    void CloseRoomSettings();
 
     Confirm confirm_ = Confirm::None;
     int confirmCursor_ = 1; // default to "No"

@@ -786,6 +786,10 @@ constexpr uint32_t kResultCountTicks = 30;       // result phase must hold this 
 constexpr uint32_t kResultGoneTicks = 120;       // ...and be gone this long to re-arm
 constexpr uint32_t kSetEndDelayTicks = 150;      // let the win pose play before leaving
 int g_setFirstTo = 1;
+// Rules of the set about to start, as player 1 read them off the room; -1
+// until known. Player 2 gets them over the match connection (PumpHandshake).
+int g_launchFirstTo = -1;
+Rotation g_launchRotation = Rotation::WinnerStays;
 int g_setWins[2] = {0, 0}; // [0] local, [1] opponent
 bool g_setOver = false;
 uint32_t g_setOverTicks = 0;
@@ -1479,6 +1483,16 @@ bool SendLaunchAsHost()
                     drawn.chars[1], drawn.chars[2]);
     }
 
+    // The set is played under the room's rules as they are now, whatever the
+    // host changes them to before it ends.
+    const RoomSettings& rules = g_service->Room().settings;
+    g_launchFirstTo = rules.firstTo;
+    g_launchRotation = rules.rotation;
+    SetFormatPacket format = {};
+    format.type = PACKET_SET_FORMAT;
+    format.firstTo = g_launchFirstTo;
+    format.rotation = static_cast<int32_t>(g_launchRotation);
+
     LaunchTrainingPacket launch = {};
     launch.type = PACKET_LAUNCH_TRAINING;
     for (int i = 0; i < 3; ++i) {
@@ -1497,10 +1511,18 @@ bool SendLaunchAsHost()
         enet_packet_create(&settings, sizeof(settings), ENET_PACKET_FLAG_RELIABLE);
     ENetPacket* launchPacket =
         enet_packet_create(&launch, sizeof(launch), ENET_PACKET_FLAG_RELIABLE);
-    if (!settingsPacket || !launchPacket ||
-        enet_peer_send(g_matchPeer, 0, settingsPacket) != 0) {
+    ENetPacket* formatPacket =
+        enet_packet_create(&format, sizeof(format), ENET_PACKET_FLAG_RELIABLE);
+    if (!settingsPacket || !launchPacket || !formatPacket ||
+        enet_peer_send(g_matchPeer, 0, formatPacket) != 0) {
         if (settingsPacket) enet_packet_destroy(settingsPacket);
         if (launchPacket) enet_packet_destroy(launchPacket);
+        if (formatPacket) enet_packet_destroy(formatPacket);
+        return false;
+    }
+    if (enet_peer_send(g_matchPeer, 0, settingsPacket) != 0) {
+        enet_packet_destroy(settingsPacket);
+        enet_packet_destroy(launchPacket);
         return false;
     }
     if (enet_peer_send(g_matchPeer, 0, launchPacket) != 0) {
@@ -1616,7 +1638,7 @@ void UpdateWatchText()
     for (int side = 0; side < 2; ++side)
         snprintf(g_watchNames[side], sizeof(g_watchNames[side]), "%s", players[side]->name);
     char line[sizeof(g_watchLine)];
-    const int firstTo = room.settings.firstTo;
+    const int firstTo = SetFirstTo(*players[0], room.settings.firstTo);
     if (firstTo == 1)
         snprintf(line, sizeof(line), "%.40s  vs  %.40s", players[0]->name, players[1]->name);
     else
@@ -1729,7 +1751,11 @@ void BeginLaunch()
     g_matchPeer = nullptr;
     g_leaveSeatOnReturn.store(false, std::memory_order_relaxed);
     if (g_service) {
-        ResetSet(g_service->Room().settings.firstTo);
+        // Without word from player 1 (an older build), the room's as seen here.
+        const RoomSettings& rules = g_service->Room().settings;
+        const int firstTo = g_launchFirstTo >= 0 ? g_launchFirstTo : rules.firstTo;
+        ResetSet(firstTo);
+        g_service->BeginSet(firstTo, g_launchFirstTo >= 0 ? g_launchRotation : rules.rotation);
         // The room sees the team actually being played, random members
         // included; the player's own choice goes back up on return
         // (LobbyUi::ReturnToRoom).
@@ -1806,6 +1832,16 @@ bool PumpHandshake(bool bothReady)
                 HookLog("LobbyFlow: applied P1 netplay settings %dD/%dR\n", settings.delay,
                         settings.rollbackFrames);
             }
+        } else if (type == PACKET_SET_FORMAT &&
+                   event.packet->dataLength == sizeof(SetFormatPacket)) {
+            const auto& format = *reinterpret_cast<const SetFormatPacket*>(event.packet->data);
+            if (format.firstTo >= 0 && format.firstTo <= lobby::kMaxFirstTo &&
+                (format.rotation == 1 || format.rotation == 2)) {
+                g_launchFirstTo = format.firstTo;
+                g_launchRotation = static_cast<Rotation>(format.rotation);
+                HookLog("LobbyFlow: P1 set rules FT%d rotation %d\n", format.firstTo,
+                        format.rotation);
+            }
         } else if (type == PACKET_LAUNCH_TRAINING &&
                    event.packet->dataLength == sizeof(LaunchTrainingPacket)) {
             // Validates the rosters and installs the boot configuration.
@@ -1833,6 +1869,7 @@ void UpdateMatchStart(bool cancelPressed)
         g_pairing = pairing;
         g_matchIsHost = pairing.localSide == 0;
         g_launchSent = false;
+        g_launchFirstTo = -1;
         if (!SteamRoom_ConnectPeer(pairing.opponentId, g_matchIsHost)) {
             g_service->FinishMatch(false, false);
             g_service->Stand(); // do not retry every frame

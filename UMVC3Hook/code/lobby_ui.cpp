@@ -78,6 +78,7 @@ constexpr Color kYellow = Rgb(0xFFD63A);
 constexpr Color kCyan = Rgb(0x5CE4FF);
 constexpr Color kRed = Rgb(0xFF5A4C);
 constexpr Color kGreen = Rgb(0x86F25E);
+constexpr Color kPurple = Rgb(0xC79BFF); // the host changed the lobby's settings
 
 constexpr float kScreenW = 1280.0f;
 constexpr float kScreenH = 720.0f;
@@ -118,9 +119,14 @@ constexpr int kTopCount = 4;
 
 const char* const kSlotMenuItems[] = {"JOIN QUEUE & SPECTATE", "JOIN QUEUE", "SPECTATE ONLY"};
 constexpr int kSlotMenuCount = 3;
-const char* const kRoomMenuItems[] = {"TEAM SETUP", "LOBBY MUSIC", "INVITE FRIENDS",
-                                       "COPY LOBBY LINK", "LEAVE LOBBY"};
-constexpr int kRoomMenuCount = 5;
+// The lobby menu, in order. LOBBY SETTINGS is the host's alone.
+enum RoomMenuAction {
+    ROOM_MENU_TEAM, ROOM_MENU_MUSIC, ROOM_MENU_SETTINGS, ROOM_MENU_INVITE, ROOM_MENU_LINK,
+    ROOM_MENU_LEAVE, ROOM_MENU_ACTIONS
+};
+const char* const kRoomMenuItems[ROOM_MENU_ACTIONS] = {
+    "TEAM SETUP", "LOBBY MUSIC", "LOBBY SETTINGS", "INVITE FRIENDS", "COPY LOBBY LINK",
+    "LEAVE LOBBY"};
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
 constexpr int kCharGridColumns = 10; // faces across in the team screen's character grid
 constexpr int kColorGridColumns = 8; // faces across in the team screen's color grid
@@ -171,6 +177,11 @@ constexpr int kTeamRows = 13;
 // Pre-match prompts: how long each waits for an answer (frames at 60 fps).
 // Picking a delay is the ready-up: with no pick, the seat is given up.
 constexpr uint32_t kDelayTimeout = 20 * 60;
+// A ready-up that finds the player in another window takes no input until the
+// game's has been in front for 0.75 s, so a key or click meant for what they
+// were doing does not answer it. With the game already in front it answers
+// at once.
+constexpr uint32_t kReadyUpInputHold = 45;
 // The start/character-select choice has 30 seconds, and character select 40
 // of its own: one clock per ready-up (teamFrames_), which backing out and
 // going in again does not reset. entryFrames_ counts both.
@@ -208,6 +219,11 @@ public:
     {
         canvas_.Sprite(TEX_WHITE, x + dx_, y, w, h, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
                        WithAlpha(color, alpha_));
+    }
+
+    void Line(float x0, float y0, float x1, float y1, float width, Color color) const
+    {
+        canvas_.Line(x0 + dx_, y0, x1 + dx_, y1, width, WithAlpha(color, alpha_));
     }
 
     // 9-slice frame described by the rectangle its visible art should cover
@@ -428,6 +444,7 @@ void LobbyUi::GoTo(Screen screen)
 {
     screen_ = screen;
     screenFrame_ = 0;
+    editingRoom_ = false;
     roomMenuOpen_ = false;
     slotMenuOpen_ = false;
     quickChatOpen_ = false;
@@ -468,7 +485,8 @@ bool LobbyUi::TakePrefsDirty()
 
 int32_t LobbyUi::PreviewMusic() const
 {
-    return musicOpen_ && screen_ == Screen::Create ? kMusicTracks[musicCursor_].id : -1;
+    return musicOpen_ && screen_ == Screen::Create && !editingRoom_
+        ? kMusicTracks[musicCursor_].id : -1;
 }
 
 void LobbyUi::ShowNotice(const char* text)
@@ -517,6 +535,7 @@ void LobbyUi::ReturnToRoom()
     screen_ = Screen::Room;
     screenFrame_ = kTransitionFrames;
     roomBackdrop_ = kRoomBackdropFrames;
+    editingRoom_ = false;
     roomMenuOpen_ = false;
     slotMenuOpen_ = false;
     quickChatOpen_ = false;
@@ -573,7 +592,8 @@ void LobbyUi::SyncWithService()
         leftByChoice_ = false;
         GoTo(Screen::Room);
     } else if (!inRoom && wasInRoom_) {
-        if (screen_ == Screen::Room || (screen_ == Screen::Team && teamReturn_ == Screen::Room)) {
+        if (screen_ == Screen::Room || (screen_ == Screen::Team && teamReturn_ == Screen::Room) ||
+            editingRoom_) {
             // Back to the lobby list, freshly searched, ready to pick another.
             // An accepted invite is already moving us on: leave that alone.
             if (service_.Busy() == RoomBusy::None) {
@@ -620,8 +640,8 @@ void LobbyUi::Update(const Input& input)
 {
     ++frame_;
     // The team screen keeps the backdrop of the screen it was opened from.
-    const bool roomBackdrop =
-        screen_ == Screen::Room || (screen_ == Screen::Team && teamReturn_ == Screen::Room);
+    const bool roomBackdrop = screen_ == Screen::Room || editingRoom_ ||
+                              (screen_ == Screen::Team && teamReturn_ == Screen::Room);
     if (roomBackdrop) {
         if (roomBackdrop_ < kRoomBackdropFrames) ++roomBackdrop_;
     } else {
@@ -656,6 +676,13 @@ void LobbyUi::Update(const Input& input)
         if (textTarget_ != TextTarget::None) EndText(false);
     }
 
+    // The lobby's settings give way to a match that wants the host, and go
+    // with the host's role.
+    if (editingRoom_) {
+        const Member* local = LocalMember();
+        if (!local || !local->isHost || HandshakeStep() != Handshake::None) CloseRoomSettings();
+    }
+
     // Modal layers take input in priority order.
     if (updateActive_) {
         if (input.cancel && update_.cancellable) {
@@ -687,6 +714,18 @@ void LobbyUi::Update(const Input& input)
         UpdateText(input);
         return;
     }
+    if (confirm_ == Confirm::LeaveSeat) {
+        // Asked over a pre-match step, which carries on underneath: its clock
+        // runs, and the question goes away with the step (the other player
+        // left, or the time to ready up ran out).
+        Input idle = {};
+        idle.unfocused = input.unfocused;
+        UpdateHandshake(idle);
+        if (HandshakeStep() == Handshake::None || notice_[0]) {
+            confirm_ = Confirm::None;
+            return;
+        }
+    }
     if (confirm_ != Confirm::None) {
         if (input.left || input.right || input.up || input.down) {
             confirmCursor_ ^= 1;
@@ -702,6 +741,8 @@ void LobbyUi::Update(const Input& input)
             if (action == Confirm::LeaveRoom) {
                 leftByChoice_ = true;
                 service_.Leave();
+            } else if (action == Confirm::LeaveSeat) {
+                service_.Stand();
             } else if (action == Confirm::KickMember) {
                 service_.Kick(memberMenuId_);
             } else if (action == Confirm::Update) {
@@ -802,6 +843,16 @@ void LobbyUi::UpdateBrowse(const Input& input)
     }
 }
 
+void LobbyUi::CloseRoomSettings()
+{
+    if (textTarget_ != TextTarget::None) EndText(false);
+    GoTo(Screen::Room);
+    screenFrame_ = kTransitionFrames;
+}
+
+// Also the host's settings for a lobby that is already open (editingRoom_):
+// the same rows on the lobby's own values, nothing changed until the last row
+// applies them. Its size and number of setups stay as created.
 void LobbyUi::UpdateCreate(const Input& input)
 {
     if (musicOpen_) {
@@ -811,12 +862,18 @@ void LobbyUi::UpdateCreate(const Input& input)
     MoveCursor(createCursor_, CREATE_ROWS, input);
     if (input.cancel) {
         Play(SFX_CANCEL);
-        GoTo(Screen::Top);
+        if (editingRoom_) CloseRoomSettings();
+        else GoTo(Screen::Top);
         return;
     }
     if (service_.Busy() != RoomBusy::None) return;
 
-    RoomSettings& draft = prefs_.create;
+    RoomSettings& draft = CreateDraft();
+    const bool fixedRow = editingRoom_ && (createCursor_ == CREATE_SIZE || createCursor_ == CREATE_SLOTS);
+    if (fixedRow && (input.left || input.right || input.confirm)) {
+        Play(SFX_CANCEL);
+        return;
+    }
     const int delta = (input.right ? 1 : 0) - (input.left ? 1 : 0);
     if (delta != 0) {
         bool changed = true;
@@ -826,15 +883,14 @@ void LobbyUi::UpdateCreate(const Input& input)
             if (size < 2) size = kMaxMembers;
             if (size > kMaxMembers) size = 2;
             draft.maxMembers = size;
-            // A slot seats two players; never offer more slots than can be filled.
-            if (draft.slotCount > size / 2) draft.slotCount = size / 2;
             break;
         }
         case CREATE_SLOTS: {
-            const int maxSlots = draft.maxMembers / 2 < kMaxSlots ? draft.maxMembers / 2 : kMaxSlots;
+            // Any number at any lobby size: setups a small lobby cannot fill
+            // just stay open.
             int slots = draft.slotCount + delta;
-            if (slots < 1) slots = maxSlots;
-            if (slots > maxSlots) slots = 1;
+            if (slots < 1) slots = kMaxSlots;
+            if (slots > kMaxSlots) slots = 1;
             draft.slotCount = slots;
             break;
         }
@@ -863,7 +919,7 @@ void LobbyUi::UpdateCreate(const Input& input)
             break;
         }
         if (changed) {
-            prefsDirty_ = true;
+            if (!editingRoom_) prefsDirty_ = true;
             Play(SFX_MOVE);
         }
     }
@@ -872,6 +928,10 @@ void LobbyUi::UpdateCreate(const Input& input)
     if (createCursor_ == CREATE_NAME) {
         Play(SFX_CONFIRM);
         BeginText(TextTarget::RoomName, draft.name);
+    } else if (createCursor_ == CREATE_GO && editingRoom_) {
+        Play(SFX_CONFIRM);
+        service_.ApplySettings(draft);
+        CloseRoomSettings();
     } else if (createCursor_ == CREATE_GO) {
         if (!service_.Available()) {
             Play(SFX_CANCEL);
@@ -883,7 +943,7 @@ void LobbyUi::UpdateCreate(const Input& input)
     } else if (createCursor_ == CREATE_MUSIC) {
         // Too many tracks for a left/right value: confirm opens the full list.
         Play(SFX_CONFIRM);
-        const int current = FindMusicTrack(draft.music);
+        const int current = FindMusicTrack(editingRoom_ ? service_.Room().music : draft.music);
         musicCursor_ = current < 0 ? 0 : current;
         musicOpen_ = true;
     } else {
@@ -1154,10 +1214,12 @@ LobbyUi::Handshake LobbyUi::HandshakeStep() const
     return Handshake::None; // both ready: the match is being started
 }
 
-bool LobbyUi::UpdateHandshake(const Input& input)
+bool LobbyUi::UpdateHandshake(const Input& given)
 {
+    Input input = given;
     const Handshake step = HandshakeStep();
     if (step != handshake_) {
+        readyUpHold_ = 0;
         if (step == Handshake::Delay) {
             // A match is waiting: whatever was open gives way, and the player
             // is called to the window.
@@ -1183,10 +1245,20 @@ bool LobbyUi::UpdateHandshake(const Input& input)
     if (step == Handshake::None) return false;
     ++handshakeFrames_;
     if (step == Handshake::Entry || step == Handshake::WaitStart) ++entryFrames_;
+    if (step == Handshake::Delay) {
+        // The clock to ready up runs on either way: only the buttons wait.
+        if (input.unfocused) readyUpHold_ = kReadyUpInputHold;
+        else if (readyUpHold_ > 0) --readyUpHold_;
+        if (input.unfocused || readyUpHold_ > 0) {
+            input = Input{};
+            input.usingKeyboard = given.usingKeyboard;
+        }
+    }
 
     if (input.cancel) {
-        // Backing out of any step gives the seat up.
-        service_.Stand();
+        // Backing out of any step gives the seat up, so it is asked first.
+        confirm_ = Confirm::LeaveSeat;
+        confirmCursor_ = 0; // default to "Yes"
         Play(SFX_CANCEL);
         return true;
     }
@@ -1431,7 +1503,10 @@ void LobbyUi::UpdateMemberMenu(const Input& input)
 
 void LobbyUi::UpdateRoomMenu(const Input& input)
 {
-    MoveCursor(roomMenuCursor_, kRoomMenuCount, input);
+    int actions[ROOM_MENU_ACTIONS];
+    const int count = RoomMenuActions(actions);
+    if (roomMenuCursor_ >= count) roomMenuCursor_ = count - 1; // the host's entry went
+    MoveCursor(roomMenuCursor_, count, input);
     if (input.cancel || input.menu) {
         roomMenuOpen_ = false;
         Play(SFX_CANCEL);
@@ -1440,13 +1515,13 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
     if (!input.confirm) return;
     Play(SFX_CONFIRM);
     roomMenuOpen_ = false;
-    switch (roomMenuCursor_) {
-    case 0:
+    switch (actions[roomMenuCursor_]) {
+    case ROOM_MENU_TEAM:
         teamReturn_ = Screen::Room;
         teamCursor_ = 0;
         GoTo(Screen::Team);
         break;
-    case 1: {
+    case ROOM_MENU_MUSIC: {
         // The host picks the music; everyone else can only silence it.
         const Member* local = LocalMember();
         if (!local || !local->isHost) {
@@ -1459,10 +1534,17 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
         musicOpen_ = true;
         break;
     }
-    case 2:
+    case ROOM_MENU_SETTINGS:
+        // The create screen, on the lobby as it is now.
+        roomDraft_ = service_.Room().settings;
+        createCursor_ = 0;
+        GoTo(Screen::Create);
+        editingRoom_ = true;
+        break;
+    case ROOM_MENU_INVITE:
         service_.InviteFriends();
         break;
-    case 3:
+    case ROOM_MENU_LINK:
         service_.CopyLobbyLink();
         break;
     default:
@@ -1472,12 +1554,22 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
     }
 }
 
+int LobbyUi::RoomMenuActions(int* actions) const
+{
+    const Member* local = LocalMember();
+    const bool host = local && local->isHost;
+    int count = 0;
+    for (int action = 0; action < ROOM_MENU_ACTIONS; ++action)
+        if (action != ROOM_MENU_SETTINGS || host) actions[count++] = action;
+    return count;
+}
+
 // The music picker: one long list in three groups. Up/down walks the tracks,
 // left/right jumps to the previous or next group. It serves the create screen
 // (the track a new lobby starts with) and the host of a running lobby.
 void LobbyUi::UpdateMusicMenu(const Input& input)
 {
-    const bool inRoom = screen_ == Screen::Room;
+    const bool inRoom = screen_ == Screen::Room || editingRoom_;
     const Member* local = LocalMember();
     if (inRoom && (!local || !local->isHost)) {
         // Host changed while the picker was open.
@@ -1561,9 +1653,10 @@ void LobbyUi::EndText(bool accept)
     if (!accept) return;
     if (target == TextTarget::RoomName) {
         if (text_[0]) {
-            snprintf(prefs_.create.name, sizeof(prefs_.create.name), "%.*s",
-                     static_cast<int>(sizeof(prefs_.create.name) - 1), text_);
-            prefsDirty_ = true;
+            RoomSettings& draft = CreateDraft();
+            snprintf(draft.name, sizeof(draft.name), "%.*s",
+                     static_cast<int>(sizeof(draft.name) - 1), text_);
+            if (!editingRoom_) prefsDirty_ = true;
         }
     } else if (target == TextTarget::Chat && text_[0]) {
         service_.SendChat(text_);
@@ -2243,9 +2336,12 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_X, "Search again");
         add(BTN_Y, "Create lobby");
         add(BTN_CANCEL, "Back");
+    } else if (screen_ == Screen::Create && editingRoom_ &&
+               (createCursor_ == CREATE_SIZE || createCursor_ == CREATE_SLOTS)) {
+        add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Create) {
-        add(BTN_CONFIRM, "Select");
-        if (createCursor_ != CREATE_MUSIC) add(BTN_DPAD, "Change");
+        add(BTN_CONFIRM, createCursor_ == CREATE_GO && editingRoom_ ? "Apply" : "Select");
+        if (createCursor_ != CREATE_MUSIC && createCursor_ != CREATE_GO) add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Team && presetListOpen_) {
         const bool used = SlotUsed(presetListCursor_);
@@ -2499,6 +2595,18 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
             p.Label("Create your own lobby and do battle with all comers.", kScreenW * 0.5f,
                     384.0f, 0.7f, A_MC, kDim);
     } else if (count > kBrowseRows) {
+        // More lobbies under the last row: a chevron pointing down at them,
+        // bobbing in step with the selection arrows. The game's arrow art
+        // only points sideways, so this one is drawn.
+        if (browseScroll_ + kBrowseRows < count) {
+            const float cx = kScreenW * 0.5f, cy = 612.0f + SelectionArrowInset(frame_);
+            for (int pass = 0; pass < 2; ++pass) {
+                const float width = pass ? 4.0f : 8.0f;
+                const Color color = pass ? kYellow : Color{0.0f, 0.0f, 0.0f, 0.7f};
+                p.Line(cx - 16.0f, cy, cx, cy + 11.0f, width, color);
+                p.Line(cx + 16.0f, cy, cx, cy + 11.0f, width, color);
+            }
+        }
         char page[32];
         snprintf(page, sizeof(page), "%d / %d", browseCursor_ + 1, count);
         p.Label(page, kSafeRight, 640.0f, 0.62f, A_MR, kDim);
@@ -2514,15 +2622,22 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
     const float t = EaseOut(screenFrame_ / static_cast<float>(kTransitionFrames));
     const Painter p(canvas, t, (1.0f - t) * 36.0f);
 
-    // "CREATE LOBBY" title art: row 1 of ga_room_subtit.
-    p.Sprite(TEX_SUBTITLES, 76.0f, 68.0f, 144.0f * 1.5f, 30.0f * 1.5f,
-             Uv{0.0f, 33.0f / 256.0f, 144.0f / 256.0f, 63.0f / 256.0f}, A_ML);
+    // "CREATE LOBBY" title art: row 1 of ga_room_subtit. The sheet has none
+    // for an open lobby's settings, which go under the lobby's name.
+    if (editingRoom_) {
+        const char* name = service_.Room().settings.name;
+        const Font nameFont = HeadingFontFor(name);
+        p.TextFit(name, 76.0f, 68.0f, HeadingScaleFor(nameFont, 0.5f), 900.0f, A_ML, kText,
+                  nameFont);
+    } else
+        p.Sprite(TEX_SUBTITLES, 76.0f, 68.0f, 144.0f * 1.5f, 30.0f * 1.5f,
+                 Uv{0.0f, 33.0f / 256.0f, 144.0f / 256.0f, 63.0f / 256.0f}, A_ML);
 
     const float panelX = 170.0f, panelY = 140.0f, panelW = 940.0f, panelH = 470.0f;
     p.Box(TEX_PANEL_DARK, panelX, panelY, panelW, panelH);
     p.Text("LOBBY SETTING", panelX + 44.0f, panelY + 44.0f, 0.4f, A_ML, kYellow, FONT_HEADING);
 
-    const RoomSettings& draft = prefs_.create;
+    const RoomSettings& draft = CreateDraft();
     char value[kChatCapacity + 8];
     const char* labels[CREATE_ROWS] = {"LOBBY NAME", "LOBBY SIZE", "SETUPS", "VISIBILITY",
                                        "MATCH FORMAT", "ROTATION", "LOBBY MUSIC", ""};
@@ -2535,11 +2650,15 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
                   WithAlpha(kWhite, pulse));
         }
         if (row == CREATE_GO) {
-            p.Text(service_.Busy() == RoomBusy::Creating ? "CREATING LOBBY..." : "CREATE LOBBY",
+            p.Text(editingRoom_ ? "APPLY CHANGES"
+                   : service_.Busy() == RoomBusy::Creating ? "CREATING LOBBY..." : "CREATE LOBBY",
                    panelX + panelW * 0.5f, y, 0.46f, A_MC, kText, FONT_HEADING);
             continue;
         }
-        p.Text(labels[row], panelX + 64.0f, y, 0.86f, A_ML, selected ? kText : kDim);
+        // An open lobby keeps the size and setups it was created with.
+        const bool fixed = editingRoom_ && (row == CREATE_SIZE || row == CREATE_SLOTS);
+        p.Text(labels[row], panelX + 64.0f, y, 0.86f, A_ML,
+               fixed ? kFaint : selected ? kText : kDim);
         switch (row) {
         case CREATE_NAME:
             snprintf(value, sizeof(value), "%s",
@@ -2556,7 +2675,8 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
                      draft.firstTo == kFirstToEndless ? "-" : RotationName(draft.rotation));
             break;
         case CREATE_MUSIC: {
-            const int track = FindMusicTrack(draft.music);
+            // The lobby's music changes as it is picked, like from its menu.
+            const int track = FindMusicTrack(editingRoom_ ? service_.Room().music : draft.music);
             snprintf(value, sizeof(value), "%s", kMusicTracks[track < 0 ? 0 : track].name);
             break;
         }
@@ -2587,8 +2707,8 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
             p.TextShrink(value, valueX, y, 0.86f, 440.0f, A_MC, kText);
         else
             p.TextFit(value, valueX, y, 0.86f, row == CREATE_NAME ? 440.0f : kValueTextWidth, A_MC,
-                      kText);
-        if (selected && row != CREATE_NAME && row != CREATE_MUSIC &&
+                      fixed ? kFaint : kText);
+        if (selected && !fixed && row != CREATE_NAME && row != CREATE_MUSIC &&
             !(row == CREATE_ROTATION && draft.firstTo == kFirstToEndless)) {
             DrawValueArrows(p, frame_, valueX, y, kValueArrowSpan);
         }
@@ -2608,8 +2728,13 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         DrawMusicMenu(canvas);
         return nullptr;
     }
-    return textTarget_ == TextTarget::RoomName ? "Type a name, then confirm."
-                                               : help[createCursor_];
+    if (textTarget_ == TextTarget::RoomName) return "Type a name, then confirm.";
+    if (editingRoom_ && (createCursor_ == CREATE_SIZE || createCursor_ == CREATE_SLOTS))
+        return "Set when the lobby is created.";
+    if (editingRoom_ && (createCursor_ == CREATE_FORMAT || createCursor_ == CREATE_ROTATION))
+        return "Applies from the next set. Sets being played now finish first.";
+    if (editingRoom_ && createCursor_ == CREATE_GO) return "Apply these settings to the lobby.";
+    return help[createCursor_];
 }
 
 void LobbyUi::DrawRoomMembers(Canvas& canvas) const
@@ -2936,7 +3061,7 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
         char text[kChatCapacity + 4];
         snprintf(text, sizeof(text), "%.*s", row.span.length, line.text + row.span.start);
         if (line.system) {
-            p.Text(text, x + 22.0f, rowY, kChatScale, A_ML, kYellow);
+            p.Text(text, x + 22.0f, rowY, kChatScale, A_ML, line.settings ? kPurple : kYellow);
             continue;
         }
         if (row.first) {
@@ -3037,7 +3162,19 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     // so the long soundtrack titles stay full size beside a short name.
     float nameWidth = TextWidth(room.settings.name, nameFont) * kNameScale;
     if (nameWidth > kNameMax) nameWidth = kNameMax;
-    p.TextShrink(music, 1060.0f, 61.0f, 0.62f, 1060.0f - 64.0f - nameWidth - 28.0f, A_MR, kDim);
+    // Who can get in, when it is not everyone: at the right end, the rest
+    // moving over for it. Friends only is green, as in the lobby list.
+    float infoRight = 1060.0f;
+    const char* access = room.settings.visibility == Visibility::Private ? "PRIVATE"
+                       : room.settings.visibility == Visibility::FriendsOnly ? "FRIENDS ONLY"
+                                                                             : nullptr;
+    if (access) {
+        const float kAccessScale = 0.62f;
+        p.Text(access, infoRight, 61.0f, kAccessScale, A_MR,
+               room.settings.visibility == Visibility::Private ? kYellow : kGreen);
+        infoRight -= TextWidth(access) * kAccessScale + 22.0f;
+    }
+    p.TextShrink(music, infoRight, 61.0f, 0.62f, infoRight - 64.0f - nameWidth - 28.0f, A_MR, kDim);
     p.Sprite(TEX_FRIENDS, 1098.0f, 62.0f, 40.0f, 40.0f, kFullUv, A_MC);
     char population[24];
     snprintf(population, sizeof(population), "%d / %d", room.memberCount, room.settings.maxMembers);
@@ -3064,11 +3201,16 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
 
     if (roomMenuOpen_) {
         // Guests get a mute toggle where the host has the music picker.
-        const char* items[kRoomMenuCount];
-        for (int i = 0; i < kRoomMenuCount; ++i) items[i] = kRoomMenuItems[i];
-        if (!local || !local->isHost)
-            items[1] = prefs_.muteMusic ? "UNMUTE LOBBY MUSIC" : "MUTE LOBBY MUSIC";
-        DrawListMenu(canvas, "LOBBY MENU", items, kRoomMenuCount, roomMenuCursor_);
+        int actions[ROOM_MENU_ACTIONS];
+        const int count = RoomMenuActions(actions);
+        const char* items[ROOM_MENU_ACTIONS];
+        for (int i = 0; i < count; ++i) {
+            items[i] = kRoomMenuItems[actions[i]];
+            if (actions[i] == ROOM_MENU_MUSIC && (!local || !local->isHost))
+                items[i] = prefs_.muteMusic ? "UNMUTE LOBBY MUSIC" : "MUTE LOBBY MUSIC";
+        }
+        DrawListMenu(canvas, "LOBBY MENU", items, count,
+                     roomMenuCursor_ < count ? roomMenuCursor_ : count - 1);
     } else if (slotMenuOpen_) {
         char title[16];
         snprintf(title, sizeof(title), "SETUP %d", seatSlot_ + 1);
@@ -3707,6 +3849,8 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         message = notice_;
     else if (confirm_ == Confirm::LeaveRoom)
         message = "Leave this lobby?";
+    else if (confirm_ == Confirm::LeaveSeat)
+        message = "Leave the queue?";
     else if (confirm_ == Confirm::Update)
         message = updateOffer_;
     char kick[160];
@@ -3717,7 +3861,7 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         message = kick;
     }
     if (!message && confirm_ == Confirm::KickMember) {
-        snprintf(kick, sizeof(kick), "Kick %.40s?\nThey will not be able to rejoin this lobby.",
+        snprintf(kick, sizeof(kick), "Kick %.40s?\nThey will not be able to rejoin.",
                  memberMenuName_);
         message = kick;
     }

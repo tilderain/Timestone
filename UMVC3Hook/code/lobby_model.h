@@ -114,6 +114,9 @@ struct Member {
     int16_t wins;   // sets won in this room
     int16_t losses;
     int8_t setWins; // games won in the set being played right now
+    // That set's length, as its firstTo + 1; 0 when not in a set. A set keeps
+    // the length it started with when the host changes the room's (SetFirstTo).
+    int8_t setFormat;
     int8_t queueSlot;   // match slot this player is waiting for, -1 if none
     uint32_t queueSeq;  // order of joining that queue (lower waits longer)
     int8_t queuePos;    // 1 = next up; 0 when not queued (derived)
@@ -143,8 +146,11 @@ struct RoomSettings {
     int slotCount;       // 1..kMaxSlots
     Visibility visibility;
     int32_t music; // lobby_music.h track id the room starts with
-    int firstTo;   // games needed to win a set (0 = endless), fixed at creation
-    Rotation rotation; // likewise fixed
+    // Games needed to win a set (0 = endless) and who makes way after one.
+    // The host can change both later (RoomService::ApplySettings); a set already
+    // being played finishes under the rules it started with.
+    int firstTo;
+    Rotation rotation;
 };
 
 struct RoomState {
@@ -183,6 +189,7 @@ struct ChatLine {
     char sender[kNameCapacity];
     char text[kChatCapacity];
     bool system; // join/leave/match notices
+    bool settings; // a system line saying the host changed the lobby's settings
 };
 
 enum class RoomBusy : uint8_t { None, Searching, Creating, Joining };
@@ -249,6 +256,11 @@ public:
     // Host only: the room's music, a lobby_music.h track id. Everyone in the
     // room sees it in RoomState::music.
     virtual void SetMusic(int32_t trackId) = 0;
+    // Host only: gives the open room this name, visibility, set length and
+    // rotation rule (its size, setups and music are not touched). The set
+    // rules hold for sets that start from now on. What changed is announced
+    // in everyone's chat.
+    virtual void ApplySettings(const RoomSettings& settings) = 0;
     // Opens the player's Steam profile in the overlay.
     virtual void ViewProfile(uint64_t memberId) = 0;
     // Host only: removes the player and keeps them out of this lobby for as
@@ -294,6 +306,7 @@ struct Input {
     bool pageLeft, pageRight; // shoulder buttons
     bool quickChat;           // RB on a pad, X on the keyboard
     bool usingKeyboard;       // last input source, selects footer glyphs
+    bool unfocused;           // the game's window is not the one in front
     // Text typed this frame while a text field is active (UTF-8, may be empty).
     const char* typed;
     // What an input method is still composing (UTF-8, may be empty or null):
@@ -301,6 +314,13 @@ struct Input {
     const char* composing;
     bool backspace;
 };
+
+// Length of the set a fighting member is in: the room's unless the host has
+// changed it since that set began.
+inline int SetFirstTo(const Member& member, int roomFirstTo)
+{
+    return member.setFormat > 0 ? member.setFormat - 1 : roomFirstTo;
+}
 
 inline bool IsValidSeat(const RoomSettings& settings, int slot, int side)
 {

@@ -67,6 +67,7 @@ struct SteamAPI {
     bool (*SetLobbyData)(void*, uint64_t, const char*, const char*) = nullptr;
     const char* (*GetLobbyData)(void*, uint64_t, const char*) = nullptr;
     bool (*SetLobbyJoinable)(void*, uint64_t, bool) = nullptr;
+    bool (*SetLobbyType)(void*, uint64_t, int) = nullptr; // optional
     // Room mode (in-game lobby): per-member state and lobby chat.
     void (*SetLobbyMemberData)(void*, uint64_t, const char*, const char*) = nullptr;
     const char* (*GetLobbyMemberData)(void*, uint64_t, uint64_t, const char*) = nullptr;
@@ -402,6 +403,7 @@ bool ResolveExports()
     ResolveOptional(g_api.SetLobbyMemberData, "SteamAPI_ISteamMatchmaking_SetLobbyMemberData");
     ResolveOptional(g_api.GetLobbyMemberData, "SteamAPI_ISteamMatchmaking_GetLobbyMemberData");
     ResolveOptional(g_api.SendLobbyChatMsg, "SteamAPI_ISteamMatchmaking_SendLobbyChatMsg");
+    ResolveOptional(g_api.SetLobbyType, "SteamAPI_ISteamMatchmaking_SetLobbyType");
     ResolveOptional(g_api.GetLobbyChatEntry, "SteamAPI_ISteamMatchmaking_GetLobbyChatEntry");
     ResolveOptional(g_api.GetLobbyMemberLimit, "SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit");
     ResolveOptional(g_api.GetUserInterface, "SteamAPI_ISteamClient_GetISteamUser");
@@ -882,6 +884,23 @@ bool RefreshResultMetadata(size_t index)
     return changed;
 }
 
+// The room just left, while it still had others in it. Steam goes on counting
+// us as a member for a moment after LeaveLobby, so a search started right
+// away sees a room we filled the last seat of as full and leaves it out. That
+// one search is given the room back.
+uint64_t g_leftRoom = 0;
+ULONGLONG g_leftRoomTick = 0;
+constexpr ULONGLONG kLeftRoomWindowMs = 5000;
+
+void RememberLeftRoom(uint64_t lobbyId)
+{
+    g_leftRoom = 0;
+    if (!g_roomMode || !g_matchmaking || !lobbyId) return;
+    if (g_api.GetNumLobbyMembers(g_matchmaking, lobbyId) < 2) return; // it closes with us
+    g_leftRoom = lobbyId;
+    g_leftRoomTick = GetTickCount64();
+}
+
 // The size a room's host chose, or 0 when the lobby does not publish one.
 int RoomCapacity(uint64_t lobbyId)
 {
@@ -1284,6 +1303,17 @@ void SteamLobby_Pump()
                 g_api.RequestLobbyData(g_matchmaking, lobbyId);
                 AddResult(lobbyId);
             }
+            if (g_leftRoom && GetTickCount64() - g_leftRoomTick < kLeftRoomWindowMs &&
+                !HasResult(g_leftRoom)) {
+                const char* marker = g_api.GetLobbyData(g_matchmaking, g_leftRoom, "TimestoneRoom");
+                if (marker && strcmp(marker, "1") == 0) {
+                    g_api.RequestLobbyData(g_matchmaking, g_leftRoom);
+                    AddResult(g_leftRoom);
+                    HookLog("SteamLobby: kept lobby %llu, left a moment ago, in the results\n",
+                            static_cast<unsigned long long>(g_leftRoom));
+                }
+            }
+            g_leftRoom = 0;
             CollectFriendLobbyCandidates();
             MergeFriendLobbyCandidates();
             g_nextResultPingRefresh = 0;
@@ -1387,6 +1417,7 @@ void SteamLobby_Pump()
                             static_cast<unsigned long long>(result.m_ulSteamIDLobby),
                             members, capacity);
                     g_lastJoinRefusal = 4;
+                    RememberLeftRoom(result.m_ulSteamIDLobby);
                     g_api.LeaveLobby(g_matchmaking, result.m_ulSteamIDLobby);
                     SetStatus("Could not enter Steam lobby");
                     SteamLobby_Search();
@@ -1874,6 +1905,7 @@ void SteamRoom_Leave()
     SteamRoom_SpecCloseAll();
     ClearLobbyRichPresence();
     if (g_matchmaking && g_lobbyId) {
+        RememberLeftRoom(g_lobbyId);
         g_api.LeaveLobby(g_matchmaking, g_lobbyId);
         SetStatus("Left Steam lobby");
     }
@@ -1939,6 +1971,28 @@ const char* SteamRoom_GetData(const char* key)
     if (!SteamRoom_IsActive()) return "";
     const char* value = g_api.GetLobbyData(g_matchmaking, g_lobbyId, key);
     return value ? value : "";
+}
+
+void SteamRoom_SetName(const char* name)
+{
+    if (!name || !name[0]) return;
+    if (LocalLobby_Enabled()) { LocalLobby_SetData("name", name); return; }
+    if (!SteamRoom_IsActive() || SteamRoom_GetOwner() != g_localSteamId) return;
+    snprintf(g_lobbyName, sizeof(g_lobbyName), "%s", name);
+    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", g_lobbyName);
+}
+
+bool SteamRoom_SetType(SteamLobbyType type)
+{
+    const char* isPrivate = type == SteamLobbyType::Private ? "1" : "0";
+    if (LocalLobby_Enabled()) { LocalLobby_SetData("private", isPrivate); return true; }
+    if (!SteamRoom_IsActive() || SteamRoom_GetOwner() != g_localSteamId || !g_api.SetLobbyType ||
+        !g_api.SetLobbyType(g_matchmaking, g_lobbyId, static_cast<int>(type)))
+        return false;
+    g_roomCreatePrivate = type == SteamLobbyType::Private;
+    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "private", isPrivate);
+    PublishLobbyRichPresence(); // a private room offers no "Join Game"
+    return true;
 }
 
 void SteamRoom_SetData(const char* key, const char* value)

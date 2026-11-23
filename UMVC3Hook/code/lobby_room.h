@@ -76,6 +76,7 @@ public:
     void InviteFriends() override;
     void CopyLobbyLink() override;
     void SetMusic(int32_t trackId) override;
+    void ApplySettings(const RoomSettings& settings) override;
     void ViewProfile(uint64_t memberId) override;
     void Kick(uint64_t memberId) override;
 
@@ -94,6 +95,9 @@ public:
     // Publishes the local status shown to the room (Fighting while in battle).
     void SetLocalStatus(MemberStatus status);
     // After a match: clear ready, back to Seated, bump the room record.
+    // A set is starting under these rules; they hold until FinishMatch
+    // whatever the host does to the room's in the meantime.
+    void BeginSet(int firstTo, Rotation rotation);
     void FinishMatch(bool counted, bool localWon);
     // During a set: the local player's games won so far, shown to the room.
     void ReportSetScore(int localGamesWon);
@@ -128,6 +132,8 @@ private:
         int wins = 0;
         int losses = 0;
         int setWins = 0;
+        int setFormat = 0; // Member::setFormat
+        Rotation setRotation = Rotation::WinnerStays; // rule of the set being played
         int queueSlot = -1;
         uint32_t queueSeq = 0;
         uint8_t health[3] = {kHealthUnknown, kHealthUnknown, kHealthUnknown};
@@ -141,7 +147,8 @@ private:
     void RefreshRoom();
     void RefreshResults();
     void DrainChat();
-    void AddChat(const char* sender, const char* text, bool system);
+    void AddChat(const char* sender, const char* text, bool system, bool settings = false);
+    bool SetFormat(int firstTo, Rotation rotation);
     void SetError(const char* text);
 
     bool available_ = false;

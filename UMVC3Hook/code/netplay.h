@@ -29,6 +29,7 @@ enum PacketType : uint32_t {
     PACKET_LAUNCH_CHAT = 18, // LaunchChatPacket
     PACKET_BENCHMARK = 19, // Benchmark payload on the extension channel
     PACKET_INPUT_REQUEST = 20, // InputRequestPacket
+    PACKET_SET_FORMAT = 21, // SetFormatPacket
 };
 
 #pragma pack(push, 1)
@@ -79,6 +80,14 @@ struct BattleReadyPacket {
     uint32_t flags;              // BattleSyncFlags
     uint32_t round_seed;         // host-authoritative gameplay RNG seed
     uint32_t opening_member;     // sender's starting team member (0..2)
+};
+
+// Lobby matches: player 1's view of the room's set rules, sent ahead of the
+// launch so both play the same set even if the host is changing them.
+struct SetFormatPacket {
+    uint32_t type;               // PACKET_SET_FORMAT
+    int32_t  firstTo;            // games to win the set, 0 = endless
+    int32_t  rotation;           // lobby::Rotation
 };
 
 struct LaunchTrainingPacket {

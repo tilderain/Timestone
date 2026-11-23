@@ -94,6 +94,10 @@ int SteamRoom_GetMemberCount();
 uint64_t SteamRoom_GetMember(int index);
 uint64_t SteamRoom_GetOwner();
 int SteamRoom_GetMemberLimit();
+// Owner only: rename the room, or change who can find and join it. SetType
+// returns false when the lobby's type could not be changed.
+void SteamRoom_SetName(const char* name);
+bool SteamRoom_SetType(SteamLobbyType type);
 const char* SteamRoom_GetMemberName(uint64_t memberId);
 const char* SteamRoom_GetMemberData(uint64_t memberId, const char* key);
 void SteamRoom_SetLocalData(const char* key, const char* value);

@@ -47,6 +47,8 @@ constexpr char kRotationKey[] = "rot";   // lobby data: Rotation, as a number
 constexpr int kMaxBans = 64;
 constexpr int kMemberVersion = 7;
 constexpr uint8_t kChatText = 'C';       // lobby chat payload: 'C' + UTF-8
+// From the host only: 'S' + what it just changed in the lobby's settings.
+constexpr uint8_t kChatSettings = 'S';
 constexpr uint32_t kRefreshInterval = 6; // frames between room rebuilds
 
 SteamLobbyType ToSteamType(Visibility visibility)
@@ -96,17 +98,18 @@ bool IsPlausibleTeam(const Team& team)
 void EncodeMember(char* out, size_t size, int slot, int side, bool ready, MemberStatus status,
                   bool accepted, int delayPick, const Team& team, int wins, int losses,
                   int setWins, int queueSlot, uint32_t queueSeq, int delayHover,
-                  const uint8_t health[3], int watchSlot, uint32_t watchSeq, uint64_t upstream)
+                  const uint8_t health[3], int watchSlot, uint32_t watchSeq, uint64_t upstream,
+                  int setFormat)
 {
     snprintf(out, size,
-             "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u",
+             "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u|%d",
              kMemberVersion, slot, side, ready ? 1 : 0, static_cast<int>(status),
              accepted ? 1 : 0, delayPick,
              team.chars[0], team.chars[1], team.chars[2], team.assists[0], team.assists[1],
              team.assists[2], team.colors[0], team.colors[1], team.colors[2], wins, losses,
              setWins, queueSlot, queueSeq, delayHover, health[0], health[1], health[2],
              watchSlot, watchSeq, static_cast<unsigned>(upstream >> 32),
-             static_cast<unsigned>(upstream & 0xFFFFFFFFu));
+             static_cast<unsigned>(upstream & 0xFFFFFFFFu), setFormat);
 }
 
 bool DecodeMember(const char* text, Member& member)
@@ -118,14 +121,16 @@ bool DecodeMember(const char* text, Member& member)
     int watchSlot = -1;
     unsigned watchSeq = 0;
     unsigned upstreamHigh = 0, upstreamLow = 0;
+    int setFormat = 0; // last and optional: builds before it do not send one
     Team team = {};
-    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u", &version,
+    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u|%d", &version,
                         &slot, &side, &ready, &status, &accepted, &delayPick, &team.chars[0],
                         &team.chars[1],
                         &team.chars[2], &team.assists[0], &team.assists[1], &team.assists[2],
                         &team.colors[0], &team.colors[1], &team.colors[2], &wins, &losses,
                         &setWins, &queueSlot, &queueSeq, &delayHover, &health[0], &health[1],
-                        &health[2], &watchSlot, &watchSeq, &upstreamHigh, &upstreamLow) != 29)
+                        &health[2], &watchSlot, &watchSeq, &upstreamHigh, &upstreamLow,
+                        &setFormat) < 29)
         return false;
     if (version != kMemberVersion) return false;
     if (slot < -1 || slot >= kMaxSlots || side < 0 || side > 2 || status < 0 ||
@@ -154,6 +159,9 @@ bool DecodeMember(const char* text, Member& member)
     member.wins = static_cast<int16_t>(wins < 0 ? 0 : wins > 999 ? 999 : wins);
     member.losses = static_cast<int16_t>(losses < 0 ? 0 : losses > 999 ? 999 : losses);
     member.setWins = static_cast<int8_t>(setWins < 0 ? 0 : setWins > kMaxFirstTo ? kMaxFirstTo : setWins);
+    member.setFormat = static_cast<int8_t>(
+        status != static_cast<int>(MemberStatus::Fighting) || setFormat < 0 ||
+        setFormat > kMaxFirstTo + 1 ? 0 : setFormat);
     return true;
 }
 
@@ -211,7 +219,7 @@ bool SteamRoomService::TakeError(char* message, size_t capacity)
     return true;
 }
 
-void SteamRoomService::AddChat(const char* sender, const char* text, bool system)
+void SteamRoomService::AddChat(const char* sender, const char* text, bool system, bool settings)
 {
     // A ring: the oldest line makes way once the history is full.
     if (chatCount_ == kMaxChatLines) {
@@ -223,6 +231,7 @@ void SteamRoomService::AddChat(const char* sender, const char* text, bool system
     snprintf(line.sender, sizeof(line.sender), "%s", sender ? sender : "");
     snprintf(line.text, sizeof(line.text), "%s", text ? text : "");
     line.system = system;
+    line.settings = settings;
 }
 
 void SteamRoomService::PostSystemLine(const char* text)
@@ -282,6 +291,7 @@ void SteamRoomService::Leave()
     local_.wins = 0;
     local_.losses = 0;
     local_.setWins = 0;
+    local_.setFormat = 0;
     room_ = {};
     publishedOnce_ = false;
     liveAdvertised_ = false;
@@ -328,6 +338,74 @@ void SteamRoomService::SetMusic(int32_t trackId)
     snprintf(value, sizeof(value), "%d", trackId);
     SteamRoom_SetData(kMusicKey, value);
     room_.music = trackId; // Steam echoes it back a moment later
+}
+
+void SteamRoomService::ApplySettings(const RoomSettings& settings)
+{
+    if (!room_.inRoom || SteamRoom_GetOwner() != SteamRoom_GetLocalId()) return;
+    // What changed, for the room's chat.
+    char changes[kChatCapacity] = "";
+    const auto note = [&](const char* format, auto... args) {
+        const size_t used = strlen(changes);
+        if (used) snprintf(changes + used, sizeof(changes) - used, ", ");
+        const size_t at = strlen(changes);
+        snprintf(changes + at, sizeof(changes) - at, format, args...);
+    };
+    if (settings.name[0] && strcmp(settings.name, room_.settings.name) != 0) {
+        SteamRoom_SetName(settings.name);
+        snprintf(room_.settings.name, sizeof(room_.settings.name), "%s", settings.name);
+        note("Name \"%.40s\"", settings.name);
+    }
+    if (settings.visibility != room_.settings.visibility &&
+        SteamRoom_SetType(ToSteamType(settings.visibility))) {
+        SteamRoom_SetData(kVisibilityKey,
+                          settings.visibility == Visibility::FriendsOnly ? "1" : "0");
+        room_.settings.visibility = settings.visibility;
+        HookLog("LobbyRoom: host set the visibility to %d\n",
+                static_cast<int>(settings.visibility));
+        note("%s", settings.visibility == Visibility::Private ? "Private"
+                   : settings.visibility == Visibility::FriendsOnly ? "Friends only" : "Public");
+    }
+    const int oldFirstTo = room_.settings.firstTo;
+    const Rotation oldRotation = room_.settings.rotation;
+    if (SetFormat(settings.firstTo, settings.rotation)) {
+        const int firstTo = room_.settings.firstTo;
+        if (firstTo != oldFirstTo) {
+            if (firstTo == kFirstToEndless) note("Endless");
+            else note("First to %d", firstTo);
+        }
+        // No set ever ends in an endless room: its rotation rule says nothing.
+        if (room_.settings.rotation != oldRotation && firstTo != kFirstToEndless)
+            note("%s", room_.settings.rotation == Rotation::WinnerLeaves ? "Winner leaves"
+                                                                         : "Winner stays");
+    }
+    if (!changes[0]) return;
+    // The notice comes back through the chat like everyone's.
+    char payload[1 + kChatCapacity];
+    const int length = snprintf(payload, sizeof(payload), "%c%s", kChatSettings, changes);
+    SteamRoom_SendChat(payload, length);
+}
+
+// Lobby data like the music, so the room list and later joiners see it too.
+// Players in a set took their own copy when it began (BeginSet). True if
+// either rule changed.
+bool SteamRoomService::SetFormat(int firstTo, Rotation rotation)
+{
+    bool known = false;
+    for (int choice : kFirstToChoices) known |= choice == firstTo;
+    if (!known) return false;
+    if (rotation != Rotation::WinnerLeaves) rotation = Rotation::WinnerStays;
+    if (firstTo == room_.settings.firstTo && rotation == room_.settings.rotation) return false;
+    char value[8];
+    snprintf(value, sizeof(value), "%d", firstTo);
+    SteamRoom_SetData(kFirstToKey, value);
+    snprintf(value, sizeof(value), "%d", static_cast<int>(rotation));
+    SteamRoom_SetData(kRotationKey, value);
+    room_.settings.firstTo = firstTo; // Steam echoes it back a moment later
+    room_.settings.rotation = rotation;
+    HookLog("LobbyRoom: host set the format to FT%d rotation %d\n", firstTo,
+            static_cast<int>(rotation));
+    return true;
 }
 
 void SteamRoomService::ViewProfile(uint64_t memberId)
@@ -378,7 +456,8 @@ void SteamRoomService::PublishLocal()
     EncodeMember(encoded, sizeof(encoded), local_.slot, local_.side, local_.ready, local_.status,
                  local_.accepted, local_.delayPick, local_.team, local_.wins, local_.losses,
                  local_.setWins, local_.queueSlot, local_.queueSeq, local_.delayHover,
-                 local_.health, local_.watchSlot, local_.watchSeq, local_.upstream);
+                 local_.health, local_.watchSlot, local_.watchSeq, local_.upstream,
+                 local_.setFormat);
     SteamRoom_SetLocalData(kMemberKey, encoded);
     publishedOnce_ = true;
 }
@@ -609,13 +688,23 @@ void SteamRoomService::SetLocalStatus(MemberStatus status)
     RefreshRoom();
 }
 
+void SteamRoomService::BeginSet(int firstTo, Rotation rotation)
+{
+    local_.setFormat = (firstTo < 0 ? 0 : firstTo > kMaxFirstTo ? kMaxFirstTo : firstTo) + 1;
+    local_.setRotation = rotation;
+    local_.setWins = 0;
+    PublishLocal();
+}
+
 void SteamRoomService::FinishMatch(bool counted, bool localWon)
 {
+    const bool inSet = local_.setFormat > 0;
     if (counted) {
         if (localWon) ++local_.wins;
         else ++local_.losses;
     }
     local_.setWins = 0;
+    local_.setFormat = 0;
     memset(local_.health, kHealthUnknown, sizeof(local_.health));
     ClearHandshake();
     handshakeOpponent_ = 0; // a rematch with the same player starts over too
@@ -625,7 +714,8 @@ void SteamRoomService::FinishMatch(bool counted, bool localWon)
     // A finished set rotates one of the two players out when others are
     // waiting for this slot. The one who moves does it for themselves.
     const int slot = local_.slot;
-    const Rotation rotation = room_.settings.rotation;
+    // Under the rule the set began with, not one the host has set since.
+    const Rotation rotation = inSet ? local_.setRotation : room_.settings.rotation;
     const bool rotateOut = counted && slot >= 0 && QueueLength(slot) > 0 &&
                            ((rotation == Rotation::WinnerStays && !localWon) ||
                             (rotation == Rotation::WinnerLeaves && localWon));
@@ -680,11 +770,19 @@ void SteamRoomService::DrainChat()
     char buffer[1 + kChatCapacity + 4];
     int size = 0;
     while (SteamRoom_PollChat(&sender, buffer, sizeof(buffer) - 1, &size)) {
-        if (size < 2 || static_cast<uint8_t>(buffer[0]) != kChatText) continue;
+        if (size < 2) continue;
         buffer[size < static_cast<int>(sizeof(buffer)) ? size : sizeof(buffer) - 1] = '\0';
         // Drop control characters; names and text are untrusted input.
         for (char* c = buffer + 1; *c; ++c)
             if (static_cast<unsigned char>(*c) < 0x20) *c = ' ';
+        if (static_cast<uint8_t>(buffer[0]) == kChatSettings) {
+            if (sender != SteamRoom_GetOwner()) continue;
+            char line[kChatCapacity];
+            snprintf(line, sizeof(line), "Lobby settings have been changed: %s", buffer + 1);
+            AddChat("", line, true, true);
+            continue;
+        }
+        if (static_cast<uint8_t>(buffer[0]) != kChatText) continue;
         AddChat(SteamRoom_GetMemberName(sender), buffer + 1, false);
     }
 }
@@ -778,6 +876,10 @@ void SteamRoomService::RefreshRoom()
     next.settings.maxMembers = SteamRoom_GetMemberLimit();
     if (next.settings.maxMembers < 2 || next.settings.maxMembers > kMaxMembers)
         next.settings.maxMembers = kMaxMembers;
+    // Steam does not tell a member what type its lobby is; the host wrote it down.
+    next.settings.visibility = SteamRoom_GetData("private")[0] == '1' ? Visibility::Private
+        : SteamRoom_GetData(kVisibilityKey)[0] == '1' ? Visibility::FriendsOnly
+                                                      : Visibility::Public;
     next.settings.slotCount = atoi(SteamRoom_GetData("slots"));
     if (next.settings.slotCount < 1) next.settings.slotCount = 1;
     if (next.settings.slotCount > kMaxSlots) next.settings.slotCount = kMaxSlots;
@@ -829,6 +931,7 @@ void SteamRoomService::RefreshRoom()
             member.wins = static_cast<int16_t>(local_.wins);
             member.losses = static_cast<int16_t>(local_.losses);
             member.setWins = static_cast<int8_t>(local_.setWins);
+            member.setFormat = static_cast<int8_t>(local_.setFormat);
             member.queueSlot = static_cast<int8_t>(local_.slot >= 0 ? -1 : local_.queueSlot);
             member.queueSeq = local_.queueSeq;
             member.watchSlot = static_cast<int8_t>(local_.slot >= 0 ? -1 : local_.watchSlot);
@@ -1081,6 +1184,7 @@ void SteamRoomService::Pump()
         local_.wins = 0;
         local_.losses = 0;
         local_.setWins = 0;
+        local_.setFormat = 0;
         knownMemberCount_ = 0;
         chatCount_ = 0;
         chatHead_ = 0;

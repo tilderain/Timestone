@@ -280,6 +280,18 @@ public:
     void InviteFriends() override {}
     void CopyLobbyLink() override {}
     void SetMusic(int32_t trackId) override { room.music = trackId; }
+    void ApplySettings(const RoomSettings& settings) override
+    {
+        snprintf(room.settings.name, sizeof(room.settings.name), "%s", settings.name);
+        room.settings.visibility = settings.visibility;
+        room.settings.firstTo = settings.firstTo;
+        room.settings.rotation = settings.rotation;
+        char line[kChatCapacity];
+        snprintf(line, sizeof(line), "Lobby settings have been changed: First to %d",
+                 settings.firstTo);
+        AddChat("", line, true);
+        chat.back().settings = true;
+    }
     void ViewProfile(uint64_t) override {}
     void Kick(uint64_t) override {}
     void SendChat(const char* utf8) override { AddChat("tilderain", utf8, false); }
@@ -416,6 +428,9 @@ void Populate(FakeService& service, int slots)
     snprintf(settings.name, sizeof(settings.name), "Friday Night Marvel");
     settings.maxMembers = 8;
     settings.slotCount = slots;
+    // One of each for the title bar's access tag.
+    settings.visibility = slots == 1 ? Visibility::Private
+                        : slots == 2 ? Visibility::FriendsOnly : Visibility::Public;
     settings.firstTo = 3;
     settings.rotation = Rotation::WinnerStays;
     service.Create(settings);
@@ -659,6 +674,21 @@ int main(int argc, char** argv)
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_music");
             ui.Update(Press(&Input::cancel));
+            ui.Update(Press(&Input::menu));
+            ui.Update(Press(&Input::down));
+            ui.Update(Press(&Input::down)); // LOBBY SETTINGS (host)
+            ui.Update(Press(&Input::confirm));
+            Settle(ui);
+            ui.Update(Press(&Input::down)); // LOBBY SIZE: as created
+            ok &= Capture(ui, directory, "room_settings_fixed");
+            for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down)); // MATCH FORMAT
+            ui.Update(Press(&Input::right)); // the next set length up
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "room_settings");
+            for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down)); // APPLY CHANGES
+            ui.Update(Press(&Input::confirm));
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "room_settings_applied");
             ui.Update(Press(&Input::quickChat)); // RB / X
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_chat");
@@ -669,6 +699,10 @@ int main(int argc, char** argv)
             ui.Update(Press(&Input::confirm));
             Settle(ui, 90);
             ok &= Capture(ui, directory, "match_delay");
+            ui.Update(Press(&Input::cancel)); // backing out is asked first
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "match_delay_leave");
+            ui.Update(Press(&Input::cancel)); // "No": still seated
             ui.Update(Press(&Input::right));
             ui.Update(Press(&Input::right));
             ui.Update(Press(&Input::right));
