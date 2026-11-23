@@ -183,6 +183,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     RollbackUnit_SetFrame(startFrame, true);
     Rollback_BeginThemeResim();
     Rollback_RestoreSnapshot(startFrame);
+    Rollback_DropDeadSoundTargets();
     const bool reuseStartSnapshot = CanReuseRestoredSnapshot(startFrame);
 
     for (int32_t frame = startFrame; frame < endFrame; ++frame) {
@@ -215,6 +216,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             LagDiagnosticScope tickDiagnostic(LagMetric::ResimTick);
             Rollback_HeadlessTick(g_mainInstance);
         }
+        Rollback_DropDeadSoundTargets();
         Rollback_RecordBattlePresentation(frame);
         timer.Add(&RollbackProfile::frameNativeTick,
                   &RollbackProfile::frameNativeTickMax);

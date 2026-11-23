@@ -823,11 +823,12 @@ static void __fastcall hkFinishScreenAssignSlot(uint64_t screen, int team, int m
     oFinishScreenAssignSlot(screen, team, member, character);
 }
 
-// TODO: this hook should not be needed and has to be fixed at the source. It
-// runs on every sound environment update only to drop a model pointer that a
-// rollback left dangling in the scene. Find what leaves the scene pointing at
-// a dead model (the scene is not rewound with the model it follows) and clear
-// or restore the slot there, then remove this hook.
+// Backstop, to be removed. The cause is handled in rollback_sound.cpp
+// (Rollback_DropDeadSoundTargets, Rollback_ForgetSoundTarget): a resim runs
+// without sSound::move, so the game never saw the followed unit die. This
+// stays for a release to show, by its log line, whether anything still gets
+// past that. It detaches a target that is neither a model nor an effect,
+// which is what a freed and reused address looks like.
 static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
 {
     constexpr uint32_t MODEL_OFFSET = 0x80;
@@ -837,18 +838,29 @@ static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
     uint64_t* modelSlot = (uint64_t*)(scene + MODEL_OFFSET);
     uint64_t model = *modelSlot;
     if (model) {
-        bool valid = IsBaseModelObject((void*)model);
+        // Both families implement vtable +0xA0 as getWorldMatrix(joint):
+        // uModel (0x140566330) and uEffect (0x1405E5470). Voices follow
+        // effects too (a uGameEffect was detached here, log of 2026-11-23).
+        bool valid = IsBaseModelObject((void*)model) || IsEffectObject((void*)model);
         uint64_t vtable = valid ? *(uint64_t*)model : 0;
         uint64_t getMatrix = valid ? *(uint64_t*)(vtable + 0xA0) : 0;
         int32_t jointIndex = *(int32_t*)(scene + JOINT_INDEX_OFFSET);
         uint32_t positionMode = *(uint32_t*)(scene + POSITION_MODE_OFFSET);
-        if (!valid || !getMatrix ||
-            (positionMode == 2 && jointIndex < 0)) {
-            // No log here: the write stalled the sound update for 11.5 ms in a
-            // lag capture.
-            /*HookLog("Rollback: detached stale sound scene model=0x%llX "
-                    "vtable=0x%llX mode=%u joint=%d\n",
-                    model, vtable, positionMode, jointIndex);*/
+        // A negative joint is valid: uModel::getWorldMatrix (0x140566330)
+        // then returns the object's own matrix. Rejecting it detached live
+        // characters and shots (uHawkEye, uVergil, uShotVulcan..., log of
+        // 2026-11-23), leaving their voices at a stale position.
+        if (!valid || !getMatrix) {
+            // Rollback_DropDeadSoundTargets should leave nothing for this to
+            // catch. Logged at the 1st, 2nd, 4th, ... hit only: a line per hit
+            // stalled the sound update for 11.5 ms in a lag capture.
+            static uint32_t hits = 0;
+            if ((++hits & (hits - 1)) == 0) {
+                HookLog("Rollback: sound guard detached a voice target (hit %u) "
+                        "object=0x%llX vtable=0x%llX mode=%u joint=%d\n",
+                        hits, model, valid ? vtable : *(uint64_t*)model,
+                        positionMode, jointIndex);
+            }
             *modelSlot = 0;
         }
     }
@@ -1318,12 +1330,13 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                (void**)&oPlayInitialTheme,
                "Rollback: hooked round-start theme",
                "Rollback: failed to hook round-start theme (%d)\n");
-    // Disabled for testing: does a rollback still leave a voice bound to a
-    // freed object (crash in the voice position update, 0x1405D6CD0)?
-    /*EnableHook(FN_SCENE_UPDATE_SOUND_ENV, (void*)&hkSceneUpdateSoundEnv,
+    // Still needed: with this off (0.6.5), a voice kept following a freed
+    // object whose memory a uUiSprite3D had taken, and the position update
+    // called that sprite's vtable +0xA0 (crash of 2026-11-22).
+    EnableHook(FN_SCENE_UPDATE_SOUND_ENV, (void*)&hkSceneUpdateSoundEnv,
                (void**)&oSceneUpdateSoundEnv,
                "Rollback: guarded sound scene model binding",
-               "Rollback: failed to guard sound scene model binding (%d)\n");*/
+               "Rollback: failed to guard sound scene model binding (%d)\n");
     EnableHook(FN_SGAMEUI_MOVE, (void*)&hkGameUiMove, (void**)&oGameUiMove,
                "Rollback: hooked sGameUI__move for re-simulation suppression",
                "Rollback: failed to hook sGameUI__move (%d)\n");

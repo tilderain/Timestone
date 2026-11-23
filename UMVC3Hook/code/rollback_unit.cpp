@@ -4,6 +4,7 @@
 #include "mk10utils.h"
 #include "rollback.h"
 #include "rollback_memory.h"
+#include "rollback_sound.h"
 #include "rollback_character_restore.h"
 #include "rollback_diagnostics.h"
 #include "lag_diagnostics.h"
@@ -810,6 +811,7 @@ void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t native
     if (identity && identity->kind == Kind::Shot) {
         ForgetCurrentShotGenerations(id, shot);
     }
+    Rollback_ForgetSoundTarget(shot);
     void* result = original(shot, flags);
     if (shotOwner) ReleaseTerminalShotReferences(id);
     if (generic) Destroyed("unit_dispose_end", shot, id);
@@ -1495,6 +1497,7 @@ void* __fastcall DeleteEffect(void* effect, uint32_t flags)
         }
         ReleaseSRWLockExclusive(&g_lock);
     }
+    Rollback_ForgetSoundTarget(effect);
     return oDeleteEffect(effect, flags);
 }
 
@@ -1534,6 +1537,7 @@ void CollectQuarantine()
         Push("quarantine_collect", &entry, object, 0, 0, 0, 0, false);
         if (entry.kind == Kind::Unit) Push("unit_dispose_begin", &entry, object, 0, 0, 0, 0, false);
         ReleaseSRWLockExclusive(&g_lock);
+        Rollback_ForgetSoundTarget(object);
         if (entry.kind != Kind::Effect) {
             if (entry.kind == Kind::Shot) ForgetCurrentShotGenerations(entry.id, object);
             void* previous = g_collectingShot;

@@ -63,9 +63,21 @@ constexpr VoiceArray VOICES[2] = {{0x70, 0xB50, 0x1CF50},      // SE
 constexpr uint32_t VOICE_ACTIVE = 0x08, VOICE_STATE = 0x0C, VOICE_REQUEST = 0x10,
                    VOICE_ID = 0x18, VOICE_OWNER = 0x20, VOICE_SERIAL = 0x44;
 constexpr uint32_t VOICE_STATE_STOP = 2;
+// The unit a positioned voice follows (borrowed, not retained).
+constexpr uint32_t VOICE_TARGET = 0x80;
+// Command rings (sSound::setSeEntry / setStreamEntry): type +0x18, sub +0x1C,
+// the five argument qwords from +0x20.
+struct Ring { uint32_t lock, head, count, base, capacity, stride; };
+constexpr Ring RINGS[2] = {{0x1CF00, 0x1CF98, 0x1CFA8, 0x1CEF0, 0x1CF60, 0x80},   // SE
+                           {0x1CF28, 0x1CFD8, 0x1CFE8, 0x1CEF8, 0x1CF64, 0x78}};  // stream
+constexpr uint32_t RING_TYPE = 0x18, RING_SUB = 0x1C, RING_ARGS = 0x20;
+constexpr uint32_t UNIT_STATE = 0x10;
 constexpr uint32_t STREAM_RING_CAPACITY = 0x1CF64, STREAM_RING_ENTRIES = 128; // native default 32
 // Ring command types (entry +0x18).
-constexpr uint32_t CMD_START = 1, CMD_START_BANK = 2, CMD_STOP = 3;
+constexpr uint32_t CMD_START = 1, CMD_START_BANK = 2, CMD_STOP = 3, CMD_CONTROL = 6;
+// A start with sub 2 follows the unit in argument 3; control 0x19 points a
+// playing voice at the unit in argument 0 (sSound__applyVoiceCommand).
+constexpr uint32_t START_FOLLOW_UNIT = 2, CONTROL_SET_TARGET = 0x19;
 
 // sGSound
 // Narration (announcer) queues: 8 entries of 0x38, flags at +0x30.
@@ -440,6 +452,65 @@ void __fastcall hkSoundMove(uint64_t sound)
     RetireEntries(Controller_GetExecutingFrame());
 }
 
+// The argument of a command that names the unit a voice follows, if any.
+uint64_t* CommandTarget(uint32_t type, uint32_t sub, uint64_t* args)
+{
+    if (type == CMD_START && sub == START_FOLLOW_UNIT) return &args[3];
+    if (type == CMD_CONTROL && sub == CONTROL_SET_TARGET) return &args[0];
+    return nullptr;
+}
+
+// With `freed`, that object only. Without, sSound's own rule (0x1405D6D38,
+// 0x1405D76E0): a followed unit is alive in lifecycle states 1 and 2.
+bool TargetGone(uint64_t target, uint64_t freed)
+{
+    if (!target) return false;
+    if (freed) return target == freed;
+    return ((*(const uint32_t*)(target + UNIT_STATE) & 7) - 1) > 1;
+}
+
+// sSound drops a dead target once per sSound::move, and a dying unit stays
+// allocated long enough for that. A resim runs several ticks with no
+// sSound::move in between, so a unit can die and be freed, and its memory
+// reused, before the check runs again: the voice then calls into whatever
+// object lives there (crash of 2026-11-22, a uUiSprite3D). Apply the same
+// rule to every place a target waits: voices, both rings, and the commands
+// this resim has buffered.
+void DropSoundTargets(uint64_t freed)
+{
+    const uint64_t sound = SoundInstance();
+    if (sound) {
+        for (const VoiceArray& array : VOICES) {
+            const uint32_t count = *(const uint32_t*)(sound + array.count);
+            for (uint32_t i = 0; i < count; ++i) {
+                uint64_t& target = *(uint64_t*)(sound + array.base + (uint64_t)i * array.stride + VOICE_TARGET);
+                if (TargetGone(target, freed)) target = 0;
+            }
+        }
+        for (const Ring& ring : RINGS) {
+            CRITICAL_SECTION* lock = (CRITICAL_SECTION*)(sound + ring.lock);
+            EnterCriticalSection(lock);
+            const uint64_t base = *(const uint64_t*)(sound + ring.base);
+            const uint64_t end = base + (uint64_t)*(const uint32_t*)(sound + ring.capacity) * ring.stride;
+            uint64_t entry = *(const uint64_t*)(sound + ring.head);
+            for (int32_t left = *(const int32_t*)(sound + ring.count); entry && left > 0; --left) {
+                uint64_t* target = CommandTarget(*(const uint32_t*)(entry + RING_TYPE),
+                                                 *(const uint32_t*)(entry + RING_SUB),
+                                                 (uint64_t*)(entry + RING_ARGS));
+                if (target && TargetGone(*target, freed)) *target = 0;
+                entry += ring.stride;
+                if (entry == end) entry = base;
+            }
+            LeaveCriticalSection(lock);
+        }
+    }
+    Lock lock;
+    for (Command& command : g_resim) {
+        uint64_t* target = CommandTarget(command.type, command.sub, command.args);
+        if (target && TargetGone(*target, freed)) *target = 0;
+    }
+}
+
 template <LineFn* Original>
 void __fastcall hkLine(uint64_t unit, uint32_t line)
 {
@@ -639,6 +710,16 @@ void Rollback_EndSoundResim()
         Release(command.request);
     }
     g_resim.clear();
+}
+
+void Rollback_DropDeadSoundTargets()
+{
+    if (g_soundResim) DropSoundTargets(0);
+}
+
+void Rollback_ForgetSoundTarget(const void* object)
+{
+    if (g_soundResim && object) DropSoundTargets((uint64_t)object);
 }
 
 void Rollback_SaveSoundState(int32_t frame)

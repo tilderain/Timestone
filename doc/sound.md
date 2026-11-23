@@ -60,6 +60,43 @@ inaccessible/non-executable, or mode 2 has a negative joint index, then calls th
 original environment update. This is current plugin policy, not a freshly
 decompiled native layout proof or a guarantee against all object-lifetime races.
 
+**Dead voice targets (2026-11-23).** A positioned voice borrows the unit it
+follows (voice `+0x80`, selector `+0x88`, mode `+0xC0`). The game drops the
+pointer when the unit's lifecycle state (`[unit+0x10] & 7`) is not 1 or 2, and
+checks only from `sSound__move`: at the top of every voice update
+(`0x1405D6D38`) and, for starts still in the rings (type 1, sub 2, target at
+entry `+0x38`), in `sSound__updateSeEntryCoord` / `...StreamEntryCoord`
+(`0x1405D76E0`, `0x1405D7A10`). That is enough natively because a dying unit
+stays allocated across at least one sound update. A resim runs up to 8 ticks
+with no `sSound__move`, so a unit could die and be freed, and its memory reused
+by a live object, before the check ran again. The 0.6.5 crash of 2026-11-22
+was this: the voice's target had become a `uUiSprite3D`, whose vtable `+0xA0`
+is a vector setter (`0x14044B600` -> `MtVector3__op_assign`), called with the
+joint index 0 as its source pointer.
+
+`rollback_sound.cpp` now applies the game's rule itself during a resim:
+
+- `Rollback_DropDeadSoundTargets` after the snapshot restore and after every
+  resim tick: clears targets that are no longer alive in the SE and stream
+  voices, in both rings, and in the commands the resim has buffered. Besides
+  starts it covers control command type 6 sub `0x19`, which points a playing
+  voice at the unit in argument 0 (`sSound__applyVoiceCommand`, `0x1405D3C50`).
+- `Rollback_ForgetSoundTarget(object)` just before `rollback_unit.cpp` really
+  frees a unit or effect during a resim (`DeleteUnit`, `DeleteEffect`,
+  quarantine collection): clears every reference to that object, for frees
+  that skip the dying states.
+
+Neither runs outside a resim. `hkSceneUpdateSoundEnv` stays enabled for now as
+a backstop and logs when it detaches something (1st, 2nd, 4th, ... hit). Not
+yet verified in a match. The guard no longer rejects mode 2 with a negative
+joint: a first run logged only such hits, all on live objects (`uHawkEye`,
+`uVergil`, `uShotVulcanNormalArrow`, `uShotVulcanJigenZan`,
+`uShotOptionRoundTrip`), where the negative selector means the object's own
+world matrix. It also accepts effects now: a second run logged one hit, a
+`uGameEffect` with joint 0, whose vtable `+0xA0` is `uEffect::getWorldMatrix`
+(`0x1405E5470`). A hit now means the target is neither a model nor an effect. Which object the crashed voice had followed is
+unknown, so it is not proven that the two calls above cover that path.
+
 Sound starts are also guarded at `sGSound__callVoicePlayOrStopVt` at
 `0x1402A3380`. Re-simulation drops play dispatches (`flag == 0`) because the
 audio backend is intentionally not rewound; replaying them would stack another

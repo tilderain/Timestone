@@ -11,6 +11,13 @@ void Rollback_InitSoundHooks();
 void Rollback_BeginSoundResim(int32_t startFrame);
 void Rollback_EndSoundResim();
 
+// A resim runs without sSound::move, which is where the game notices that the
+// unit a voice follows has died. Both do nothing outside a resim.
+// After the restore and after every resim tick: drop targets no longer alive.
+void Rollback_DropDeadSoundTargets();
+// Before a unit is freed: drop every reference to it.
+void Rollback_ForgetSoundTarget(const void* object);
+
 // sGSound queue state: delayed character voices and the group queue are
 // rewound; narration entries only where gameplay queued them unconsumed.
 void Rollback_SaveSoundState(int32_t frame);
