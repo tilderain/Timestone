@@ -82,12 +82,12 @@ The button needs nothing but Steam on the other player's side: no Timestone
 running, no Discord presence, no particular device. They still need Timestone
 installed to actually play a room.
 
-Discord still gets a launch registration: the plugin writes
-`HKCU\Software\Classes\discord-1544202390536982610`, which points at
-`steam://rungameid/357190`, so Discord can start the game for a join. Turning the
-status off in a settings menu deletes that key; editing
-`ShowDiscordStatus=0` by hand does not, until the next time it is turned off in
-a menu.
+The plugin still writes `HKCU\Software\Classes\discord-1544202390536982610`,
+pointing at `steam://rungameid/357190`, left over from Discord's own Join. The
+button does not use it, and with no join secret published Discord shows neither
+Join nor Ask to Join. Turning the status off in a settings menu deletes that
+key; editing `ShowDiscordStatus=0` by hand does not, until the next time it is
+turned off in a menu.
 
 The link carries the room: the page joins it directly, whether or not the game
 was already running.

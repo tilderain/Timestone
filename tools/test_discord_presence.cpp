@@ -251,10 +251,12 @@ int main()
         // A match card keeps the Join lobby button: the room still has seats.
         CHECK(Contains(json, "\"label\":\"Join lobby\""));
 
-        // Without the host's SteamID there is no link to build: no button.
+        // Without the host's SteamID there is no link to build: no button,
+        // but the party line stays.
         PresenceSnapshot unknown = s;
         unknown.ownerId = 0;
         CHECK(!Contains(DiscordPresence_ActivityJson(unknown), "\"buttons\""));
+        CHECK(Contains(DiscordPresence_ActivityJson(unknown), "\"party\""));
     }
 
     // 5. Escaping of quotes, backslashes and control bytes.
@@ -433,6 +435,7 @@ int main()
             const std::string activity = DiscordPresence_ActivityJson(all[n]);
             CHECK(!activity.empty());
             CHECK_JSON(activity);
+            CHECK(!Contains(activity, "\"secrets\""));
             CHECK_JSON(DiscordPresence_SetActivityJson(activity, 6988, static_cast<uint32_t>(n)));
         }
         PresenceSnapshot lobby;
