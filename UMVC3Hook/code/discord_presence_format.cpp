@@ -111,11 +111,11 @@ std::string DiscordPresence_ActivityJson(const PresenceSnapshot& s)
         if (s.startingMatch)
             state = "Starting a match";
         else if (s.seat >= 0)
-            state = "Connected P" + Decimal(s.seat + 1);
+            state = "Seated P" + Decimal(s.seat + 1);
         else if (s.queuePos >= 1)
             state = "Queued (#" + Decimal(s.queuePos) + ")";
         else
-            state = "In Lobby";
+            state = "Connected";
         break;
     case PresenceActivity::InMatch: {
         details = "Playing: versus";

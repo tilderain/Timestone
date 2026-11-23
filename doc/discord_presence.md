@@ -52,7 +52,7 @@ again starts it.
 | Where | Details | State |
 |---|---|---|
 | Online lobby, no room | In Menus | — |
-| In a room | Lobby: `<name>` | In Lobby / Connected P`<n>` / Queued (#`<n>`) / Starting a match |
+| In a room | Lobby: `<name>` | Connected / Seated P`<n>` / Queued (#`<n>`) / Starting a match |
 | Playing a room match | Playing: versus - `<wins>`-`<losses>` (FT`<n>`) | vs `<opponent>` - `<your team>` vs `<their team>`, with a match timer |
 | Watching a room match | Watching a game | `<player 1>` vs `<player 2>` |
 | In the game's main menu | In Menus | — |

@@ -170,7 +170,17 @@ int main()
         CHECK(Contains(json, "\"party\":{\"id\":\"timestone-"));
         CHECK(Contains(json, "\"size\":[3,8]"));
         CHECK(Value(json, "details") == "Lobby: Probe");
-        CHECK(Value(json, "state") == "In Lobby");
+        CHECK(Value(json, "state") == "Connected");
+
+        PresenceSnapshot seated = Room(true, 3, 8);
+        seated.seat = 2;
+        CHECK(Value(DiscordPresence_ActivityJson(seated), "state") == "Seated P3");
+        PresenceSnapshot queued = Room(true, 3, 8);
+        queued.queuePos = 3;
+        CHECK(Value(DiscordPresence_ActivityJson(queued), "state") == "Queued (#3)");
+        PresenceSnapshot starting = Room(true, 3, 8);
+        starting.startingMatch = true;
+        CHECK(Value(DiscordPresence_ActivityJson(starting), "state") == "Starting a match");
 
         const std::size_t idAt = json.find("109775244080946091");
         const std::size_t partyAt = json.find("\"party\":{\"id\":\"timestone-");
