@@ -304,6 +304,10 @@ float Netplay_GetRemotePacketLoss();
 // Peak packet jitter over a 500 ms window, in milliseconds, or -1 if unavailable.
 int32_t Netplay_GetJitter();
 
+// Route, jitter, loss and relay estimate for the periodic netplay log line.
+// Reads cached values only; the jitter figure is the peak since the last call.
+void Netplay_FormatLinkLog(char* out, size_t size);
+
 // Request a peer timeout change on the ENet service thread.
 void Netplay_SetTimeout(uint32_t timeoutMs);
 

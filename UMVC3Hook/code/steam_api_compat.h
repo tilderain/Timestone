@@ -196,6 +196,9 @@ public:
     virtual EResult GetConnectionRealTimeStatus(HSteamNetConnection,
                                                 SteamNetConnectionRealTimeStatus_t*, int,
                                                 SteamNetConnectionRealTimeLaneStatus_t*) = 0;
+    // Text dump of the connection's statistics. Returns 0 when the buffer was
+    // filled, -1 for a bad handle, or the size needed when it was too small.
+    virtual int GetDetailedConnectionStatus(HSteamNetConnection, char*, int) = 0;
 };
 
 #pragma pack(push, 8)

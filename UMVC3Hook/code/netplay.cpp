@@ -1718,6 +1718,34 @@ int32_t Netplay_GetJitter()
     return -1;
 }
 
+void Netplay_FormatLinkLog(char* out, size_t size)
+{
+    if (!size) return;
+    out[0] = '\0';
+    if (!g_running) return;
+    const float loss = g_packetLoss.load();
+    if (!SteamTransport_IsActive()) {
+        if (loss >= 0.0f) snprintf(out, size, "route=ENet loss=%.1f%%", loss);
+        else snprintf(out, size, "route=ENet");
+        return;
+    }
+
+    // Unknown figures are left out rather than printed as placeholders.
+    int length = snprintf(out, size, "route=%s", SteamTransport_GetRouteName());
+    auto append = [&](const char* fmt, double value) {
+        if (length < 0 || static_cast<size_t>(length) >= size) return;
+        const int written = snprintf(out + length, size - length, fmt, value);
+        if (written > 0) length += written;
+    };
+    const int32_t jitterUsec = SteamTransport_TakeLogJitterPeakUsec();
+    if (jitterUsec >= 0) append(" jitter-peak=%.1f ms", jitterUsec / 1000.0);
+    if (loss >= 0.0f) append(" loss=%.1f%%", loss);
+    const float remoteLoss = SteamTransport_GetRemotePacketLoss();
+    if (remoteLoss >= 0.0f) append(" remote-loss=%.1f%%", remoteLoss);
+    const int32_t relayEstimate = SteamTransport_GetRelayPingEstimate();
+    if (relayEstimate >= 0) append(" relay-est=%.0f ms", relayEstimate);
+}
+
 void Netplay_Shutdown()
 {
     HookLog("Netplay: Shutting down...\n");

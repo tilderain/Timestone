@@ -985,6 +985,24 @@ void RefreshResultPings()
     if (!pending) g_resultPingRefreshDeadline = 0;
 }
 
+// Hands the transport Steam's relay-route estimate to the connected player,
+// for the netplay log. The peer's location comes from lobby data, so this
+// stays on the thread that pumps the lobby; a room member publishes its own,
+// and a plain lobby carries only the host's.
+ULONGLONG g_nextRelayEstimateTick = 0;
+
+void RefreshRelayPingEstimate(bool force)
+{
+    const ULONGLONG now = GetTickCount64();
+    if (!force && now < g_nextRelayEstimateTick) return;
+    g_nextRelayEstimateTick = now + 5000;
+    int estimate = -1;
+    if (SteamRoom_IsActive()) estimate = SteamRoom_EstimateMemberPing(g_peerSteamId);
+    else if (!g_isHost) estimate = EstimateLobbyPing(g_lobbyId);
+    // Keep the last good figure if the lobby data is momentarily unreadable.
+    if (estimate >= 0) SteamTransport_SetRelayPingEstimate(estimate);
+}
+
 void RefreshConnectedStatus()
 {
     SteamNetConnectionInfo_t info = {};
@@ -1000,6 +1018,7 @@ void PumpConnection()
 {
     if (g_bridgeCreated) {
         RefreshConnectedStatus();
+        RefreshRelayPingEstimate(false);
         return;
     }
     if (g_connectionDeadline && GetTickCount64() >= g_connectionDeadline) {
@@ -1049,6 +1068,7 @@ void PumpConnection()
         g_bridgeCreated = true;
         g_handlesReady = true;
         g_connectionDeadline = 0;
+        RefreshRelayPingEstimate(true);
         if (!g_roomMode) {
             g_api.SetLobbyJoinable(g_matchmaking, g_lobbyId, false);
             ClearLobbyRichPresence();

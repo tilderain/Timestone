@@ -27,6 +27,84 @@ static int32_t g_jitterWindowPeakUsec = -1;
 static DWORD g_jitterWindowStartTick = 0;
 static DWORD g_bridgeCreatedTick = 0;
 
+// The route Steam is carrying the connection on. Steam may move a live
+// connection between its direct and relayed transports at any time.
+enum SteamRoute : int {
+    kRouteUnknown, kRouteDirect, kRouteRelay, kRouteRelaySdr, kRouteLoopback
+};
+static const char* const kRouteNames[] = {
+    "Unknown", "Direct", "Relay", "Relay (SDR)", "Loopback"
+};
+static std::atomic<int> g_steamRoute{kRouteUnknown};
+static uint32_t g_steamRelayPop = 0; // bridge thread only
+static std::atomic<int32_t> g_logJitterPeakUsec{-1};
+static std::atomic<int32_t> g_relayPingEstimate{-1};
+
+// A relay's data-center code is up to four characters packed into an integer.
+static void FormatPop(uint32_t pop, char out[5])
+{
+    int length = 0;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        const char c = static_cast<char>((pop >> shift) & 0xFF);
+        if (c) out[length++] = c;
+    }
+    out[length] = '\0';
+}
+
+// Runs on the status poll, twice a second: reads the route and logs when it
+// differs from the one last seen.
+static void PollRoute(const SteamNetConnectionRealTimeStatus_t& status)
+{
+    SteamNetConnectionInfo_t info = {};
+    if (status.m_eState != k_ESteamNetworkingConnectionState_Connected ||
+        !g_sockets->GetConnectionInfo(g_connection, &info))
+        return;
+
+    int route = kRouteDirect;
+    if (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_LoopbackBuffers)
+        route = kRouteLoopback;
+    else if (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_Relayed)
+        route = info.m_idPOPRelay ? kRouteRelaySdr : kRouteRelay;
+    const uint32_t pop = route == kRouteRelaySdr ? info.m_idPOPRelay : 0;
+
+    const int previous = g_steamRoute.load(std::memory_order_relaxed);
+    if (route == previous && pop == g_steamRelayPop) return;
+
+    char popText[5], previousPopText[5];
+    FormatPop(pop, popText);
+    FormatPop(g_steamRelayPop, previousPopText);
+    const double seconds = (GetTickCount() - g_bridgeCreatedTick) / 1000.0;
+    if (previous == kRouteUnknown) {
+        HookLog("[Netplay] Route: %s%s%s | RTT: %d ms | relay-est=%d ms\n",
+                kRouteNames[route], pop ? " pop=" : "", popText, status.m_nPing,
+                g_relayPingEstimate.load(std::memory_order_relaxed));
+    } else {
+        HookLog("[Netplay] Route changed: %s%s%s -> %s%s%s at +%.1f s | RTT: %d ms | "
+                "relay-est=%d ms\n",
+                kRouteNames[previous], g_steamRelayPop ? " pop=" : "", previousPopText,
+                kRouteNames[route], pop ? " pop=" : "", popText, seconds,
+                status.m_nPing, g_relayPingEstimate.load(std::memory_order_relaxed));
+    }
+    g_steamRelayPop = pop;
+    g_steamRoute.store(route, std::memory_order_relaxed);
+}
+
+// Steam's full statistics for the connection: lifetime ping and quality
+// histograms, packet totals, and the relays used. Must run before the
+// connection is closed, and never while a match is being played.
+static void LogDetailedStatus()
+{
+    static char text[16 * 1024];
+    if (!g_sockets || g_connection == k_HSteamNetConnection_Invalid) return;
+    if (g_sockets->GetDetailedConnectionStatus(g_connection, text, sizeof(text)) < 0)
+        return;
+    text[sizeof(text) - 1] = '\0';
+    HookLog("[Netplay] Steam connection summary after %.1f s, route=%s:\n%s\n"
+            "[Netplay] End of Steam connection summary\n",
+            (GetTickCount() - g_bridgeCreatedTick) / 1000.0,
+            kRouteNames[g_steamRoute.load()], text);
+}
+
 // The loopback hop can go unserviced while launch hooks finish installing.
 // Steam owns real peer liveness, so its local proxy must outlive that handoff.
 static constexpr enet_uint32 kLoopbackHandoffTimeoutMs = 10 * 60 * 1000;
@@ -94,6 +172,12 @@ static bool PumpBridgeOnce()
         // Steam clears its jitter peak on each poll. Aggregate for a readable HUD.
         if (status.m_usecMaxJitter > g_jitterWindowPeakUsec)
             g_jitterWindowPeakUsec = status.m_usecMaxJitter;
+        // The log line keeps its own peak, spanning the time between lines.
+        int32_t logPeak = g_logJitterPeakUsec.load(std::memory_order_relaxed);
+        while (status.m_usecMaxJitter > logPeak &&
+               !g_logJitterPeakUsec.compare_exchange_weak(
+                   logPeak, status.m_usecMaxJitter, std::memory_order_relaxed)) {}
+        PollRoute(status);
         const DWORD now = GetTickCount();
         if (now - g_jitterWindowStartTick >= JITTER_WINDOW_MS) {
             g_steamJitter = g_jitterWindowPeakUsec < 0
@@ -214,6 +298,9 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     g_steamJitter = -1;
     g_jitterWindowPeakUsec = -1;
     g_jitterWindowStartTick = GetTickCount();
+    g_steamRoute = kRouteUnknown;
+    g_steamRelayPop = 0;
+    g_logJitterPeakUsec = -1;
     g_bridgeCreatedTick = GetTickCount();
     g_lastStatusPollTick = g_bridgeCreatedTick - STATUS_POLL_INTERVAL_MS;
     g_bridgeThreadStarted = false;
@@ -264,6 +351,27 @@ int32_t SteamTransport_GetJitter()
     return g_steamJitter.load();
 }
 
+const char* SteamTransport_GetRouteName()
+{
+    if (LocalLobby_Enabled()) return "Local";
+    return kRouteNames[g_steamRoute.load(std::memory_order_relaxed)];
+}
+
+int32_t SteamTransport_TakeLogJitterPeakUsec()
+{
+    return g_logJitterPeakUsec.exchange(-1, std::memory_order_relaxed);
+}
+
+void SteamTransport_SetRelayPingEstimate(int32_t pingMs)
+{
+    g_relayPingEstimate.store(pingMs, std::memory_order_relaxed);
+}
+
+int32_t SteamTransport_GetRelayPingEstimate()
+{
+    return g_relayPingEstimate.load(std::memory_order_relaxed);
+}
+
 void SteamTransport_Shutdown()
 {
     HookLog("SteamTransport: shutdown requested (running=%d, thread=%p)\n",
@@ -285,6 +393,8 @@ void SteamTransport_Shutdown()
         g_bridgeHost = nullptr;
         g_bridgePeer = nullptr;
     }
+    // The bridge thread has stopped, so nothing else is using the connection.
+    LogDetailedStatus();
     if (g_sockets && g_connection != k_HSteamNetConnection_Invalid)
         g_sockets->CloseConnection(g_connection, 1000, "Timestone shutdown", false);
     g_connection = k_HSteamNetConnection_Invalid;
@@ -294,4 +404,7 @@ void SteamTransport_Shutdown()
     g_steamPacketLoss = -1.0f;
     g_steamRemotePacketLoss = -1.0f;
     g_steamJitter = -1;
+    g_steamRoute = kRouteUnknown;
+    g_logJitterPeakUsec = -1;
+    g_relayPingEstimate = -1;
 }
