@@ -12,6 +12,13 @@ no registry, no process list.
 
 ## Turning it on and off
 
+The first time the online lobby's top screen is idle, Timestone asks once
+whether to show your activity on your Discord status. **NO** is highlighted,
+and backing out of the question counts as no. Either answer is saved and the
+question is not asked again; you can change it later in Settings. Turning the
+status on in a settings menu, or `ShowDiscordStatus=1` by hand, also counts as
+an answer.
+
 `Timestone.ini`, beside `umvc3.exe`:
 
 ```ini

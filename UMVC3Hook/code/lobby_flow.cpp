@@ -2,6 +2,7 @@
 #include "lobby_flow.h"
 #include "lobby_local.h"
 #include "lobby_music.h"
+#include "discord_presence.h"
 #include "discord_presence_format.h"
 
 #include "LaunchMenu.h"
@@ -2681,6 +2682,25 @@ void PumpUpdate()
     }
 }
 
+// Asks once whether to show the player's activity on Discord, until it is
+// answered (RichPresenceSetup=1). Nothing looks for Discord before a yes.
+void PumpDiscordSetup()
+{
+    static bool answered = false; // this session, even if the answer could not be saved
+    bool yes = false;
+    if (g_ui->TakeDiscordSetupAnswer(&yes)) {
+        answered = true;
+        if (!DiscordPresence_SetEnabled(yes))
+            g_ui->ShowNotice("Could not save the Discord setting.");
+        return;
+    }
+    if (answered || g_mainMenuReleaseAt || !DiscordPresence_NeedsSetup()) return;
+    // Not while an update check, download or install is running: its offer
+    // or progress would cover the question.
+    if (g_updateFlow != UpdateFlow::Idle && g_updateFlow != UpdateFlow::Offered) return;
+    g_ui->AskDiscordSetup();
+}
+
 void RunLobbyFrame(uint64_t titleArea)
 {
     g_service->Pump();
@@ -2698,6 +2718,7 @@ void RunLobbyFrame(uint64_t titleArea)
     if (g_mainMenuReleaseAt) input = Input{};
     g_ui->Update(input);
     PumpUpdate();
+    PumpDiscordSetup();
     if (g_ui->TakePrefsDirty()) SavePrefs(g_ui->Prefs());
     const uint32_t sfx = g_ui->TakeSfx();
     if (sfx & SFX_MATCH_FOUND) Native_FocusGameWindow();

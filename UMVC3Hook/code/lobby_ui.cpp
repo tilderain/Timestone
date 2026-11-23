@@ -116,6 +116,13 @@ const char* const kTopHelp[] = {
     "Leave the lobby and return to the game's main menu.",
 };
 constexpr int kTopCount = 4;
+const char kDiscordSetupQuestion[] =
+    "Show what you are doing in Timestone on your Discord status?\n"
+    "People who can see your Discord activity (friends, and servers you share it with) "
+    "would see your lobby, opponent, characters, score and match time, and could join "
+    "public lobbies.\n"
+    "Timestone only looks for the Discord app if you choose YES. Change it any time "
+    "in Settings (F3 offline, Esc in a match).";
 
 const char* const kSlotMenuItems[] = {"JOIN QUEUE & SPECTATE", "JOIN QUEUE", "SPECTATE ONLY"};
 constexpr int kSlotMenuCount = 3;
@@ -514,6 +521,24 @@ bool LobbyUi::TakeUpdateAccepted()
     return accepted;
 }
 
+bool LobbyUi::AskDiscordSetup()
+{
+    if (screen_ != Screen::Top || confirm_ != Confirm::None || notice_[0] || busy_[0] ||
+        updateActive_ || textTarget_ != TextTarget::None)
+        return false;
+    confirm_ = Confirm::DiscordSetup;
+    confirmCursor_ = 1; // default to "No"
+    return true;
+}
+
+bool LobbyUi::TakeDiscordSetupAnswer(bool* yes)
+{
+    if (!discordAnswered_) return false;
+    *yes = discordYes_;
+    discordAnswered_ = false;
+    return true;
+}
+
 void LobbyUi::SetUpdateProgress(const UpdateView* view)
 {
     updateActive_ = view != nullptr;
@@ -729,6 +754,10 @@ void LobbyUi::Update(const Input& input)
             Play(SFX_MOVE);
         }
         if (input.cancel || (input.confirm && confirmCursor_ == 1)) {
+            if (confirm_ == Confirm::DiscordSetup) {
+                discordAnswered_ = true;
+                discordYes_ = false;
+            }
             confirm_ = Confirm::None;
             Play(SFX_CANCEL);
         } else if (input.confirm) {
@@ -746,6 +775,9 @@ void LobbyUi::Update(const Input& input)
                 updateAccepted_ = true;
             } else if (action == Confirm::DeletePreset) {
                 DeletePreset(presetListCursor_);
+            } else if (action == Confirm::DiscordSetup) {
+                discordAnswered_ = true;
+                discordYes_ = true;
             }
         }
         return;
@@ -3926,6 +3958,8 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         message = "Leave the queue?";
     else if (confirm_ == Confirm::Update)
         message = updateOffer_;
+    else if (confirm_ == Confirm::DiscordSetup)
+        message = kDiscordSetupQuestion;
     char kick[160];
     if (!message && confirm_ == Confirm::DeletePreset) {
         snprintf(kick, sizeof(kick), "Delete %.*s?", kPresetNameCapacity,
