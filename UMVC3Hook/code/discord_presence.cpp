@@ -19,7 +19,17 @@ extern void HookLog(const char* fmt, ...);
 
 namespace {
 
-const char* const kClientId = "1544202390536982610";
+// Timestone's application in the Discord developer portal. Its name, and its
+// art asset keyed `timestone`, are what the profile shows. The id is the
+// handshake's client id, and discord-<id> is the URL protocol Discord runs for
+// a Join.
+#define TIMESTONE_DISCORD_APP_ID "1544202390536982610"
+
+const char* const kClientId = TIMESTONE_DISCORD_APP_ID;
+const wchar_t* const kProtocolKey = L"Software\\Classes\\discord-" TIMESTONE_DISCORD_APP_ID;
+const wchar_t* const kProtocolCommandKey =
+    L"Software\\Classes\\discord-" TIMESTONE_DISCORD_APP_ID L"\\shell\\open\\command";
+const wchar_t* const kProtocolDescription = L"URL:Run game " TIMESTONE_DISCORD_APP_ID L" protocol";
 const char* const kSection = "Discord";
 const char* const kShowKey = "ShowDiscordStatus";
 const char* const kSetupKey = "RichPresenceSetup";
@@ -107,25 +117,22 @@ void RegisterLaunchProtocol()
     swprintf(command, sizeof(command) / sizeof(command[0]), L"\"%ls\" steam://rungameid/357190",
              steamExe);
 
-    const wchar_t* key = L"Software\\Classes\\discord-1544202390536982610";
     wchar_t current[2200] = {};
     DWORD currentSize = sizeof(current);
-    if (RegGetValueW(HKEY_CURRENT_USER,
-                     L"Software\\Classes\\discord-1544202390536982610\\shell\\open\\command",
-                     nullptr, RRF_RT_REG_SZ, nullptr, current, &currentSize) == ERROR_SUCCESS &&
+    if (RegGetValueW(HKEY_CURRENT_USER, kProtocolCommandKey, nullptr, RRF_RT_REG_SZ, nullptr,
+                     current, &currentSize) == ERROR_SUCCESS &&
         wcscmp(current, command) == 0)
         return;
 
     HKEY root = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, key, 0, nullptr, 0, KEY_WRITE, nullptr, &root, nullptr) !=
-        ERROR_SUCCESS) {
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kProtocolKey, 0, nullptr, 0, KEY_WRITE, nullptr, &root,
+                        nullptr) != ERROR_SUCCESS) {
         HookLog("Discord: could not register the Join protocol\n");
         return;
     }
-    const wchar_t* description = L"URL:Run game 1544202390536982610 protocol";
-    bool ok = RegSetKeyValueW(root, nullptr, nullptr, REG_SZ, description,
-                              static_cast<DWORD>((wcslen(description) + 1) * sizeof(wchar_t))) ==
-                  ERROR_SUCCESS &&
+    bool ok = RegSetKeyValueW(root, nullptr, nullptr, REG_SZ, kProtocolDescription,
+                              static_cast<DWORD>((wcslen(kProtocolDescription) + 1) *
+                                                 sizeof(wchar_t))) == ERROR_SUCCESS &&
               RegSetKeyValueW(root, nullptr, L"URL Protocol", REG_SZ, L"", 0) == ERROR_SUCCESS;
 
     HKEY commandKey = nullptr;
@@ -146,8 +153,7 @@ void RegisterLaunchProtocol()
 // Turning the status off takes back the Join protocol the worker registered.
 void RemoveLaunchProtocol()
 {
-    const LONG result =
-        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\discord-1544202390536982610");
+    const LONG result = RegDeleteTreeW(HKEY_CURRENT_USER, kProtocolKey);
     if (result == ERROR_SUCCESS)
         HookLog("Discord: removed the Join protocol\n");
     else if (result != ERROR_FILE_NOT_FOUND)
