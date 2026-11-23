@@ -120,6 +120,14 @@ bool g_isHost = false;
 bool g_roomMode = false;
 int g_roomCreateSlots = 2;
 bool g_roomCreatePrivate = false;
+int g_roomCreateCapacity = 8;
+// Steam never lists a lobby whose member limit is reached, so a room's Steam
+// limit sits one above the size its host chose and the real size travels in
+// the lobby data. A full room stays in everyone's list; whoever enters past
+// the real size leaves again by itself.
+constexpr int kRoomListingHeadroom = 1;
+constexpr int kRoomMaxCapacity = 16; // lobby::kMaxMembers
+constexpr const char* kRoomCapacityKey = "capacity";
 uint64_t g_roomPeer = 0;
 bool g_roomPeerFailed = false;
 uint64_t g_localSteamId = 0;
@@ -874,6 +882,15 @@ bool RefreshResultMetadata(size_t index)
     return changed;
 }
 
+// The size a room's host chose, or 0 when the lobby does not publish one.
+int RoomCapacity(uint64_t lobbyId)
+{
+    if (!g_roomMode || !g_matchmaking || !lobbyId) return 0;
+    const char* value = g_api.GetLobbyData(g_matchmaking, lobbyId, kRoomCapacityKey);
+    const int capacity = value ? atoi(value) : 0;
+    return capacity >= 2 && capacity <= kRoomMaxCapacity ? capacity : 0;
+}
+
 bool HasResult(uint64_t lobbyId)
 {
     for (size_t i = 0; i < g_resultCount; ++i) {
@@ -1301,6 +1318,9 @@ void SteamLobby_Pump()
                     char slots[8];
                     snprintf(slots, sizeof(slots), "%d", g_roomCreateSlots);
                     g_api.SetLobbyData(g_matchmaking, g_lobbyId, "slots", slots);
+                    char capacity[8];
+                    snprintf(capacity, sizeof(capacity), "%d", g_roomCreateCapacity);
+                    g_api.SetLobbyData(g_matchmaking, g_lobbyId, kRoomCapacityKey, capacity);
                     g_api.SetLobbyData(g_matchmaking, g_lobbyId, "private",
                                        g_roomCreatePrivate ? "1" : "0");
                     // Fallback identity when ISteamUser is unavailable: the
@@ -1354,6 +1374,21 @@ void SteamLobby_Pump()
                     strcmp(protocol, kLobbyProtocol) != 0) {
                     SetVersionMismatch(protocol);
                     g_api.LeaveLobby(g_matchmaking, result.m_ulSteamIDLobby);
+                    SteamLobby_Search();
+                    return;
+                }
+                // Steam let us in on the listing headroom; the room itself is
+                // full, which reads to the player like Steam's own refusal.
+                const int capacity = RoomCapacity(result.m_ulSteamIDLobby);
+                const int members = g_api.GetNumLobbyMembers(g_matchmaking,
+                                                             result.m_ulSteamIDLobby);
+                if (capacity && members > capacity) {
+                    HookLog("SteamLobby: lobby %llu is full (%d members, room for %d)\n",
+                            static_cast<unsigned long long>(result.m_ulSteamIDLobby),
+                            members, capacity);
+                    g_lastJoinRefusal = 4;
+                    g_api.LeaveLobby(g_matchmaking, result.m_ulSteamIDLobby);
+                    SetStatus("Could not enter Steam lobby");
                     SteamLobby_Search();
                     return;
                 }
@@ -1740,7 +1775,9 @@ int SteamLobby_GetResultMemberCount(size_t index)
 int SteamLobby_GetResultMemberLimit(size_t index)
 {
     if (LocalLobby_Enabled()) return LocalLobby_GetResultMemberLimit();
-    if (index >= g_resultCount || !g_matchmaking || !g_api.GetLobbyMemberLimit) return 0;
+    if (index >= g_resultCount || !g_matchmaking) return 0;
+    if (const int capacity = RoomCapacity(g_results[index])) return capacity;
+    if (!g_api.GetLobbyMemberLimit) return 0;
     return g_api.GetLobbyMemberLimit(g_matchmaking, g_results[index]);
 }
 
@@ -1816,11 +1853,13 @@ void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const 
         return;
     }
     if (maxMembers < 2) maxMembers = 2;
-    if (maxMembers > 8) maxMembers = 8;
+    if (maxMembers > kRoomMaxCapacity) maxMembers = kRoomMaxCapacity;
     g_roomCreateSlots = slotCount < 1 ? 1 : slotCount;
     g_roomCreatePrivate = type == SteamLobbyType::Private;
     snprintf(g_lobbyName, sizeof(g_lobbyName), "%s", name ? name : "");
-    g_pendingHandle = g_api.CreateLobby(g_matchmaking, static_cast<int>(type), maxMembers);
+    g_roomCreateCapacity = maxMembers;
+    g_pendingHandle = g_api.CreateLobby(g_matchmaking, static_cast<int>(type),
+                                        maxMembers + kRoomListingHeadroom);
     g_pendingCall = PendingCall::Create;
     SetStatus("Creating lobby...");
 }
@@ -1865,7 +1904,9 @@ uint64_t SteamRoom_GetOwner()
 int SteamRoom_GetMemberLimit()
 {
     if (LocalLobby_Enabled()) return LocalLobby_GetMemberLimit();
-    if (!SteamRoom_IsActive() || !g_api.GetLobbyMemberLimit) return 0;
+    if (!SteamRoom_IsActive()) return 0;
+    if (const int capacity = RoomCapacity(g_lobbyId)) return capacity;
+    if (!g_api.GetLobbyMemberLimit) return 0;
     return g_api.GetLobbyMemberLimit(g_matchmaking, g_lobbyId);
 }
 

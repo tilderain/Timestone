@@ -593,7 +593,7 @@ UiPrefs LoadPrefs()
     if (!RosterStageName(prefs.stage)[0]) prefs.stage = lobby::kStageAny;
     GetPrivateProfileStringA("Lobby", "RoomName", "", prefs.create.name,
                              sizeof(prefs.create.name), path);
-    prefs.create.maxMembers = GetPrivateProfileIntA("Lobby", "RoomSize", kMaxMembers, path);
+    prefs.create.maxMembers = GetPrivateProfileIntA("Lobby", "RoomSize", kDefaultMembers, path);
     prefs.create.slotCount = GetPrivateProfileIntA("Lobby", "RoomSlots", 2, path);
     const int visibility = GetPrivateProfileIntA("Lobby", "RoomVisibility", 0, path);
     prefs.create.visibility = visibility == 1 ? Visibility::FriendsOnly
@@ -1490,7 +1490,7 @@ void PumpSpectate()
     if (g_service && g_service->Room().inRoom) {
         const RoomState& room = g_service->Room();
         view.localId = SteamRoom_GetLocalId();
-        for (int i = 0; i < room.memberCount && view.count < 8; ++i) {
+        for (int i = 0; i < room.memberCount && view.count < kSpectateRoomMembers; ++i) {
             const Member& member = room.members[i];
             SpectateRoomMember& out = view.members[view.count++];
             out.id = member.id;

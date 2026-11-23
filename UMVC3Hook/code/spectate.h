@@ -95,10 +95,11 @@ struct SpectateRoomMember {
     uint32_t watchSeq;
     uint64_t upstream;  // who feeds them
 };
+constexpr int kSpectateRoomMembers = 16; // the most a room holds
 struct SpectateRoom {
     uint64_t localId;
     int count;
-    SpectateRoomMember members[8];
+    SpectateRoomMember members[kSpectateRoomMembers];
 };
 // Once per frame on the game thread, in the lobby and in a battle. Opens and
 // closes the links the room calls for and moves the feed along them. Returns

@@ -371,7 +371,7 @@ LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs
     : service_(service), roster_(roster), prefs_(prefs)
 {
     if (prefs_.create.maxMembers < 2 || prefs_.create.maxMembers > kMaxMembers)
-        prefs_.create.maxMembers = kMaxMembers;
+        prefs_.create.maxMembers = kDefaultMembers;
     if (prefs_.create.slotCount < 1 || prefs_.create.slotCount > kMaxSlots)
         prefs_.create.slotCount = 2;
     if (static_cast<int>(prefs_.create.visibility) > 2)
@@ -2418,10 +2418,20 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
         }
 
         // One head per seat: host first, then members, then empty seats.
-        for (int seat = 0; seat < result.maxMembers && seat < kMaxMembers; ++seat) {
+        // A bigger lobby looks like an eight-seat one until a ninth player
+        // is in it. From then its seats go in two rows of smaller heads,
+        // closer together so the wider count beside them has room.
+        const bool twoRows = result.members > kDefaultMembers;
+        const float headScale = twoRows ? 0.7f : 1.0f;
+        // A two-digit limit makes the count wider, single row or not.
+        const float headPitch = twoRows ? 16.5f : result.maxMembers > 9 ? 17.0f : 19.0f;
+        int seats = result.maxMembers < kMaxMembers ? result.maxMembers : kMaxMembers;
+        if (!twoRows && seats > kDefaultMembers) seats = kDefaultMembers;
+        for (int seat = 0; seat < seats; ++seat) {
             const int cell = seat == 0 ? 0 : seat < result.members ? 1 : 2;
-            r.Sprite(TEX_MEMBER_ICONS, 812.0f + seat * 19.0f, y, 20.0f, 40.0f,
-                     Uv{cell * 0.125f, 0.0f, (cell + 1) * 0.125f, 1.0f}, A_ML);
+            const float headY = twoRows ? y + (seat < 8 ? -14.0f : 14.0f) : y;
+            r.Sprite(TEX_MEMBER_ICONS, 812.0f + (seat % 8) * headPitch, headY, 20.0f * headScale,
+                     40.0f * headScale, Uv{cell * 0.125f, 0.0f, (cell + 1) * 0.125f, 1.0f}, A_ML);
         }
         char players[16];
         snprintf(players, sizeof(players), "%d/%d", result.members, result.maxMembers);
@@ -2568,46 +2578,64 @@ void LobbyUi::DrawRoomMembers(Canvas& canvas) const
     const RoomState& room = service_.Room();
 
     const float x = 40.0f, top = 110.0f, width = 430.0f;
-    for (int i = 0; i < room.settings.maxMembers && i < kMaxMembers; ++i) {
-        const float y = top + i * 50.0f;
+    // The list keeps its height. Up to eight players it is the native
+    // lobby's eight rows, with the open seats shown; past that every player
+    // still gets a row, each a little shorter, down to half height at sixteen.
+    int rows = room.memberCount > kDefaultMembers ? room.memberCount : kDefaultMembers;
+    if (rows > room.settings.maxMembers) rows = room.settings.maxMembers;
+    if (rows > kMaxMembers) rows = kMaxMembers;
+    const float pitch = rows > kDefaultMembers ? 400.0f / rows : 50.0f;
+    // 1 at full height, 0 at half: what the contents of a row shrink by.
+    const float room01 = (pitch - 25.0f) / 25.0f;
+    const float plateH = pitch - (3.0f + 3.0f * room01);
+    const float art = 0.62f + 0.38f * room01;
+    const float nameScale = 0.6f + 0.18f * room01;
+    const float noteScale = 0.48f + 0.08f * room01;
+    for (int i = 0; i < rows; ++i) {
+        const float y = top + i * pitch;
         const bool occupied = i < room.memberCount;
         // Native member rows are tan plates; slate keeps white names legible.
-        p.Box(TEX_ROW, x, y, width, 44.0f,
+        p.Box(TEX_ROW, x, y, width, plateH,
               occupied ? Color{0.22f, 0.24f, 0.3f, 0.94f} : Color{0.16f, 0.17f, 0.2f, 0.45f});
         if (!occupied) continue;
 
         const Member& member = room.members[i];
-        const float cy = y + 22.0f;
+        const float cy = y + plateH * 0.5f;
         if (memberFocus_ && i == memberCursor_) {
             const float pulse = SelectionPulse(frame_);
-            p.Box(TEX_ROW_SEL, x - 4.0f, y - 3.0f, width + 8.0f, 50.0f, WithAlpha(kWhite, pulse));
+            p.Box(TEX_ROW_SEL, x - 4.0f, y - 3.0f, width + 8.0f, plateH + 6.0f,
+                  WithAlpha(kWhite, pulse));
         }
         // Small HOST / GUEST tag: rows 6 and 7 of the tag sheet.
-        p.Sprite(TEX_TAGS, x + 12.0f, cy, 46.0f, 24.0f,
+        p.Sprite(TEX_TAGS, x + 12.0f, cy, 46.0f * art, 24.0f * art,
                  Uv{11.0f / 64.0f, (member.isHost ? 196.0f : 228.0f) / 256.0f, 53.0f / 64.0f,
                     (member.isHost ? 220.0f : 252.0f) / 256.0f},
                  A_ML);
-        p.Sprite(IconTex(member.id, member.icon), x + 64.0f, cy, 34.0f, 34.0f, kFullUv, A_ML);
-        p.TextFit(member.name, x + 106.0f, cy, 0.78f, 172.0f, A_ML, member.isLocal ? kCyan : kText);
+        p.Sprite(IconTex(member.id, member.icon), x + 64.0f, cy, 34.0f * art, 34.0f * art, kFullUv,
+                 A_ML);
+        p.TextFit(member.name, x + 106.0f, cy, nameScale, 172.0f, A_ML,
+                  member.isLocal ? kCyan : kText);
 
         // Status: BATTLE (row 0) while fighting, WATCH (row 2) while spectating.
         if (member.status == MemberStatus::Fighting || member.status == MemberStatus::Watching) {
             const int tagRow = member.status == MemberStatus::Fighting ? 0 : 2;
-            p.Sprite(TEX_TAGS, x + 288.0f, cy, 54.0f, 22.0f,
+            p.Sprite(TEX_TAGS, x + 288.0f, cy, 54.0f * art, 22.0f * art,
                      Uv{1.0f / 64.0f, (tagRow * 32 + 4) / 256.0f, 63.0f / 64.0f,
                         (tagRow * 32 + 28) / 256.0f},
                      A_ML);
         } else if (member.status == MemberStatus::Ready) {
-            p.Text("READY", x + 288.0f, cy, 0.56f, A_ML, kYellow);
+            p.Text("READY", x + 288.0f, cy, noteScale, A_ML, kYellow);
         } else if (member.status == MemberStatus::Seated) {
-            p.Text("SEATED", x + 288.0f, cy, 0.56f, A_ML, kDim);
+            p.Text("SEATED", x + 288.0f, cy, noteScale, A_ML, kDim);
         } else if (member.queueSlot >= 0) {
             // Waiting: which match, and how far from the front.
             char wait[16];
             snprintf(wait, sizeof(wait), "S%d #%d", member.queueSlot + 1, member.queuePos);
-            p.Text(wait, x + 288.0f, cy, 0.56f, A_ML, member.queuePos == 1 ? kCyan : kDim);
+            p.Text(wait, x + 288.0f, cy, noteScale, A_ML, member.queuePos == 1 ? kCyan : kDim);
         }
-        if (!member.isLocal) DrawPingWithNumber(p, x + 355.0f, cy, member.pingMs, 0.66f, 24.0f, 25.0f, 0.5f);
+        if (!member.isLocal)
+            DrawPingWithNumber(p, x + 355.0f, cy, member.pingMs, 0.66f * (0.76f + 0.24f * room01),
+                               24.0f, 25.0f, 0.44f + 0.06f * room01);
     }
 }
 

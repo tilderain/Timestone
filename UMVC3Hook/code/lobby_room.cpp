@@ -705,8 +705,9 @@ void SteamRoomService::RefreshResults()
         if (!result.name[0]) snprintf(result.name, sizeof(result.name), "%.48s's Lobby", result.host);
         result.members = SteamLobby_GetResultMemberCount(i);
         result.maxMembers = SteamLobby_GetResultMemberLimit(i);
-        if (result.maxMembers < result.members) result.maxMembers = result.members;
         if (result.maxMembers <= 0) result.maxMembers = kMaxMembers;
+        // Someone entering a full room is counted until they leave again.
+        if (result.members > result.maxMembers) result.members = result.maxMembers;
         result.slotCount = SteamLobby_GetResultSlotCount(i);
         const int estimate = SteamLobby_GetResultEstimatedPing(i);
         result.pingMs = estimate >= 0 ? estimate : -1;

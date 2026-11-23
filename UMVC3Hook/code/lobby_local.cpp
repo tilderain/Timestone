@@ -19,8 +19,8 @@ extern void HookLog(const char* fmt, ...);
 
 namespace {
 
-constexpr uint32_t kMagic = 0x544C4C33; // layout version; bump on any change
-constexpr int kMaxMembers = 8;
+constexpr uint32_t kMagic = 0x544C4C34; // layout version; bump on any change
+constexpr int kMaxMembers = 16;
 constexpr int kMaxRoomKeys = 16;
 constexpr int kMaxMemberKeys = 4;
 constexpr int kKeySize = 16;

@@ -10,7 +10,10 @@
 
 namespace lobby {
 
-constexpr int kMaxMembers = 8;       // matches the native lobby's eight rows
+constexpr int kMaxMembers = 16;
+// What a new lobby is created with: the native lobby's eight rows. The player
+// list packs its rows closer once a room holds more than this.
+constexpr int kDefaultMembers = 8;
 constexpr int kMaxSlots = 4;         // match slots ("cabinets") per room
 constexpr int kMaxSearchResults = 48;
 constexpr int kMaxChatLines = 5000; // history kept for the expanded chat

@@ -498,8 +498,10 @@ int main(int argc, char** argv)
         service.results = {
             MakeResult(11, "Friday Night Marvel", "Vevota", 6, 8, 34, true, true),
             MakeResult(12, "Beginners welcome", "ArcherOfLegend", 2, 4, 72),
-            MakeResult(13, "long sets only", "Jasongamedev", 1, 2, 118),
+            MakeResult(13, "Room to grow", "Jasongamedev", 5, 16, 118),
             MakeResult(14, "EU evening casuals", "a_really_long_steam_persona_name", 3, 8, 164),
+            MakeResult(19, "Sixteen seats", "Brian_NY", 11, 16, 55),
+            MakeResult(20, "Full house", "rain", 16, 16, 61),
             MakeResult(15, "old build lobby", "John2143", 2, 8, 40, false),
             MakeResult(16, "West coast", "Sheep", 8, 8, 210),
             MakeResult(17, "Tournament practice", "Ryn", 4, 6, -1),
@@ -549,6 +551,28 @@ int main(int argc, char** argv)
         ui.Update(Press(&Input::confirm));
         Settle(ui, 2);
         ok &= Capture(ui, directory, "create_music");
+    }
+    for (int players : {9, 12, 16}) {   // A sixteen-seat room filling past eight rows.
+        FakeService service;
+        LobbyUi ui(service, kRoster, DefaultPrefs());
+        Settle(ui);
+        Populate(service, 4);
+        service.room.settings.maxMembers = 16;
+        const char* const extra[] = {"Brian_NY", "rain", "catboy_fucker", "TwiGinTec", "MystiThyghs",
+                                     "KeepingItOscar", "Sheep", "Ryn", "anotak", "Moka"};
+        for (int i = 0; service.room.memberCount < players; ++i)
+            service.AddMember(20 + i, extra[i], false, false);
+        service.room.members[7].status = MemberStatus::Ready;
+        service.room.members[8].queueSlot = 0;
+        service.room.members[8].queuePos = 1;
+        service.Recompute();
+        Settle(ui, 100);
+        ui.Update(Press(&Input::left)); // into the player list
+        ui.Update(Press(&Input::down));
+        Settle(ui, 2);
+        char name[32];
+        snprintf(name, sizeof(name), "room_%dplayers", players);
+        ok &= Capture(ui, directory, name);
     }
     for (int slots : {1, 2, 4}) {   // Room with 1, 2 and 4 match slots.
         FakeService service;
