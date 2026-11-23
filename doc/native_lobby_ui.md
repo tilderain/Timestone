@@ -120,11 +120,78 @@ map and matches the property names found in `.sdl` files.
   cell itself.
 - `uUiAnmSpriteFont__fontType__setter` `0x1402CE4E0` swaps font texture and
   metrics. Glyph cell is 32 px for `nrodinpro` and 64 px for `bada_b`.
-- Font metrics (`.fsd`, type `0x1DB58B09`) are a table of advance widths; glyph
-  index for U+0020..U+007E is `codepoint - 0x20`. Message tables (`MSD`) store
-  strings as those glyph indices. `msg_sys_menu_en` already contains lobby and
+- Font metrics (`.fsd`, type `0x1DB58B09`) are a 28-byte header and one
+  `uint32` advance width per glyph (4096 for `nrodinpro`, 256 for `bada_b`).
+  Message tables (`MSD`) store strings as glyph indices.
+- UTF-8 becomes glyph indices in `uUiAnmSpriteFont__encodeTextGlyphIndices`
+  `0x1402CB320` (vtable `+0x1D0`, called by `setText`), one character at a time
+  through `sGameConfig__mapUtf8GlyphToFontIndex`: ASCII is `codepoint - 0x20`;
+  anything else is searched for in a string at `sGameConfig + 0x4D39E` that
+  lists the glyphs in atlas order, and is `0x60 +` its position there. A
+  character that is not in the string becomes `0x1F`, a question mark. The
+  string is UTF-16 in the executable (3521 characters starting
+  `U+00A0 ¡ ¢ £ ™`): Latin-1, the JIS symbol rows, full-width alphanumerics,
+  hiragana, katakana and the JIS level 1 kanji with a few more at the end. No
+  Cyrillic, Greek, Hangul or half-width katakana.
+- The same indices are used for every font. `bada_b` has 256 cells, so only
+  the Latin-1 part reaches it, and five of those cells hold a different
+  character than the string says (`0x64` ¤, `0x65` backslash, `0x77` œ,
+  `0x78` Œ, `0x7E` ¿). `FontHasGlyph(codepoint, FONT_HEADING)` leaves those
+  out; a name with a character the heading font lacks is drawn in the body
+  font.
+- `tools/gen_lobby_font_tables.py` writes the glyph order and both width
+  tables to `lobby_font_tables.inc`, which `lobby_canvas.cpp` uses for
+  `FontHasGlyph`, `TextWidth` and `FitText`. `msg_sys_menu_en` already contains lobby and
   spectator strings (ids 20 "SEARCH LOBBY", 21 "CREATE LOBBY", 1559
   "SPECTATING", 2033 "The battle will begin when both players are ready.").
+
+### Text entry
+
+- A text field (room name, preset name, chat) takes only characters the body
+  font has; the rest are refused with the cancel sound instead of being kept
+  as question marks. Limits are in characters (`kRoomNameChars`,
+  `kPresetNameChars`) with the byte size of the buffer as a second bound.
+- Names are written to `Timestone.ini` with every byte above ASCII, and `%`,
+  as `%XX`. The ini goes through the system code page, which raw UTF-8 does
+  not survive on a double-byte one.
+- The game pumps messages with `PeekMessageA` / `TranslateMessage` /
+  `DispatchMessageA` (`sApp__execute`), so `WM_CHAR` reaches the plugin's
+  window procedure in the system code page, double-byte characters as two
+  messages. `lobby_ime.cpp` decodes that, and `lobby_native.cpp` still makes
+  characters from key edges (`ToUnicode`) in a frame where none arrived.
+  Ctrl+Alt is AltGr there and types.
+- Input methods: the game calls `ImmDisableIME(0)` at `0x1402559CD` on its
+  window thread, which cannot be undone. `Ime_InstallHook` hooks the API so
+  the call does nothing, and the window procedure detaches the window's
+  input context (`ImmAssociateContextEx(window, NULL, 0)`) whenever no text
+  field is open, attaching it again (`IACE_DEFAULT`) when one is. While
+  attached, `WM_IME_STARTCOMPOSITION` / `WM_IME_COMPOSITION` /
+  `WM_IME_ENDCOMPOSITION` are not passed on: the result string is read as
+  UTF-16 with `ImmGetCompositionStringW` and queued like typed characters,
+  and the composition string goes to `Input::composing`, which the field
+  draws underlined after its text. The candidate list is the system's own
+  window; it cannot show over exclusive fullscreen. Its place is given with
+  `ImmSetCompositionWindow`, `ImmSetCandidateWindow` and a hidden system
+  caret over the text line, since input methods differ in which they follow.
+- Under Wine (read from Proton's `winex11.drv/xim.c`, branches 9.0 and 10.0):
+  - The place reaches the Linux input method only through
+    `X11DRV_SetIMECompositionRect`, which exists from Wine 10 and does
+    nothing unless the driver's input style is "over the spot"
+    (`InputStyle=overthespot` under
+    `HKCU\Software\Wine\AppDefaults\<exe>\X11 Driver`). In that style the
+    input method draws the unfinished text itself and the lobby only
+    receives results, so the plugin leaves the default style: the unfinished
+    text shows in the field and the list sits at the window's bottom left
+    corner. (An unreleased build set the value; `RestoreWineInputStyle`
+    removes it once.)
+  - Nothing a Windows program can call takes the X input context's focus
+    away, so with IBus the Linux input method keeps taking keys outside text
+    fields. `ImmSetOpenStatus(FALSE)` (sent when the last field closes)
+    becomes `XNPreeditState` disabled plus `XmbResetIC`, which clears a
+    stuck composition; IBus's XIM server ignores the state itself.
+- While a composition is in progress, and until Enter, Esc, Backspace, Space
+  and the arrows are released after it, the keyboard is not read as menu
+  input: those keys belong to the input method.
 
 ### Schedulers and resources (verified)
 

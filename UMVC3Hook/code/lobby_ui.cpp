@@ -267,6 +267,30 @@ private:
     float dx_;
 };
 
+// Names someone typed (a lobby, a preset, a player) are drawn in the heading
+// font only when it has every character: it is a Latin display face, accented
+// letters included, with no Japanese. Otherwise the body font, at
+// kBodyForHeading times the heading scale to come out the same height.
+constexpr float kBodyForHeading = 2.25f;
+Font HeadingFontFor(const char* text)
+{
+    return FontHasText(text, FONT_HEADING) ? FONT_HEADING : FONT_BODY;
+}
+float HeadingScaleFor(Font font, float headingScale)
+{
+    return font == FONT_HEADING ? headingScale : headingScale * kBodyForHeading;
+}
+
+// Underlines the part of a typed line an input method is still composing.
+// `left` is where the whole line (the text, then the composition) starts.
+void DrawComposing(const Painter& p, const char* text, const char* composing, float left,
+                   float y, float scale)
+{
+    if (!composing[0]) return;
+    p.Fill(left + TextWidth(text) * scale, y + 14.0f * scale, TextWidth(composing) * scale, 2.0f,
+           kYellow);
+}
+
 // A button glyph of `size` px, its right edge at `right`, centred on `y`.
 void DrawGlyph(const Painter& p, Button button, bool keyboard, float right, float y, float size)
 {
@@ -1518,17 +1542,22 @@ void LobbyUi::UpdateQuickChat(const Input& input)
 void LobbyUi::BeginText(TextTarget target, const char* initial)
 {
     textTarget_ = target;
-    textCapacity_ = target == TextTarget::RoomName ? 40
+    textCapacity_ = target == TextTarget::RoomName ? kNameCapacity - 1
                   : target == TextTarget::PresetName ? kPresetNameCapacity - 1
                   : kChatCapacity - 1;
+    textMaxChars_ = target == TextTarget::RoomName ? kRoomNameChars
+                  : target == TextTarget::PresetName ? kPresetNameChars
+                  : kChatCapacity - 1;
     snprintf(text_, sizeof(text_), "%s", initial ? initial : "");
-    if (strlen(text_) > textCapacity_) text_[0] = '\0';
+    if (strlen(text_) > textCapacity_ || Utf8Count(text_) > textMaxChars_) text_[0] = '\0';
+    composing_[0] = '\0';
 }
 
 void LobbyUi::EndText(bool accept)
 {
     const TextTarget target = textTarget_;
     textTarget_ = TextTarget::None;
+    composing_[0] = '\0';
     if (!accept) return;
     if (target == TextTarget::RoomName) {
         if (text_[0]) {
@@ -1551,18 +1580,24 @@ void LobbyUi::UpdateText(const Input& input)
 {
     if (input.backspace) PopUtf8(text_);
     if (input.typed) {
+        bool refused = false;
         for (const char* cursor = input.typed; *cursor;) {
-            const unsigned char lead = static_cast<unsigned char>(*cursor);
-            size_t length = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : 4;
-            if (strlen(cursor) < length) break;
+            uint32_t codepoint;
+            const size_t length = DecodeUtf8(cursor, &codepoint);
             const size_t used = strlen(text_);
-            if (lead >= 0x20 && used + length <= textCapacity_ && used + length < sizeof(text_)) {
+            // Only what the menu font has: the game draws '?' for the rest.
+            if (!FontHasGlyph(codepoint)) {
+                refused = true;
+            } else if (Utf8Count(text_) < textMaxChars_ && used + length <= textCapacity_ &&
+                       used + length < sizeof(text_)) {
                 memcpy(text_ + used, cursor, length);
                 text_[used + length] = '\0';
             }
             cursor += length;
         }
+        if (refused) Play(SFX_CANCEL);
     }
+    snprintf(composing_, sizeof(composing_), "%s", input.composing ? input.composing : "");
     if (input.confirm) {
         Play(SFX_CONFIRM);
         EndText(true);
@@ -2533,11 +2568,17 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         if (row == CREATE_NAME && textTarget_ == TextTarget::RoomName) {
             // The caret blinks just past the name, outside its centring, so
             // the name itself holds still.
-            char fitted[sizeof(value)];
-            FitText(fitted, sizeof(fitted), value, 440.0f, 0.86f);
+            char entry[sizeof(text_) + sizeof(composing_)], fitted[sizeof(entry)];
+            snprintf(entry, sizeof(entry), "%s%s", text_, composing_);
+            FitText(fitted, sizeof(fitted), entry, 440.0f, 0.86f);
             p.Text(fitted, valueX, y, 0.86f, A_MC, kCyan);
+            const float half = TextWidth(fitted) * 0.86f * 0.5f;
+            if (!strcmp(fitted, entry))
+                DrawComposing(p, text_, composing_, valueX - half, y, 0.86f);
+            caretX_ = valueX + half;
+            caretY_ = y;
             if ((frame_ / 20) % 2)
-                p.Text("_", valueX + TextWidth(fitted) * 0.86f * 0.5f + 2.0f, y, 0.86f, A_ML, kCyan);
+                p.Text("_", valueX + half + 2.0f, y, 0.86f, A_ML, kCyan);
             continue;
         }
         // A track name is never cut: the row has no arrows, so it gets the
@@ -2908,8 +2949,9 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
     if (count == 0 && !typing)
         p.Text("Say hello to the lobby.", x + 22.0f, y + 22.0f, 0.56f, A_ML, kFaint);
     if (typing) {
-        char entry[kChatCapacity + 8];
-        snprintf(entry, sizeof(entry), "> %s%s", text_, (frame_ / 20) % 2 ? "_" : " ");
+        char entry[sizeof(text_) + sizeof(composing_) + 8];
+        snprintf(entry, sizeof(entry), "> %s%s%s", text_, composing_,
+                 (frame_ / 20) % 2 ? "_" : " ");
         // Keep the caret visible by showing the tail of long messages.
         const char* shown = entry;
         while (TextWidth(shown) * 0.6f > w - 44.0f && shown[1]) {
@@ -2917,6 +2959,12 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
             while ((static_cast<unsigned char>(*shown) & 0xC0) == 0x80) ++shown;
         }
         p.Text(shown, x + 22.0f, y + h - 22.0f, 0.6f, A_ML, kText);
+        if (shown == entry)
+            DrawComposing(p, text_, composing_, x + 22.0f + TextWidth("> ") * 0.6f,
+                          y + h - 22.0f, 0.6f);
+        // The entry ends in the caret or the space that stands in for it.
+        caretX_ = x + 22.0f + (TextWidth(shown) - TextWidth("_")) * 0.6f;
+        caretY_ = y + h - 22.0f;
     }
 
     // Cursor on the chat: its shortcuts pop up on the panel's top edge.
@@ -2952,7 +3000,9 @@ void LobbyUi::DrawListMenu(Canvas& canvas, const char* title, const char* const*
     const float x = (kScreenW - w) * 0.5f;
     const float y = (kScreenH - h) * 0.5f - 10.0f;
     p.Box(TEX_PANEL_DARK, x, y, w, h);
-    p.TextFit(title, x + w * 0.5f, y + 40.0f, 0.38f, w - 60.0f, A_MC, kYellow, FONT_HEADING);
+    const Font titleFont = HeadingFontFor(title);
+    p.TextFit(title, x + w * 0.5f, y + 40.0f, HeadingScaleFor(titleFont, 0.38f), w - 60.0f, A_MC,
+              kYellow, titleFont);
     for (int i = 0; i < count; ++i) {
         const float rowY = y + 88.0f + i * 44.0f;
         if (i == cursor) {
@@ -2972,8 +3022,9 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     // Title bar: room name on the left, population on the right.
     p.Sprite(TEX_TITLE_BAR, 40.0f, 62.0f, 1200.0f, 52.0f,
              Uv{4.0f / 1024.0f, 8.0f / 64.0f, 1020.0f / 1024.0f, 56.0f / 64.0f}, A_ML);
-    const float kNameScale = 0.44f, kNameMax = 460.0f;
-    p.TextFit(room.settings.name, 64.0f, 60.0f, kNameScale, kNameMax, A_ML, kText, FONT_HEADING);
+    const Font nameFont = HeadingFontFor(room.settings.name);
+    const float kNameScale = HeadingScaleFor(nameFont, 0.44f), kNameMax = 460.0f;
+    p.TextFit(room.settings.name, 64.0f, 60.0f, kNameScale, kNameMax, A_ML, kText, nameFont);
     // What the host has playing, so a change is not a mystery to the room.
     const int track = FindMusicTrack(room.music);
     char music[96];
@@ -2984,7 +3035,7 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
                  RotationName(room.settings.rotation), kMusicTracks[track < 0 ? 0 : track].name);
     // Shrunk to fit, never cut. It takes whatever the lobby name leaves free,
     // so the long soundtrack titles stay full size beside a short name.
-    float nameWidth = TextWidth(room.settings.name, FONT_HEADING) * kNameScale;
+    float nameWidth = TextWidth(room.settings.name, nameFont) * kNameScale;
     if (nameWidth > kNameMax) nameWidth = kNameMax;
     p.TextShrink(music, 1060.0f, 61.0f, 0.62f, 1060.0f - 64.0f - nameWidth - 28.0f, A_MR, kDim);
     p.Sprite(TEX_FRIENDS, 1098.0f, 62.0f, 40.0f, 40.0f, kFullUv, A_MC);
@@ -3087,14 +3138,6 @@ void LobbyUi::DrawMusicMenu(Canvas& canvas) const
 constexpr float kBannerGap = 0.0f; // the cards touch: each has its own black edge
 float TeamBannerHeight(float w) { return (w - 2.0f * kBannerGap) / 3.0f * kBannerAspect; }
 
-// Names the player typed are drawn in the heading font only when it has
-// every character: it is a Latin display face.
-Font HeadingFontFor(const char* text)
-{
-    for (const char* c = text; *c; ++c)
-        if (static_cast<unsigned char>(*c) >= 0x7F) return FONT_BODY;
-    return FONT_HEADING;
-}
 
 void LobbyUi::DrawTeamBanners(Canvas& canvas, float x, float y, float w) const
 {
@@ -3145,8 +3188,10 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
     p.Sprite(TEX_YELLOW_BAR, x + 30.0f, y + 26.0f, w - 60.0f, 3.0f, Uv{0.1f, 0.2f, 0.9f, 0.8f}, A_TL);
 
     char line[160];
-    snprintf(line, sizeof(line), "VS  %.48s", other->name);
-    p.TextFit(line, cx, y + 62.0f, 0.44f, w - 400.0f, A_MC, kYellow, FONT_HEADING);
+    snprintf(line, sizeof(line), "VS  %s", other->name);
+    const Font lineFont = HeadingFontFor(line);
+    p.TextFit(line, cx, y + 62.0f, HeadingScaleFor(lineFont, 0.44f), w - 400.0f, A_MC, kYellow,
+              lineFont);
     // Connection to this opponent, on every step.
     DrawPing(p, x + 44.0f, y + 62.0f, other->pingMs, 0.8f);
     if (other->pingMs >= 0) {
@@ -3206,7 +3251,7 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
         SlotName(prefs_.slot, name, sizeof(name));
         const float valueX = cx + 70.0f, arrowSpan = rowW * 0.5f - 90.0f;
         const Font nameFont = HeadingFontFor(name);
-        p.TextFit(name, valueX, rowY, nameFont == FONT_HEADING ? 0.4f : 0.9f,
+        p.TextFit(name, valueX, rowY, HeadingScaleFor(nameFont, 0.4f),
                   2.0f * (arrowSpan - 28.0f), A_MC, start ? kYellow : kDim, nameFont);
         if (start && NextUsedSlot(prefs_.slot, 1) != prefs_.slot)
             DrawValueArrows(p, frame_, valueX, rowY, arrowSpan);
@@ -3428,9 +3473,13 @@ void LobbyUi::DrawPresetList(Canvas& canvas) const
         const float nameX = x + 56.0f, nameW = 500.0f;
         if (selected && textTarget_ == TextTarget::PresetName) {
             // The caret blinks just past the name being typed.
-            char fitted[sizeof(text_)];
-            FitText(fitted, sizeof(fitted), text_, nameW, 0.74f);
+            char entry[sizeof(text_) + sizeof(composing_)], fitted[sizeof(entry)];
+            snprintf(entry, sizeof(entry), "%s%s", text_, composing_);
+            FitText(fitted, sizeof(fitted), entry, nameW, 0.74f);
             p.Text(fitted, nameX, rowY, 0.74f, A_ML, kCyan);
+            if (!strcmp(fitted, entry)) DrawComposing(p, text_, composing_, nameX, rowY, 0.74f);
+            caretX_ = nameX + TextWidth(fitted) * 0.74f;
+            caretY_ = rowY;
             if ((frame_ / 20) % 2)
                 p.Text("_", nameX + TextWidth(fitted) * 0.74f + 2.0f, rowY, 0.74f, A_ML, kCyan);
         }

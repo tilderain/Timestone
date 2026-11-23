@@ -56,6 +56,8 @@ public:
 
     // True while keyboard characters should be routed to Input::typed.
     bool TextEntryActive() const { return textTarget_ != TextTarget::None; }
+    // The end of the text being typed, in UI space (valid while it is drawn).
+    void TextCaret(float* x, float* y) const { *x = caretX_; *y = caretY_; }
 
     // Track (lobby_music.h id) to audition while the create screen's music
     // list is open, or -1: the one under the cursor.
@@ -256,7 +258,12 @@ private:
 
     TextTarget textTarget_ = TextTarget::None;
     char text_[kChatCapacity] = {};
-    size_t textCapacity_ = 0;
+    size_t textCapacity_ = 0; // bytes
+    size_t textMaxChars_ = 0; // characters
+    char composing_[kChatCapacity] = {}; // the input method's unfinished text
+    // Where the text being typed ends on screen (UI space), for the input
+    // method's candidate list. Set as the field is drawn.
+    mutable float caretX_ = 0.0f, caretY_ = 0.0f;
 };
 
 } // namespace lobby

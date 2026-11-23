@@ -10,6 +10,7 @@
 #include "controller.h"
 #include "framestepper.h"
 #include "launchmenu_utils.h"
+#include "lobby_ime.h"
 #include "lobby_native.h"
 #include "lobby_room.h"
 #include "lobby_ui.h"
@@ -502,6 +503,55 @@ void RemoveDuplicateCharacters(Team& team)
     }
 }
 
+// Names are kept in Timestone.ini as plain ASCII whatever was typed. The ini
+// is read and written through the system code page, which UTF-8 does not
+// survive on a double-byte one (a Japanese system), so every byte above ASCII,
+// and '%' itself, is stored as %XX.
+std::string EscapeIniText(const char* utf8)
+{
+    std::string out;
+    for (const char* c = utf8; *c; ++c) {
+        const unsigned char byte = static_cast<unsigned char>(*c);
+        if (byte >= 0x80 || byte == '%') {
+            char escaped[4];
+            snprintf(escaped, sizeof(escaped), "%%%02X", byte);
+            out += escaped;
+        } else {
+            out += *c;
+        }
+    }
+    return out;
+}
+
+void ReadIniText(const char* section, const char* key, char* out, size_t size, const char* path)
+{
+    char raw[3 * kChatCapacity] = {};
+    GetPrivateProfileStringA(section, key, "", raw, sizeof(raw), path);
+    const auto hex = [](char c) {
+        return c >= '0' && c <= '9' ? c - '0' : c >= 'A' && c <= 'F' ? c - 'A' + 10
+             : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+    };
+    std::string text;
+    for (const char* c = raw; *c; ++c) {
+        if (*c == '%' && hex(c[1]) >= 0 && hex(c[2]) >= 0) {
+            text += static_cast<char>(hex(c[1]) * 16 + hex(c[2]));
+            c += 2;
+        } else {
+            text += *c;
+        }
+    }
+    // Whole characters only, as many as fit.
+    size_t length = 0;
+    while (length < text.size()) {
+        uint32_t codepoint;
+        const size_t step = DecodeUtf8(text.c_str() + length, &codepoint);
+        if (length + step >= size) break;
+        length += step;
+    }
+    memcpy(out, text.data(), length);
+    out[length] = '\0';
+}
+
 UiPrefs LoadPrefs()
 {
     char path[MAX_PATH] = {};
@@ -557,7 +607,7 @@ UiPrefs LoadPrefs()
         RemoveDuplicateCharacters(preset.team);
         preset.used = true;
         snprintf(key, sizeof(key), "Name%d", i + 1);
-        GetPrivateProfileStringA("LobbyPresets", key, "", preset.name, sizeof(preset.name), path);
+        ReadIniText("LobbyPresets", key, preset.name, sizeof(preset.name), path);
         if (!preset.name[0]) snprintf(preset.name, sizeof(preset.name), "PRESET %d", i + 1);
     }
     // The team in use: one of those, or a reserve unit (kTeamPresets + 0..2).
@@ -591,8 +641,7 @@ UiPrefs LoadPrefs()
     constexpr int kDefaultStage = 105;
     prefs.stage = GetPrivateProfileIntA("Lobby", "Stage", kDefaultStage, path);
     if (!RosterStageName(prefs.stage)[0]) prefs.stage = lobby::kStageAny;
-    GetPrivateProfileStringA("Lobby", "RoomName", "", prefs.create.name,
-                             sizeof(prefs.create.name), path);
+    ReadIniText("Lobby", "RoomName", prefs.create.name, sizeof(prefs.create.name), path);
     prefs.create.maxMembers = GetPrivateProfileIntA("Lobby", "RoomSize", kDefaultMembers, path);
     prefs.create.slotCount = GetPrivateProfileIntA("Lobby", "RoomSlots", 2, path);
     const int visibility = GetPrivateProfileIntA("Lobby", "RoomVisibility", 0, path);
@@ -625,7 +674,7 @@ void SavePrefs(const UiPrefs& prefs)
         {"Lobby", "TeamSlot", std::to_string(prefs.slot)},
         {"Lobby", "Icon", std::to_string(prefs.icon)},
         {"Lobby", "Stage", std::to_string(prefs.stage)},
-        {"Lobby", "RoomName", prefs.create.name},
+        {"Lobby", "RoomName", EscapeIniText(prefs.create.name)},
         {"Lobby", "RoomSize", std::to_string(prefs.create.maxMembers)},
         {"Lobby", "RoomSlots", std::to_string(prefs.create.slotCount)},
         {"Lobby", "RoomVisibility", std::to_string(static_cast<int>(prefs.create.visibility))},
@@ -642,7 +691,8 @@ void SavePrefs(const UiPrefs& prefs)
             team += (m ? "," : "") + std::to_string(preset.team.chars[m]) + "," +
                     std::to_string(preset.team.assists[m]) + "," +
                     std::to_string(preset.team.colors[m]);
-        entries.push_back({"LobbyPresets", "Name" + number, preset.used ? preset.name : ""});
+        entries.push_back({"LobbyPresets", "Name" + number,
+                           preset.used ? EscapeIniText(preset.name) : std::string()});
         entries.push_back({"LobbyPresets", "Team" + number, team});
     }
     IniSafe_WriteBatch(entries.data(), entries.size(), path);
@@ -2017,6 +2067,13 @@ void RunLobbyFrame(uint64_t titleArea)
 
     Input input = {};
     Native_ReadInput(input, g_ui->TextEntryActive());
+    if (g_ui->TextEntryActive()) {
+        // Where the field was drawn last frame, a line below its middle
+        // (UI space is 1280x720).
+        float caretX = 0.0f, caretY = 0.0f;
+        g_ui->TextCaret(&caretX, &caretY);
+        Ime_SetCaret(caretX / 1280.0f, (caretY + 18.0f) / 720.0f);
+    }
     // MAIN MENU was picked: the lobby stays up, inert, until black covers it.
     if (g_mainMenuReleaseAt) input = Input{};
     g_ui->Update(input);
@@ -2578,11 +2635,6 @@ void LobbyFlow_RequestReturnToLobby(const char* reason)
 bool LobbyFlow_WantsText()
 {
     return LobbyFlow_IsLobbyVisible() && g_ui && g_ui->TextEntryActive();
-}
-
-void LobbyFlow_OnChar(uint32_t utf16)
-{
-    Native_OnChar(utf16);
 }
 
 void LobbyFlow_ToggleSpectatorOverlay()

@@ -210,6 +210,17 @@ public:
                       float stretch = 1.0f, Blend blend = BLEND_NORMAL) = 0;
 };
 
+// Reads one UTF-8 sequence: returns its length in bytes (at least 1) and the
+// codepoint, U+FFFD for a byte that does not start a well-formed sequence.
+size_t DecodeUtf8(const char* text, uint32_t* codepoint);
+// Characters, not bytes.
+size_t Utf8Count(const char* utf8);
+// Whether the font has the character. The game draws '?' for one it lacks.
+// The body font has Latin-1 and Japanese (kana, JIS level 1 kanji and the
+// usual symbols); the heading font has ASCII and the Latin-1 accented letters.
+bool FontHasGlyph(uint32_t codepoint, Font font = FONT_BODY);
+bool FontHasText(const char* utf8, Font font = FONT_BODY);
+
 // Advance-width sum at scale 1.0 using the fonts' own metric tables.
 float TextWidth(const char* utf8, Font font = FONT_BODY);
 

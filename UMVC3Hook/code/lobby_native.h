@@ -36,7 +36,8 @@ Tex Native_AvatarTex(uint64_t steamId);
 // textActive routes typed characters to Input::typed and suppresses the
 // letter-key shortcuts.
 void Native_ReadInput(Input& input, bool textActive);
-// Window-procedure side of text entry (WM_CHAR, UTF-16 code unit).
+// Window-procedure side of text entry: one UTF-16 code unit of what was
+// typed (see lobby_ime.h, which decodes WM_CHAR and input-method results).
 void Native_OnChar(uint32_t utf16);
 
 void Native_PlaySfx(uint32_t sfxMask);

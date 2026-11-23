@@ -23,6 +23,7 @@
 #include "code/lag_diagnostics.h"
 #include "code/trainingboot.h"
 #include "code/lobby_flow.h"
+#include "code/lobby_ime.h"
 #include "code/online_rewards.h"
 #include "code/lobby_local.h"
 #include "code/launchmenu_utils.h"
@@ -943,9 +944,11 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         break;
     }
 
-    // Typed text for the native lobby's room-name and chat fields.
-    if (uMsg == WM_CHAR && LobbyFlow_WantsText())
-        LobbyFlow_OnChar(static_cast<uint32_t>(wParam));
+    // Typed text for the native lobby's name and chat fields, and the input
+    // method that goes with them (attached only while one is open).
+    LRESULT imeResult = 0;
+    if (lobby::Ime_WindowMessage(hWnd, uMsg, wParam, &lParam, LobbyFlow_WantsText(), &imeResult))
+        return imeResult;
 
     const bool keyboardMessage = uMsg == WM_KEYDOWN || uMsg == WM_KEYUP ||
         uMsg == WM_CHAR || uMsg == WM_SYSKEYDOWN || uMsg == WM_SYSKEYUP;
@@ -2155,6 +2158,7 @@ void OnInitializeHook()
 		D3D9Reset_AbortStartup("Could not initialize MinHook for graphics recovery");
 	if (mhStatus == MH_OK || mhStatus == MH_ERROR_ALREADY_INITIALIZED) {
 		KeyboardInput_Initialize();
+		lobby::Ime_InstallHook();
 		if (!D3D9Reset_InstallNativeHooks())
 			D3D9Reset_AbortStartup("Could not install the graphics recovery controller; see Timestone.log");
 		if (MH_CreateHook(

@@ -126,20 +126,13 @@ void BuildGenerated()
     g_generatedReady = true;
 }
 
-// Advance widths for U+0020..U+007E, copied from the fonts' FSD metric tables
-// (ui\font\nrodinpro and ui\font\bada_b). Glyph index is codepoint - 0x20.
-const uint8_t kBodyWidths[95] = {
-    16,11,11,17,17,22,20,11,10,10,15,18,11,13,11,14,18,13,17,18,19,17,18,17,
-    18,18,11,11,15,17,15,18,19,20,18,19,19,17,17,19,18,11,17,18,17,21,18,19,
-    18,19,19,18,19,18,20,24,20,19,18,11,19,11,14,14,11,16,16,15,15,15,12,17,
-    15,11,10,15,11,21,15,16,16,16,13,16,13,15,16,21,16,16,15,11,11,11,12,
-};
-const uint8_t kHeadingWidths[95] = {
-    32,24,24,36,40,46,44,16,24,24,26,36,24,24,24,30,40,26,40,40,40,38,40,38,
-    40,40,24,24,32,34,32,40,44,40,36,38,36,32,32,37,38,18,34,36,34,41,38,37,
-    38,41,40,38,39,40,42,45,40,41,39,20,24,21,26,28,18,32,34,33,33,33,26,36,
-    33,16,21,34,14,43,33,35,34,34,27,32,27,33,33,44,34,34,31,24,24,24,28,
-};
+// kGlyphCodepoints / kGlyphIndices (the game's glyph order beyond ASCII) and
+// kBodyWidths / kHeadingWidths (advance widths by glyph index, from the fonts'
+// FSD metric tables ui\font\nrodinpro and ui\font\bada_b).
+#include "lobby_font_tables.inc"
+
+constexpr int kMissingGlyph = '?' - 0x20; // what the game draws for anything else
+
 // Frame usage measured from the textures' alpha bounds. Entries not listed
 // use the whole texture with no inset.
 constexpr FrameStyle kDefaultFrame{{0.0f, 0.0f, 1.0f, 1.0f}, 0.0f, 0.0f, 0.0f, 0.0f, false};
@@ -151,30 +144,35 @@ constexpr FrameStyle kSlantRowFrame{{0.0f, 0.0f, 0.75f, 1.0f}, 19.0f, 3.0f, 17.0
 constexpr FrameStyle kSlantSelFrame{{0.0f, 0.0f, 0.75f, 1.0f}, 18.0f, 1.0f, 18.0f, 3.0f, false};
 constexpr FrameStyle kInsetFrame{{0.0f, 0.0f, 1.0f, 1.0f}, 1.0f, 8.0f, 1.0f, 8.0f, false};
 
-constexpr float kBodyFallbackWidth = 18.0f;    // typical Latin-1 / kana advance
-constexpr float kHeadingFallbackWidth = 36.0f;
-
-// Length of the UTF-8 sequence starting at `lead`; malformed bytes count as 1.
-size_t SequenceLength(unsigned char lead)
+// The glyph the game draws for a codepoint, as
+// sGameConfig__mapUtf8GlyphToFontIndex does it: ASCII is `codepoint - 0x20`,
+// everything else is looked up in the glyph order. -1 when there is none.
+int GlyphIndex(uint32_t codepoint)
 {
-    if (lead < 0x80) return 1;
-    if ((lead & 0xE0) == 0xC0) return 2;
-    if ((lead & 0xF0) == 0xE0) return 3;
-    if ((lead & 0xF8) == 0xF0) return 4;
-    return 1;
+    if (codepoint < 0x80) return codepoint >= 0x20 && codepoint != 0x7F ? static_cast<int>(codepoint) - 0x20 : -1;
+    if (codepoint > 0xFFFF) return -1;
+    size_t low = 0, high = sizeof(kGlyphCodepoints) / sizeof(kGlyphCodepoints[0]);
+    while (low < high) {
+        const size_t middle = (low + high) / 2;
+        if (kGlyphCodepoints[middle] < codepoint) low = middle + 1;
+        else high = middle;
+    }
+    if (low < sizeof(kGlyphCodepoints) / sizeof(kGlyphCodepoints[0]) &&
+        kGlyphCodepoints[low] == codepoint)
+        return kGlyphIndices[low];
+    return -1;
 }
 
-float GlyphWidth(const char* text, size_t length, Font font)
+float GlyphWidth(uint32_t codepoint, Font font)
 {
-    const unsigned char lead = static_cast<unsigned char>(text[0]);
-    if (length == 1 && lead >= 0x20 && lead <= 0x7E) {
-        return font == FONT_HEADING ? kHeadingWidths[lead - 0x20]
-                                    : kBodyWidths[lead - 0x20];
+    if (codepoint < 0x20) return 0.0f; // control characters are skipped
+    int glyph = GlyphIndex(codepoint);
+    if (font == FONT_HEADING) {
+        if (glyph < 0 || glyph >= static_cast<int>(sizeof(kHeadingWidths))) glyph = kMissingGlyph;
+        return kHeadingWidths[glyph];
     }
-    if (length == 1) return 0.0f; // control characters
-    // Full-width CJK occupies the whole 32px cell in the body font.
-    if (length >= 3 && font == FONT_BODY) return 30.0f;
-    return font == FONT_HEADING ? kHeadingFallbackWidth : kBodyFallbackWidth;
+    if (glyph < 0) glyph = kMissingGlyph;
+    return kBodyWidths[glyph];
 }
 
 } // namespace
@@ -220,15 +218,72 @@ const TexInfo& GetTexInfo(Tex tex)
     return g_generated[tex - TEX_ICON_FIRST];
 }
 
+size_t DecodeUtf8(const char* text, uint32_t* codepoint)
+{
+    const unsigned char lead = static_cast<unsigned char>(text[0]);
+    size_t length = 1;
+    uint32_t value = lead, least = 0;
+    if (lead >= 0xC2 && lead < 0xE0) { length = 2; value = lead & 0x1F; least = 0x80; }
+    else if (lead >= 0xE0 && lead < 0xF0) { length = 3; value = lead & 0x0F; least = 0x800; }
+    else if (lead >= 0xF0 && lead < 0xF5) { length = 4; value = lead & 0x07; least = 0x10000; }
+    else if (lead >= 0x80) value = 0xFFFD;
+    for (size_t i = 1; i < length; ++i) {
+        const unsigned char next = static_cast<unsigned char>(text[i]);
+        if ((next & 0xC0) != 0x80) { // also stops at the terminator
+            *codepoint = 0xFFFD;
+            return 1;
+        }
+        value = (value << 6) | (next & 0x3F);
+    }
+    if (length > 1 && (value < least || value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF))) {
+        *codepoint = 0xFFFD;
+        return 1;
+    }
+    *codepoint = value;
+    return length;
+}
+
+size_t Utf8Count(const char* utf8)
+{
+    size_t count = 0;
+    uint32_t codepoint;
+    for (; utf8 && *utf8; utf8 += DecodeUtf8(utf8, &codepoint)) ++count;
+    return count;
+}
+
+bool FontHasGlyph(uint32_t codepoint, Font font)
+{
+    if (font == FONT_HEADING) {
+        // The heading atlas has 256 cells, and a few of those the glyph
+        // order reaches hold a different character (its 0x64, 0x65, 0x77,
+        // 0x78 and 0x7E are a currency sign, a backslash, oe, OE and an
+        // inverted question mark), so only these are what they should be.
+        return (codepoint >= 0x20 && codepoint <= 0x7E) || (codepoint >= 0xC0 && codepoint <= 0xFF) ||
+               codepoint == 0xA1 || codepoint == 0xA2 || codepoint == 0xA3 || codepoint == 0xA9 ||
+               codepoint == 0xAE;
+    }
+    return GlyphIndex(codepoint) >= 0;
+}
+
+bool FontHasText(const char* utf8, Font font)
+{
+    while (utf8 && *utf8) {
+        uint32_t codepoint;
+        utf8 += DecodeUtf8(utf8, &codepoint);
+        if (!FontHasGlyph(codepoint, font)) return false;
+    }
+    return true;
+}
+
 float TextWidth(const char* utf8, Font font)
 {
     if (!utf8) return 0.0f;
     float width = 0.0f;
     const size_t total = strlen(utf8);
     for (size_t i = 0; i < total;) {
-        size_t length = SequenceLength(static_cast<unsigned char>(utf8[i]));
-        if (i + length > total) length = total - i;
-        width += GlyphWidth(utf8 + i, length, font);
+        uint32_t codepoint;
+        const size_t length = DecodeUtf8(utf8 + i, &codepoint);
+        width += GlyphWidth(codepoint, font);
         i += length;
     }
     return width;
@@ -253,9 +308,9 @@ void FitText(char* out, size_t outSize, const char* text, float maxWidth,
     float width = 0.0f;
     size_t kept = 0;
     for (size_t i = 0; i < total;) {
-        size_t length = SequenceLength(static_cast<unsigned char>(text[i]));
-        if (i + length > total) length = total - i;
-        const float glyph = GlyphWidth(text + i, length, font);
+        uint32_t codepoint;
+        const size_t length = DecodeUtf8(text + i, &codepoint);
+        const float glyph = GlyphWidth(codepoint, font);
         if (width + glyph + ellipsis > limit) break;
         width += glyph;
         i += length;
@@ -266,7 +321,8 @@ void FitText(char* out, size_t outSize, const char* text, float maxWidth,
         // sequence boundary that fits.
         kept = 0;
         for (size_t i = 0; i < total;) {
-            size_t length = SequenceLength(static_cast<unsigned char>(text[i]));
+            uint32_t codepoint;
+            const size_t length = DecodeUtf8(text + i, &codepoint);
             if (i + length + 4 > outSize) break;
             i += length;
             kept = i;

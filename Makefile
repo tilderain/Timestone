@@ -115,6 +115,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/chr_colors.cpp \
 	$(SRCDIR)/code/lobby_ui.cpp \
 	$(SRCDIR)/code/lobby_native.cpp \
+	$(SRCDIR)/code/lobby_ime.cpp \
 	$(SRCDIR)/code/lobby_room.cpp \
 	$(SRCDIR)/code/lobby_local.cpp \
 	$(SRCDIR)/code/spectate.cpp \
@@ -215,6 +216,7 @@ LIBS      := \
 	-ld3dcompiler \
 	-lkernel32 \
 	-luser32 \
+	-limm32 \
 	-lgdi32 \
 	-ldbghelp \
 	-lpsapi \

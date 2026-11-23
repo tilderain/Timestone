@@ -3,6 +3,7 @@
 // identified.
 #include "../pch.h"
 #include "lobby_native.h"
+#include "lobby_ime.h"
 #include "lobby_avatar.h"
 #include "space_bg.h"
 #include "steam_lobby.h"
@@ -825,11 +826,16 @@ bool g_usingKeyboard = false;
 bool g_previousKeys[256] = {};
 bool g_textKeysPrimed = false; // g_previousKeys holds the keys down when typing began
 int g_backspaceFrames = 0;
-char g_typed[64] = {};
+char g_typed[256] = {};
+char g_composing[256] = {}; // what an input method has not finished yet
+bool g_textWasActive = false;
+bool g_imeKeysHeld = false; // keys of a finished composition are still down
 
 // Characters posted by the window procedure (single producer, single consumer).
+// An input method delivers a whole phrase at once.
+constexpr uint32_t kCharQueue = 256;
 std::atomic<uint32_t> g_charHead{0}, g_charTail{0};
-uint16_t g_charQueue[64] = {};
+uint16_t g_charQueue[kCharQueue] = {};
 
 bool IsGameForeground()
 {
@@ -1015,7 +1021,7 @@ void CollectTypedText(bool textActive, bool foreground)
     const uint32_t head = g_charHead.load(std::memory_order_acquire);
     uint32_t pendingHigh = 0;
     for (; tail != head; ++tail) {
-        const uint32_t unit = g_charQueue[tail % 64];
+        const uint32_t unit = g_charQueue[tail % kCharQueue];
         if (!textActive) continue;
         if (unit >= 0xD800 && unit <= 0xDBFF) {
             pendingHigh = unit;
@@ -1049,8 +1055,15 @@ void CollectTypedText(bool textActive, bool foreground)
         return;
     }
 
-    // The game's message loop does not translate keystrokes, so synthesise
-    // characters from key edges with the current layout.
+    if (Ime_Open() || Ime_Composing()) {
+        // The input method takes the keys; what it makes of them arrives
+        // through the window procedure.
+        for (int vk = 0; vk < 256; ++vk) g_previousKeys[vk] = IsKeyHeld(vk);
+        return;
+    }
+
+    // Nothing came from the window procedure this frame: make characters
+    // from key edges with the current layout.
     BYTE state[256] = {};
     if (IsKeyHeld(VK_SHIFT)) state[VK_SHIFT] = 0x80;
     if (IsKeyHeld(VK_CONTROL)) state[VK_CONTROL] = 0x80;
@@ -1064,7 +1077,9 @@ void CollectTypedText(bool textActive, bool foreground)
             (vk >= VK_LSHIFT && vk <= VK_RMENU) || (vk >= VK_PRIOR && vk <= VK_DOWN) ||
             (vk >= VK_F1 && vk <= VK_F24))
             continue;
-        if (state[VK_CONTROL] & 0x80) continue;
+        // Ctrl with Alt is AltGr, which types (the euro sign, @ on a German
+        // layout); Ctrl alone is a shortcut.
+        if ((state[VK_CONTROL] & 0x80) && !(state[VK_MENU] & 0x80)) continue;
         WCHAR buffer[4] = {};
         state[vk] = 0x80;
         const int produced = ToUnicode(static_cast<UINT>(vk), MapVirtualKeyW(vk, MAPVK_VK_TO_VSC),
@@ -1260,8 +1275,8 @@ Tex Native_AvatarTex(uint64_t steamId)
 void Native_OnChar(uint32_t utf16)
 {
     const uint32_t head = g_charHead.load(std::memory_order_relaxed);
-    if (head - g_charTail.load(std::memory_order_acquire) >= 64) return;
-    g_charQueue[head % 64] = static_cast<uint16_t>(utf16);
+    if (head - g_charTail.load(std::memory_order_acquire) >= kCharQueue) return;
+    g_charQueue[head % kCharQueue] = static_cast<uint16_t>(utf16);
     g_charHead.store(head + 1, std::memory_order_release);
 }
 
@@ -1271,6 +1286,26 @@ void Native_ReadInput(Input& input, bool textActive)
     const bool foreground = IsGameForeground();
     CollectTypedText(textActive, foreground);
     input.typed = g_typed;
+    if (textActive != g_textWasActive) {
+        g_textWasActive = textActive;
+        Ime_Wake();
+    }
+    g_composing[0] = '\0';
+    if (textActive) Ime_GetComposition(g_composing, sizeof(g_composing));
+    input.composing = g_composing;
+    // While an input method composes, Enter, Esc, Backspace and the arrows
+    // are its own, and the key that ends the composition (Enter takes it,
+    // Esc drops it) is still down when it is over: the keyboard is the
+    // menu's again once those are released.
+    if (!textActive) {
+        g_imeKeysHeld = false;
+    } else if (Ime_Composing()) {
+        g_imeKeysHeld = true;
+    } else if (g_imeKeysHeld) {
+        g_imeKeysHeld = IsKeyHeld(VK_RETURN) || IsKeyHeld(VK_ESCAPE) || IsKeyHeld(VK_BACK) ||
+                        IsKeyHeld(VK_SPACE) || IsKeyHeld(VK_UP) || IsKeyHeld(VK_DOWN) ||
+                        IsKeyHeld(VK_LEFT) || IsKeyHeld(VK_RIGHT);
+    }
 
     // Pads: OR the decoded button masks of every active hardware slot.
     using GetInstance = void*(__fastcall*)();
@@ -1307,7 +1342,7 @@ void Native_ReadInput(Input& input, bool textActive)
     }
     if (!foreground) padHeld = 0;
 
-    const KeyState keys = foreground ? ReadKeyboard(textActive) : KeyState{};
+    const KeyState keys = foreground && !g_imeKeysHeld ? ReadKeyboard(textActive) : KeyState{};
 
     // Logical held bits.
     enum : uint32_t {
@@ -1377,7 +1412,7 @@ void Native_ReadInput(Input& input, bool textActive)
     input.quickChat = (pressed & H_QUICK_CHAT) != 0;
     input.usingKeyboard = g_usingKeyboard;
 
-    if (textActive && foreground && IsKeyHeld(VK_BACK)) {
+    if (textActive && foreground && !g_imeKeysHeld && IsKeyHeld(VK_BACK)) {
         const int frames = g_backspaceFrames++;
         input.backspace = frames == 0 || (frames >= kRepeatDelay && (frames - kRepeatDelay) % 3 == 0);
     } else {

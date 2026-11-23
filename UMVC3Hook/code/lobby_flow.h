@@ -94,6 +94,6 @@ void LobbyFlow_DrawOverlay();
 // is already playing and is being carried across a title-area reload.
 bool LobbyFlow_ShouldSkipSystemCue(uint32_t cue);
 
-// Keyboard text entry (room name, chat).
+// A text field (room name, preset name, chat) is open: typed characters and
+// the input method go to it (lobby_ime.h).
 bool LobbyFlow_WantsText();
-void LobbyFlow_OnChar(uint32_t utf16);

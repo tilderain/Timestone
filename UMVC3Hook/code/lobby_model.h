@@ -44,7 +44,12 @@ struct Team {
 constexpr int kTeamPresets = 10;
 constexpr int kReserveUnits = 3;
 constexpr int kTeamSlots = kTeamPresets + kReserveUnits;
-constexpr int kPresetNameCapacity = 24;
+// Names are limited in characters; the buffers hold that many at three bytes
+// each (the menu font has nothing beyond the BMP's three-byte range).
+constexpr int kPresetNameChars = 23;
+constexpr int kPresetNameCapacity = kPresetNameChars * 3 + 1;
+// A room name also has to fit kNameCapacity bytes, here and for every client.
+constexpr int kRoomNameChars = 40;
 
 struct TeamPreset {
     bool used;
@@ -291,6 +296,9 @@ struct Input {
     bool usingKeyboard;       // last input source, selects footer glyphs
     // Text typed this frame while a text field is active (UTF-8, may be empty).
     const char* typed;
+    // What an input method is still composing (UTF-8, may be empty or null):
+    // shown after the text, not yet part of it.
+    const char* composing;
     bool backspace;
 };
 
