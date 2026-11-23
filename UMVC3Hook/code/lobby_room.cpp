@@ -371,7 +371,7 @@ void SteamRoomService::ApplySettings(const RoomSettings& settings)
     if (SetFormat(settings.firstTo, settings.rotation)) {
         const int firstTo = room_.settings.firstTo;
         if (firstTo != oldFirstTo) {
-            if (firstTo == kFirstToEndless) note("Endless");
+            if (firstTo == kFirstToEndless) note("%s", "Endless");
             else note("First to %d", firstTo);
         }
         // No set ever ends in an endless room: its rotation rule says nothing.
