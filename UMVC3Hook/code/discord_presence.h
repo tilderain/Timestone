@@ -4,13 +4,18 @@
 // player's Discord profile, published over the desktop client's local pipe
 // (no SDK, no sign-in, no backend).
 //
-// Off publishes nothing and opens no pipe. Basic publishes the lobby, the
-// room, the opponent, both teams, the set score and the match timer, and
-// offers a Join button for public rooms with a free seat.
+// Off publishes nothing and opens no pipe. On publishes the lobby, the room,
+// the opponent, both teams, the set score and the match timer, and offers a
+// Join button for public rooms with a free seat.
 
-enum class DiscordPresenceLevel : int { Off = 0, Basic = 1 };
+// Nothing here looks for Discord (its pipe, the registry, processes) until the
+// player has said yes: ShowDiscordStatus=1, from the lobby's question or a
+// settings menu.
+enum class DiscordPresenceStatus : int { Off, Connecting, AppNotRunning, Connected, Refused };
 
-DiscordPresenceLevel DiscordPresence_GetLevel();
-bool DiscordPresence_SetLevel(DiscordPresenceLevel level);
+bool DiscordPresence_IsEnabled();                // ShowDiscordStatus=1
+bool DiscordPresence_NeedsSetup();               // the lobby's question is due
+bool DiscordPresence_SetEnabled(bool enabled);   // false when Timestone.ini could not be written
+DiscordPresenceStatus DiscordPresence_GetStatus();
 void DiscordPresence_GameTick();
 void DiscordPresence_Shutdown();

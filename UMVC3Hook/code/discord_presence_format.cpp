@@ -348,3 +348,8 @@ bool DiscordPresence_JsonInt(const std::string& json, const char* key, long long
     out = negative ? -value : value;
     return true;
 }
+
+bool DiscordPresence_ShouldAsk(int richPresenceSetup, int showDiscordStatus)
+{
+    return richPresenceSetup != 1 && showDiscordStatus != 1;
+}

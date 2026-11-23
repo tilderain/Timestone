@@ -218,6 +218,13 @@ int main()
         CHECK(frame.substr(8) == "ab");
     }
 
+    // 10. First-run question: due only until answered or turned on by hand.
+    CHECK(DiscordPresence_ShouldAsk(0, 0));
+    CHECK(DiscordPresence_ShouldAsk(2, 0));
+    CHECK(!DiscordPresence_ShouldAsk(1, 0));
+    CHECK(!DiscordPresence_ShouldAsk(0, 1));
+    CHECK(!DiscordPresence_ShouldAsk(1, 1));
+
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

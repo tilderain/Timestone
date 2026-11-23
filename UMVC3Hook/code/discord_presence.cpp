@@ -21,14 +21,16 @@ namespace {
 
 const char* const kClientId = "1544202390536982610";
 const char* const kSection = "Discord";
-const char* const kKey = "RichPresence";
+const char* const kShowKey = "ShowDiscordStatus";
+const char* const kSetupKey = "RichPresenceSetup";
 const DWORD kPublishIntervalMs = 5000; // Discord takes 5 updates per 20 s
 const DWORD kReadyTimeoutMs = 10000;
 const DWORD kRetryMs = 15000;
 const DWORD kMaxFrame = 64 * 1024;
 const int kTickDivider = 30; // snapshot every 30 game ticks
 
-std::atomic<int> g_level{-1}; // -1 = not read from Timestone.ini yet
+std::atomic<int> g_settings{-1}; // -1 = not read yet; bit 0 ShowDiscordStatus=1, bit 1 RichPresenceSetup=1
+std::atomic<int> g_status{static_cast<int>(DiscordPresenceStatus::Connecting)};
 std::atomic<HANDLE> g_wake{nullptr};
 std::atomic<bool> g_workerRunning{false};
 std::atomic<bool> g_shutdown{false};
@@ -41,6 +43,20 @@ void SettingsPath(char* path, size_t size)
 {
     path[0] = '\0';
     LaunchMenuUtils::GetSettingsPath(path, size);
+}
+
+int LoadSettings()
+{
+    const int loaded = g_settings.load(std::memory_order_acquire);
+    if (loaded >= 0) return loaded;
+
+    char path[MAX_PATH] = {};
+    SettingsPath(path, sizeof(path));
+    const int value = (GetPrivateProfileIntA(kSection, kShowKey, 0, path) == 1 ? 1 : 0) |
+                      (GetPrivateProfileIntA(kSection, kSetupKey, 0, path) == 1 ? 2 : 0);
+    int expected = -1;
+    g_settings.compare_exchange_strong(expected, value);
+    return g_settings.load(std::memory_order_acquire);
 }
 
 void EnsureWorker();
@@ -76,6 +92,8 @@ bool WriteAll(HANDLE pipe, const std::string& data)
 // starts the game the same way the Steam invite does.
 void RegisterLaunchProtocol()
 {
+    if (!DiscordPresence_IsEnabled()) return;
+
     wchar_t steamExe[2048] = {};
     DWORD size = sizeof(steamExe);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamExe", RRF_RT_REG_SZ,
@@ -125,6 +143,17 @@ void RegisterLaunchProtocol()
                : "Discord: could not register the Join command\n");
 }
 
+// Turning the status off takes back the Join protocol the worker registered.
+void RemoveLaunchProtocol()
+{
+    const LONG result =
+        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\discord-1544202390536982610");
+    if (result == ERROR_SUCCESS)
+        HookLog("Discord: removed the Join protocol\n");
+    else if (result != ERROR_FILE_NOT_FOUND)
+        HookLog("Discord: could not remove the Join protocol (%ld)\n", result);
+}
+
 // One pipe to the desktop client, and the loop that keeps it current.
 struct PresenceWorker {
     HANDLE pipe = nullptr;
@@ -141,13 +170,16 @@ struct PresenceWorker {
 
     void Refuse()
     {
-        HookLog("Discord refused presence without sign-in; presence is off for this session\n");
+        HookLog("Discord refused presence without sign-in; turn Show on Discord status off and on to retry\n");
         g_refused.store(true);
     }
 
     void Close()
     {
-        if (pipe) CloseHandle(pipe);
+        if (pipe) {
+            CloseHandle(pipe);
+            g_status.store(static_cast<int>(DiscordPresenceStatus::Connecting));
+        }
         pipe = nullptr;
         state = 0;
     }
@@ -164,6 +196,7 @@ struct PresenceWorker {
 
     void Connect(ULONGLONG now)
     {
+        if (!DiscordPresence_IsEnabled()) return;
         for (int i = 0; i < 10 && !pipe; ++i) {
             wchar_t name[64] = {};
             swprintf(name, sizeof(name) / sizeof(name[0]), L"\\\\?\\pipe\\discord-ipc-%d", i);
@@ -172,6 +205,7 @@ struct PresenceWorker {
             if (handle != INVALID_HANDLE_VALUE) pipe = handle;
         }
         if (!pipe) {
+            g_status.store(static_cast<int>(DiscordPresenceStatus::AppNotRunning));
             if (!missingLogged) {
                 HookLog("Discord: desktop app not found; presence waits for it\n");
                 missingLogged = true;
@@ -180,6 +214,7 @@ struct PresenceWorker {
             return;
         }
         missingLogged = false;
+        g_status.store(static_cast<int>(DiscordPresenceStatus::Connecting));
         state = 1;
         readyDeadline = now + kReadyTimeoutMs;
         lastSent.clear();
@@ -266,7 +301,7 @@ struct PresenceWorker {
     void Run()
     {
         RegisterLaunchProtocol();
-        while (!g_shutdown.load() && DiscordPresence_GetLevel() == DiscordPresenceLevel::Basic &&
+        while (!g_shutdown.load() && DiscordPresence_IsEnabled() &&
                !g_refused.load()) {
             const ULONGLONG now = GetTickCount64();
             if (!pipe && now >= nextConnect) Connect(now);
@@ -310,6 +345,7 @@ void PresenceWorker::HandleDispatch(const std::string& body)
         sentOnce = false;
         Subscribe("ACTIVITY_JOIN");
         Subscribe("ACTIVITY_JOIN_REQUEST");
+        g_status.store(static_cast<int>(DiscordPresenceStatus::Connected));
         HookLog("Discord: connected\n");
         return;
     }
@@ -368,7 +404,7 @@ DWORD WINAPI WorkerThread(LPVOID)
 void EnsureWorker()
 {
     if (g_shutdown.load() || g_refused.load()) return;
-    if (DiscordPresence_GetLevel() != DiscordPresenceLevel::Basic) return;
+    if (!DiscordPresence_IsEnabled()) return;
 
     std::lock_guard<std::mutex> lock(g_startMutex);
     if (g_workerRunning.load()) return;
@@ -395,32 +431,51 @@ void EnsureWorker()
 
 } // namespace
 
-DiscordPresenceLevel DiscordPresence_GetLevel()
+bool DiscordPresence_IsEnabled()
 {
-    const int loaded = g_level.load(std::memory_order_acquire);
-    if (loaded >= 0) return loaded ? DiscordPresenceLevel::Basic : DiscordPresenceLevel::Off;
-
-    char path[MAX_PATH] = {};
-    SettingsPath(path, sizeof(path));
-    const int value = GetPrivateProfileIntA(kSection, kKey, 0, path) == 1 ? 1 : 0;
-    int expected = -1;
-    g_level.compare_exchange_strong(expected, value);
-    return g_level.load(std::memory_order_acquire) ? DiscordPresenceLevel::Basic
-                                                   : DiscordPresenceLevel::Off;
+    return (LoadSettings() & 1) != 0;
 }
 
-bool DiscordPresence_SetLevel(DiscordPresenceLevel level)
+bool DiscordPresence_NeedsSetup()
 {
-    if (level == DiscordPresence_GetLevel()) return true;
+    const int s = LoadSettings();
+    return DiscordPresence_ShouldAsk((s & 2) ? 1 : 0, (s & 1) ? 1 : 0);
+}
+
+bool DiscordPresence_SetEnabled(bool enabled)
+{
+    const int current = LoadSettings();
+    const bool wasEnabled = (current & 1) != 0;
+    if (wasEnabled == enabled && (current & 2)) return true;
 
     char path[MAX_PATH] = {};
     SettingsPath(path, sizeof(path));
-    if (!IniSafe_WriteString(kSection, kKey, level == DiscordPresenceLevel::Basic ? "1" : "0", path))
-        return false;
+    if (!IniSafe_WriteString(kSection, kShowKey, enabled ? "1" : "0", path)) return false;
 
-    g_level.store(level == DiscordPresenceLevel::Basic ? 1 : 0, std::memory_order_release);
+    g_settings.store((enabled ? 1 : 0) | (current & 2), std::memory_order_release);
+    if (enabled && !wasEnabled) {
+        // Turning it back on is the retry after a refusal.
+        g_refused.store(false);
+        g_status.store(static_cast<int>(DiscordPresenceStatus::Connecting));
+    } else if (!enabled && wasEnabled) {
+        RemoveLaunchProtocol();
+    }
     if (HANDLE wake = g_wake.load()) SetEvent(wake);
+
+    if (!(current & 2)) {
+        // The switch has applied; a failure here only means the question may
+        // come back next session.
+        if (!IniSafe_WriteString(kSection, kSetupKey, "1", path)) return false;
+        g_settings.fetch_or(2, std::memory_order_acq_rel);
+    }
     return true;
+}
+
+DiscordPresenceStatus DiscordPresence_GetStatus()
+{
+    if (!DiscordPresence_IsEnabled()) return DiscordPresenceStatus::Off;
+    if (g_refused.load()) return DiscordPresenceStatus::Refused;
+    return static_cast<DiscordPresenceStatus>(g_status.load());
 }
 
 void DiscordPresence_GameTick()
@@ -431,7 +486,7 @@ void DiscordPresence_GameTick()
     if (++counter < kTickDivider) return;
     counter = 0;
 
-    if (DiscordPresence_GetLevel() != DiscordPresenceLevel::Basic) return;
+    if (!DiscordPresence_IsEnabled()) return;
 
     PresenceSnapshot snapshot;
     if (LobbyFlow_IsEnabled())

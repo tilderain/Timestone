@@ -204,10 +204,12 @@ bool SaveSettings(HWND window)
             return false;
         }
     }
-    const bool discordPresence = SendMessageA(GetDlgItem(window, ID_DISCORD_PRESENCE),
-                                              BM_GETCHECK, 0, 0) == BST_CHECKED;
-    if (!DiscordPresence_SetLevel(discordPresence ? DiscordPresenceLevel::Basic
-                                                  : DiscordPresenceLevel::Off)) {
+    const bool showDiscordStatus = SendMessageA(GetDlgItem(window, ID_DISCORD_PRESENCE),
+                                                BM_GETCHECK, 0, 0) == BST_CHECKED;
+    // Only a change is saved: pressing Save without touching the box is not an
+    // answer to the lobby's Discord question.
+    if (showDiscordStatus != DiscordPresence_IsEnabled() &&
+        !DiscordPresence_SetEnabled(showDiscordStatus)) {
         MessageBoxA(window, "Could not save the Discord setting.",
                     "Settings", MB_OK | MB_ICONERROR);
         return false;
@@ -330,14 +332,13 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             WS_VISIBLE | WS_CHILD, 18, sectionY + 106, 374, 84,
             window, nullptr, nullptr, nullptr);
         HWND discordPresence = CreateWindowA(
-            "BUTTON", "Discord Rich Presence (lobby, opponent, match time)",
+            "BUTTON", "Show on Discord status (lobby, opponent, match time)",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
             18, sectionY + 196, 374, 24, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DISCORD_PRESENCE)),
             nullptr, nullptr);
         SendMessageA(discordPresence, BM_SETCHECK,
-                     DiscordPresence_GetLevel() == DiscordPresenceLevel::Basic ? BST_CHECKED
-                                                                              : BST_UNCHECKED, 0);
+                     DiscordPresence_IsEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
         HWND save = CreateWindowA(
             "BUTTON", "Save", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
             222, sectionY + 228, 82, 28, window,

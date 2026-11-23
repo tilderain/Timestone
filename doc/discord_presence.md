@@ -7,7 +7,8 @@ score and how long the match has run. Public rooms with a free seat also get a
 
 It talks to the Discord **desktop** app over its local pipe. There is no SDK
 DLL, no sign-in and no server involved, and nothing is published unless you
-turn it on.
+turn it on. Until you do, Timestone does not look for Discord at all: no pipe,
+no registry, no process list.
 
 ## Turning it on and off
 
@@ -15,23 +16,31 @@ turn it on.
 
 ```ini
 [Discord]
-RichPresence=1
+RichPresenceSetup=1
+ShowDiscordStatus=1
 ```
 
-`1` is **Basic**, anything else (and the default) is **Off**: no pipe is opened
-and nothing is sent.
+- `ShowDiscordStatus`: `1` is **On**; anything else, or a missing key, is
+  **Off**: no pipe is opened and nothing is sent.
+- `RichPresenceSetup`: `1` once you have answered the question or changed the
+  setting.
 
 In game:
 
-- Esc or F3 → Settings → the **Discord Rich Presence** checkbox. Available in a
-  match and offline; the lobby has its own screens and no Esc menu.
-- Launcher (`-launcher`) → Settings → **Discord Rich Presence (lobby, opponent,
-  match time)**, below the Steam routing option.
+- Esc or F3 → Settings → the **Show on Discord status** checkbox. Available in
+  a match and offline; the lobby has its own screens and no Esc menu. Below it,
+  a line shows the connection: connecting, desktop app not running, connected,
+  or refused. There is no Discord sign-in; after a refusal, untick and tick the
+  box to retry.
+- Launcher (`-launcher`) → Settings → **Show on Discord status (lobby,
+  opponent, match time)**, below the Steam routing option. Pressing Save
+  without changing the box saves nothing.
 
 The choice is saved immediately. Turning it off clears the activity within a
-second and stops the worker; turning it on again starts it.
+second, stops the worker and removes the Join protocol (below); turning it on
+again starts it.
 
-## What Basic publishes
+## What it publishes
 
 | Where | Details | State |
 |---|---|---|
@@ -60,7 +69,9 @@ Steam account beyond the persona name other players already see in the room.
 Discord's Join starts the game through `steam://rungameid/357190`, and the
 plugin registers the protocol under
 `HKCU\Software\Classes\discord-1544202390536982610` so that works without a
-sign-in.
+sign-in. Turning the status off in a settings menu deletes that key; editing
+`ShowDiscordStatus=0` by hand does not, until the next time it is turned off
+in a menu.
 
 The cold start cannot carry the room: you land in the lobby, not in the room,
 so click Join once more from the profile. With the game already running, Join

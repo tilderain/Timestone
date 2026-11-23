@@ -52,3 +52,7 @@ std::string DiscordPresence_JoinReplyJson(const std::string& userId, bool accept
 std::string DiscordPresence_Frame(uint32_t opcode, const std::string& body);
 bool DiscordPresence_JsonString(const std::string& json, const char* key, std::string& out, size_t from = 0);
 bool DiscordPresence_JsonInt(const std::string& json, const char* key, long long& out);
+
+// The first-run question is due while the player has neither answered it
+// (RichPresenceSetup=1) nor turned the status on by hand (ShowDiscordStatus=1).
+bool DiscordPresence_ShouldAsk(int richPresenceSetup, int showDiscordStatus);
