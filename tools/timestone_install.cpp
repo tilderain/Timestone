@@ -322,37 +322,18 @@ std::wstring FindGame()
 // ---------------------------------------------------------------------------
 // Versions
 // ---------------------------------------------------------------------------
+// The version of an installed Timestone.asi; false if there is no such file.
+// Windows' own version lookup is not used: releases up to 0.6.6 carry their
+// version resource under a name instead of the number 1 it looks for, so it
+// finds nothing in them. The text is found in the file itself instead.
 bool GetInstalledVersion(const std::wstring& path, std::wstring& version)
 {
-    DWORD ignored = 0;
-    DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
-    if (!size)
+    std::vector<unsigned char> file;
+    if (!ReadWholeFile(path, file))
         return false;
-    std::vector<unsigned char> data(size);
-    if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data()))
-        return false;
-    wchar_t* value = nullptr;
-    UINT valueLength = 0;
-    if (VerQueryValueW(data.data(),
-            L"\\StringFileInfo\\040904E4\\ProductVersion",
-            reinterpret_cast<void**>(&value), &valueLength) && valueLength) {
-        version.assign(value, valueLength - 1);
-        return true;
-    }
-
-    VS_FIXEDFILEINFO* fixedInfo = nullptr;
-    UINT fixedInfoLength = 0;
-    if (!VerQueryValueW(data.data(), L"\\",
-            reinterpret_cast<void**>(&fixedInfo), &fixedInfoLength) ||
-        fixedInfoLength < sizeof(VS_FIXEDFILEINFO) ||
-        fixedInfo->dwSignature != 0xFEEF04BD)
-        return false;
-    wchar_t buffer[64] = {};
-    swprintf(buffer, 64, L"%u.%u.%u",
-        HIWORD(fixedInfo->dwProductVersionMS),
-        LOWORD(fixedInfo->dwProductVersionMS),
-        HIWORD(fixedInfo->dwProductVersionLS));
-    version = buffer;
+    version = Utf8ToWide(install::PeProductVersion(file));
+    if (version.empty())
+        version = L"(unknown version)"; // still installed: it can be updated or removed
     return true;
 }
 
@@ -863,8 +844,31 @@ DWORD WINAPI InstallThread(void*)
     return 0;
 }
 
-// Uninstalling is taking the plugin out of the game folder: the loader
-// beside it then has nothing to load. Nothing else is touched.
+// Uninstalling takes out what the installer put in: the plugin and its
+// backup, the notices and the old updater. The loader (dinput8.dll, Ultimate
+// ASI Loader) goes too unless another .asi mod is there to need it. Settings
+// (Timestone.ini), logs and dumps stay.
+bool OtherPluginsPresent(const std::wstring& gameDir)
+{
+    // Where the loader looks for plugins.
+    for (const wchar_t* folder : {L"", L"\\plugins", L"\\scripts", L"\\update"}) {
+        WIN32_FIND_DATAW entry = {};
+        HANDLE search = FindFirstFileW((gameDir + folder + L"\\*.asi").c_str(), &entry);
+        if (search == INVALID_HANDLE_VALUE)
+            continue;
+        // "*.asi" also matches longer extensions that begin with it.
+        bool found = false;
+        do {
+            const size_t length = wcslen(entry.cFileName);
+            found = length > 4 && _wcsicmp(entry.cFileName + length - 4, L".asi") == 0;
+        } while (!found && FindNextFileW(search, &entry));
+        FindClose(search);
+        if (found)
+            return true;
+    }
+    return false;
+}
+
 void Uninstall()
 {
     std::wstring gameDir;
@@ -877,17 +881,37 @@ void Uninstall()
             L"Ultimate Marvel vs. Capcom 3 is running.\nClose it, then uninstall.");
         return;
     }
-    if (!DeleteFileW((gameDir + L"\\Timestone.asi").c_str()) &&
-        GetLastError() != ERROR_FILE_NOT_FOUND) {
+    const auto remove = [&gameDir](const wchar_t* name) {
+        const std::wstring path = gameDir + L"\\" + name;
+        SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL); // a read-only file is still ours
+        if (DeleteFileW(path.c_str()))
+            return true;
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+            return true;
         Fail(Task::Detect, L"UNINSTALL FAILED", WithFileError(
-            L"Timestone.asi could not be removed from the game folder.",
-            L"Timestone.asi", GetLastError()));
+            L"Timestone could not be removed from the game folder.", name, error));
+        return false;
+    };
+    // The plugin first: once it is gone the game starts without Timestone,
+    // whatever else is left.
+    for (const wchar_t* name : {L"Timestone.asi", L"Timestone.asi.old",
+            L"Timestone-THIRDPARTYNOTICES", L"TimestoneUpdater.exe",
+            L"TimestoneUpdater.exe.new"})
+        if (!remove(name))
+            return;
+    const bool keepLoader = OtherPluginsPresent(gameDir);
+    if (!keepLoader && !remove(L"dinput8.dll"))
         return;
-    }
+
     Locked lock;
     g_state.stage = Stage::Removed;
     g_state.installed.clear();
     g_state.protonPending = false;
+    g_state.message = keepLoader
+        ? L"dinput8.dll was kept: another .asi mod in the folder needs it.\n"
+          L"Timestone was removed from:"
+        : L"Timestone was removed from:";
 }
 
 void StartTask(Task task)
@@ -1074,6 +1098,34 @@ void BrowseForGame(HWND owner)
     StartTask(Task::Detect);
 }
 
+// Starts the game through Steam's own link, or failing that the game's
+// program (which hands itself to Steam).
+void LaunchGame()
+{
+    const std::wstring link = std::wstring(L"steam://rungameid/") + kSteamAppId;
+    SHELLEXECUTEINFOW launch = {};
+    launch.cbSize = sizeof(launch);
+    // This program exits as soon as the link is handed over. Without
+    // SEE_MASK_NOASYNC the hand-over may still be running on a background
+    // thread at that point, and is lost with the process.
+    launch.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    launch.lpVerb = L"open";
+    launch.lpFile = link.c_str();
+    launch.nShow = SW_SHOWNORMAL;
+    if (ShellExecuteExW(&launch))
+        return;
+
+    std::wstring gameDir;
+    {
+        Locked lock;
+        gameDir = g_state.gameDir;
+    }
+    const std::wstring program = gameDir + L"\\" + kGameExe;
+    launch.lpFile = program.c_str();
+    launch.lpDirectory = gameDir.c_str();
+    ShellExecuteExW(&launch);
+}
+
 void Perform(Action action)
 {
     switch (action) {
@@ -1097,8 +1149,7 @@ void Perform(Action action)
         BrowseForGame(g_window.handle);
         break;
     case Action::Launch:
-        ShellExecuteW(nullptr, L"open", (std::wstring(L"steam://rungameid/") + kSteamAppId).c_str(),
-            nullptr, nullptr, SW_SHOWNORMAL);
+        LaunchGame();
         DestroyWindow(g_window.handle);
         break;
     case Action::Close:
@@ -1194,7 +1245,7 @@ void Render()
         break;
     case Stage::Removed:
         view.title = L"TIMESTONE REMOVED";
-        view.message = L"Timestone.asi was removed from:";
+        view.message = state.message.c_str();
         view.detail = state.gameDir.c_str();
         button(L"CLOSE", Action::Close);
         break;

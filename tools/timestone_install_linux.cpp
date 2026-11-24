@@ -13,7 +13,7 @@
 //
 //   TimestoneInstall [game folder]   the folder holding umvc3.exe, if not found
 //   TimestoneInstall --text          no window
-//   TimestoneInstall --uninstall     remove Timestone.asi from the game folder, no window
+//   TimestoneInstall --uninstall     remove Timestone from the game folder, no window
 
 #include "install_ui.h"
 
@@ -394,8 +394,10 @@ void Detect()
     }
     std::string installed;
     std::vector<unsigned char> plugin;
-    if (!gameDir.empty() && ReadWholeFile(gameDir + "/Timestone.asi", plugin))
+    if (!gameDir.empty() && ReadWholeFile(gameDir + "/Timestone.asi", plugin)) {
         installed = PeProductVersion(plugin);
+        if (installed.empty()) installed = "(unknown version)"; // still installed: it can be updated or removed
+    }
     // An install made before the game had a Proton prefix is finished here,
     // on the run after the game was first started.
     const bool protonPending = !plugin.empty() && !GameRunning() &&
@@ -565,8 +567,30 @@ void Install()
     g_state.message = message;
 }
 
-// Uninstalling is taking the plugin out of the game folder: the loader
-// beside it then has nothing to load. Nothing else is touched.
+// Uninstalling takes out what the installer put in: the plugin and its
+// backup, the notices and the old updater. The loader (dinput8.dll, Ultimate
+// ASI Loader) goes too unless another .asi mod is there to need it. Settings
+// (Timestone.ini), logs and dumps stay.
+bool OtherPluginsPresent(const std::string& gameDir)
+{
+    // Where the loader looks for plugins.
+    for (const char* folder : {"", "/plugins", "/scripts", "/update"}) {
+        DIR* dir = opendir((gameDir + folder).c_str());
+        if (!dir) continue;
+        bool found = false;
+        while (const dirent* entry = readdir(dir)) {
+            const size_t length = strlen(entry->d_name);
+            if (length > 4 && strcasecmp(entry->d_name + length - 4, ".asi") == 0) {
+                found = true;
+                break;
+            }
+        }
+        closedir(dir);
+        if (found) return true;
+    }
+    return false;
+}
+
 void Uninstall()
 {
     std::string gameDir;
@@ -574,21 +598,34 @@ void Uninstall()
         std::lock_guard<std::mutex> lock(g_lock);
         gameDir = g_state.gameDir;
     }
-    const std::string plugin = gameDir + "/Timestone.asi";
     if (GameRunning()) {
         Fail(Task::Detect, "UNINSTALL FAILED",
              "Ultimate Marvel vs. Capcom 3 is running.\nClose it, then uninstall.");
         return;
     }
-    if (unlink(plugin.c_str()) != 0 && errno != ENOENT) {
+    const auto remove = [&gameDir](const char* name) {
+        const std::string path = gameDir + "/" + name;
+        if (unlink(path.c_str()) == 0 || errno == ENOENT) return true;
         Fail(Task::Detect, "UNINSTALL FAILED",
-             WithFileError("Timestone.asi could not be removed from the game folder.", plugin, errno));
-        return;
-    }
+             WithFileError("Timestone could not be removed from the game folder.", name, errno));
+        return false;
+    };
+    // The plugin first: once it is gone the game starts without Timestone,
+    // whatever else is left.
+    for (const char* name : {"Timestone.asi", "Timestone.asi.old", "Timestone-THIRDPARTYNOTICES",
+                             "TimestoneUpdater.exe", "TimestoneUpdater.exe.new"})
+        if (!remove(name)) return;
+    const bool keepLoader = OtherPluginsPresent(gameDir);
+    if (!keepLoader && !remove("dinput8.dll")) return;
+
     std::lock_guard<std::mutex> lock(g_lock);
     g_state.stage = Stage::Removed;
     g_state.installed.clear();
     g_state.protonPending = false;
+    g_state.message = keepLoader
+        ? "dinput8.dll was kept: another .asi mod in the folder needs it.\n"
+          "Timestone was removed from:"
+        : "Timestone was removed from:";
 }
 
 // A folder picker from whichever desktop is there.
@@ -972,7 +1009,7 @@ Panel PanelFor(const State& state)
         break;
     case Stage::Removed:
         screen.title = L"TIMESTONE REMOVED";
-        screen.message = L"Timestone.asi was removed from:";
+        screen.message = Wide(state.message);
         screen.detail = Wide(state.gameDir);
         screen.Button(L"CLOSE", Action::Close);
         break;
@@ -1084,7 +1121,11 @@ int WriteScreens(const char* folder)
         s.stage = Stage::Done; s.message = "Timestone v0.6.6 is installed.\nProton is set to load it.";
     });
     add("installed", 4300, 1, [](State& s) { s.stage = Stage::Ready; s.installed = "0.6.6"; });
-    add("removed", 4500, 0, [](State& s) { s.stage = Stage::Removed; });
+    add("removed", 4500, 0, [](State& s) {
+        s.stage = Stage::Removed;
+        s.message = "dinput8.dll was kept: another .asi mod in the folder needs it.\n"
+                    "Timestone was removed from:";
+    });
     add("failed", 4700, 1, [](State& s) {
         s.stage = Stage::Failed; s.title = "INSTALL FAILED";
         s.message = "The new files could not be put into the game folder.\n\nPermission denied: dinput8.dll";
@@ -1328,8 +1369,7 @@ int main(int argc, char** argv)
         g_state.gameDir = gameDir;
         Uninstall();
         const bool removed = g_state.stage == Stage::Removed;
-        printf("%s\n", removed ? ("Timestone.asi was removed from " + gameDir).c_str()
-                               : g_state.message.c_str());
+        printf("%s%s\n", g_state.message.c_str(), removed ? (" " + gameDir).c_str() : "");
         return removed ? 0 : 1;
     }
     if (!textOnly) {

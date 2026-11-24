@@ -298,7 +298,7 @@ INSTALL_DEPS := tools/install_ui.h $(SRCDIR)/code/space_bg.h $(SRCDIR)/code/lobb
 $(INSTALL_RC): Makefile
 	@mkdir -p $(@D)
 	@printf '%s\n' \
-		'VS_VERSION_INFO VERSIONINFO' \
+		'1 VERSIONINFO' \
 		'FILEVERSION     $(VERSION_RC)' \
 		'PRODUCTVERSION  $(VERSION_RC)' \
 		'FILEFLAGSMASK   0x3fL' \
@@ -411,7 +411,7 @@ $(OBJDIR)/%.o: $(ENETDIR)/%.c
 $(BUILDDIR)/UMVC3Hook.rc: Makefile $(SRCDIR)/Timestone.manifest
 	@mkdir -p $(@D)
 	@printf '%s\n' \
-		'VS_VERSION_INFO VERSIONINFO' \
+		'1 VERSIONINFO' \
 		'' \
 		'FILEVERSION     $(VERSION_RC)' \
 		'PRODUCTVERSION  $(VERSION_RC)' \
