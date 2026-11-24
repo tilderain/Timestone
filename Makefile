@@ -40,7 +40,7 @@ INCLUDE_FIX_HEADERS := $(INCLUDE_FIX_DIR)/Windows.h $(INCLUDE_FIX_DIR)/Psapi.h $
 # Output: .asi is a renamed DLL loaded by Ultimate ASI Loader
 OUTPUT    := Timestone.asi
 UNSTRIPPED_OUTPUT := Timestone-unstripped.asi
-UPDATER_OUTPUT := TimestoneUpdater.exe
+UPDATER_OUTPUT := TimestoneInstall.exe
 PACKAGE_OUTPUT := Timestone.zip
 PACKAGE_NOTICES := $(BUILDDIR)/Timestone-THIRDPARTYNOTICES
 LOADER_DLL := dinput8.dll
@@ -286,16 +286,84 @@ $(OUTPUT): $(ALL_OBJ)
 	mv $@.tmp $@
 	@echo "=== Built: $(OUTPUT) ==="
 
-$(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
-	$(CXX) -Os -fno-declone-ctor-dtor -flto -ffunction-sections -fdata-sections -std=c++20 \
-		-DWIN32_LEAN_AND_MEAN -DNOMINMAX \
+# The installer: its window is the lobby's space backdrop, so it builds the
+# plugin's space_bg.cpp and embeds the same star tile.
+INSTALL_RC  := $(BUILDDIR)/TimestoneInstall.rc
+INSTALL_RES := $(BUILDDIR)/TimestoneInstall.res.o
+INSTALL_SRC := tools/timestone_install.cpp $(SRCDIR)/code/space_bg.cpp
+INSTALL_DEPS := tools/install_ui.h $(SRCDIR)/code/space_bg.h $(SRCDIR)/code/lobby_canvas.h
+
+$(INSTALL_RC): Makefile
+	@mkdir -p $(@D)
+	@printf '%s\n' \
+		'VS_VERSION_INFO VERSIONINFO' \
+		'FILEVERSION     $(VERSION_RC)' \
+		'PRODUCTVERSION  $(VERSION_RC)' \
+		'FILEFLAGSMASK   0x3fL' \
+		'FILEFLAGS       0x0L' \
+		'FILEOS          0x40004L' \
+		'FILETYPE        0x1L' \
+		'FILESUBTYPE     0x0L' \
+		'BEGIN' \
+		'    BLOCK "StringFileInfo"' \
+		'    BEGIN' \
+		'        BLOCK "040904E4"' \
+		'        BEGIN' \
+		'            VALUE "FileDescription", "Timestone Install"' \
+		'            VALUE "FileVersion", "$(VERSION)"' \
+		'            VALUE "InternalName", "TimestoneInstall"' \
+		'            VALUE "OriginalFilename", "TimestoneInstall.exe"' \
+		'            VALUE "ProductName", "Timestone"' \
+		'            VALUE "ProductVersion", "$(VERSION)"' \
+		'        END' \
+		'    END' \
+		'    BLOCK "VarFileInfo"' \
+		'    BEGIN' \
+		'        VALUE "Translation", 0x409, 1252' \
+		'    END' \
+		'END' \
+		'' \
+		'1 24 "tools/TimestoneInstall.manifest"' \
+		'SPACE_STARS RCDATA "UMVC3Hook/assets/space_stars_512.dxt1"' > $@
+
+$(INSTALL_RES): $(INSTALL_RC) tools/TimestoneInstall.manifest $(SRCDIR)/assets/space_stars_512.dxt1
+	$(WINDRES) -O coff -i $< -o $@
+
+$(UPDATER_OUTPUT): $(INSTALL_SRC) $(INSTALL_DEPS) $(INSTALL_RES) Makefile
+	$(CXX) -O2 -fno-declone-ctor-dtor -flto -ffunction-sections -fdata-sections -std=c++20 \
+		-Wall -Wextra \
+		-DWIN32_LEAN_AND_MEAN -DNOMINMAX -DUNICODE -D_UNICODE \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \
 		-D_GLIBCXX_USE_CXX11_ABI=0 \
+		-Itools -I$(SRCDIR)/code \
 		-static -mwindows \
-		-Wl,--gc-sections -Wl,-s -o $@ $< \
-		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion -lole32 -loleaut32 -luuid
+		-Wl,--gc-sections -Wl,-s -o $@ $(INSTALL_SRC) $(INSTALL_RES) \
+		-lwinhttp -lbcrypt -lgdi32 -lshell32 -lversion -lole32 -ladvapi32
 	@echo "=== Built: $(UPDATER_OUTPUT) ==="
+
+# The Linux installer: a native program with the same window, linked whole
+# (X11 included) so it runs on any distribution, carried inside a shell
+# script. Not part of `all`: it needs a host compiler and static X11
+# libraries (libX11, libxcb, libXau, libXdmcp), which the plugin build does
+# not. Build it with `make TimestoneInstall.sh`.
+INSTALL_LINUX := $(BUILDDIR)/TimestoneInstallLinux
+INSTALL_LINUX_SRC := tools/timestone_install_linux.cpp $(SRCDIR)/code/space_bg.cpp
+INSTALL_LINUX_LIBS ?= -lX11 -lxcb -lXau -lXdmcp
+INSTALL_SCRIPT := TimestoneInstall.sh
+
+$(INSTALL_LINUX): $(INSTALL_LINUX_SRC) $(INSTALL_DEPS) $(SRCDIR)/imgui/imstb_truetype.h \
+		$(SRCDIR)/assets/space_stars_512.dxt1 Makefile
+	@mkdir -p $(@D)
+	$(HOST_CXX) -O2 -std=c++20 -Wall -Wextra -Wno-unused-function -static \
+		-DTIMESTONE_VERSION=\"$(VERSION)\" \
+		-Itools -I$(SRCDIR)/code -I$(SRCDIR)/imgui -Wa,-I$(SRCDIR)/assets \
+		-Wl,-s -o $@ $(INSTALL_LINUX_SRC) $(INSTALL_LINUX_LIBS)
+
+$(INSTALL_SCRIPT): tools/timestone_install_stub.sh $(INSTALL_LINUX)
+	cat $^ > $@.tmp
+	mv $@.tmp $@
+	@echo "=== Built: $(INSTALL_SCRIPT) ==="
 
 # The notices ship under a Timestone- name so they are identifiable once
 # extracted into the game folder.
@@ -414,7 +482,7 @@ $(OBJDIR):
 # ---------- Clean ----------
 
 clean:
-	rm -rf $(BUILDDIR) $(OUTPUT) $(UNSTRIPPED_OUTPUT) $(UPDATER_OUTPUT) $(PACKAGE_OUTPUT) $(MAP_FILE)
+	rm -rf $(BUILDDIR) $(OUTPUT) $(UNSTRIPPED_OUTPUT) $(UPDATER_OUTPUT) $(PACKAGE_OUTPUT) $(MAP_FILE) $(INSTALL_SCRIPT)
 
 # ---------- Install (example path - adjust to your UMVC3 install) ----------
 

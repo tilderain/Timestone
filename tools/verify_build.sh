@@ -12,18 +12,18 @@ VERSION="$(awk '/^VERSION[[:space:]]*:=/ {print $3; exit}' Makefile)"   # parsed
 make clean >/dev/null
 make release >/dev/null
 asi1=$(sha256sum Timestone.asi | cut -d' ' -f1)
-exe1=$(sha256sum TimestoneUpdater.exe | cut -d' ' -f1)
+exe1=$(sha256sum TimestoneInstall.exe | cut -d' ' -f1)
 make clean >/dev/null
 make release >/dev/null
 asi2=$(sha256sum Timestone.asi | cut -d' ' -f1)
-exe2=$(sha256sum TimestoneUpdater.exe | cut -d' ' -f1)
+exe2=$(sha256sum TimestoneInstall.exe | cut -d' ' -f1)
 [ "$asi1" = "$asi2" ] || { echo "FAIL: Timestone.asi not deterministic"; exit 1; }
-[ "$exe1" = "$exe2" ] || { echo "FAIL: TimestoneUpdater.exe not deterministic"; exit 1; }
+[ "$exe1" = "$exe2" ] || { echo "FAIL: TimestoneInstall.exe not deterministic"; exit 1; }
 echo "OK: deterministic (asi=$asi1 exe=$exe1)"
 
 # 2. PE32+ x86-64 architecture.
 "$OBJDUMP" -f Timestone.asi | grep -i 'x86-64' >/dev/null || { echo "FAIL: Timestone.asi not x86-64"; exit 1; }
-"$OBJDUMP" -f TimestoneUpdater.exe | grep -i 'x86-64' >/dev/null || { echo "FAIL: TimestoneUpdater.exe not x86-64"; exit 1; }
+"$OBJDUMP" -f TimestoneInstall.exe | grep -i 'x86-64' >/dev/null || { echo "FAIL: TimestoneInstall.exe not x86-64"; exit 1; }
 echo "OK: PE32+ x86-64"
 
 # 3. Expected mingw import libs actually linked. d3d9 is loaded dynamically (kiero uses

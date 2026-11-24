@@ -49,10 +49,14 @@ jobs:
     - name: Build package
       run: nix build .#timestone
 
+    - name: Build Linux installer
+      run: nix build .#timestone-install-linux --out-link result-linux
+
     - name: Stage release assets
       run: |
         mkdir -p dist
-        cp -L result/Timestone.asi result/TimestoneUpdater.exe result/dinput8.dll result/Timestone-THIRDPARTYNOTICES dist/
+        cp -L result/Timestone.asi result/TimestoneInstall.exe result/dinput8.dll result/Timestone-THIRDPARTYNOTICES dist/
+        cp -L result-linux/TimestoneInstall.sh dist/   # the Linux installer; a release file of its own
 
     - name: Upload unsigned artifacts
       uses: actions/upload-artifact@v7
@@ -75,7 +79,7 @@ jobs:
       run: |
         New-Item -ItemType Directory -Path sign -Force | Out-Null
         Copy-Item dist\Timestone.asi sign\Timestone.dll -Force   # .asi is a PE DLL; not in ArtifactSigning's type list
-        Copy-Item dist\TimestoneUpdater.exe sign\ -Force   # dinput8.dll (ASI loader) stays unsigned
+        Copy-Item dist\TimestoneInstall.exe sign\ -Force   # dinput8.dll (ASI loader) stays unsigned
 
     - name: Sign with Azure Artifact Signing
       if: vars.ENABLE_SIGNING == 'true'   # feature flag — set the ENABLE_SIGNING repo variable to 'true' to re-enable
@@ -111,13 +115,32 @@ jobs:
       shell: pwsh
       run: |
         Copy-Item sign\Timestone.dll dist\Timestone.asi -Force
-        Copy-Item sign\TimestoneUpdater.exe dist\ -Force
+        Copy-Item sign\TimestoneInstall.exe dist\ -Force
         # dinput8  is already here
         # Copy-Item dist\dinput8.dll dist\ -Force   # unsigned — original from the zip
         # Remove-Item dist\Timestone.zip -Force
         New-Item -ItemType Directory -Path out -Force | Out-Null
-        Compress-Archive -Path dist\dinput8.dll, dist\Timestone.asi, dist\TimestoneUpdater.exe, dist\Timestone-THIRDPARTYNOTICES -DestinationPath out\Timestone.zip -CompressionLevel NoCompression
+        Compress-Archive -Path dist\dinput8.dll, dist\Timestone.asi, dist\TimestoneInstall.exe, dist\Timestone-THIRDPARTYNOTICES -DestinationPath out\Timestone.zip -CompressionLevel NoCompression
+        Copy-Item dist\TimestoneInstall.exe out\ -Force   # also published beside the zip
+        Copy-Item dist\TimestoneInstall.sh out\ -Force
 
+    # The installer is what a new player downloads and runs first, so the
+    # copy that is published (and the one inside the zip) must be the signed one.
+    - name: Check the published installer is signed
+      shell: pwsh
+      run: |
+        if ('${{ vars.ENABLE_SIGNING }}' -ne 'true') {
+          Write-Host "::warning title=Unsigned release::ENABLE_SIGNING is not 'true'; TimestoneInstall.exe and Timestone.asi are being published unsigned."
+          exit 0
+        }
+        Expand-Archive out\Timestone.zip -DestinationPath zipcheck -Force
+        foreach ($f in 'out\TimestoneInstall.exe', 'zipcheck\TimestoneInstall.exe') {
+          $sig = Get-AuthenticodeSignature $f
+          if ($sig.Status -ne 'Valid') {
+            throw "$f is not signed: $($sig.Status)"
+          }
+          Write-Host "Signed: $f cert=$($sig.SignerCertificate.Subject)"
+        }
 
     - name: Upload signed artifacts
       uses: actions/upload-artifact@v7
@@ -167,14 +190,21 @@ jobs:
       with:
         tag_name: ${{ needs.build.outputs.tag }}
         name: Timestone ${{ needs.build.outputs.tag }}
-        files: dist/Timestone.zip
+        files: |
+          dist/Timestone.zip
+          dist/TimestoneInstall.exe
+          dist/TimestoneInstall.sh
         body: |
           Please join the discord if you are going to test this!!!
           https://discord.gg/BvDNwPzwy4
 
           MAKE SURE YOU HAVE NO MODS INSTALLED WHEN PLAYING THIS
 
-          To install, extract the contents of Timestone.zip into your marvel folder
+          To install, download TimestoneInstall.exe and run it. It finds your Marvel 3 folder in Steam and puts the latest Timestone in it.
+          On Linux and Steam Deck, download TimestoneInstall.sh instead and run it in a terminal: sh TimestoneInstall.sh
+          It is the same installer as a native program, and it sets Proton up to load Timestone.
+
+          To install by hand instead, extract the contents of Timestone.zip into your marvel folder
 
           Go to your Marvel 3 install directory, 
           easiest way is go to Steam, right click Marvel 3, and select Manage -> Browse Local Files.
