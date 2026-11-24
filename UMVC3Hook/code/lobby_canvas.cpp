@@ -95,7 +95,13 @@ void BuildGenerated()
         else if (i == TEX_SPACE_STARS - TEX_ICON_FIRST)
             snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
                      "ui\\lic\\lic_flag_i\\lic_flag_germany_BM_HQ_NOMIP");
-        else if (i >= TEX_STAGE_FIRST - TEX_ICON_FIRST) {
+        else if (i == TEX_FACE_RANDOM - TEX_ICON_FIRST || i == TEX_FACE_RANDOM_ALL - TEX_ICON_FIRST) {
+            snprintf(g_generatedPaths[i], sizeof(g_generatedPaths[i]),
+                     "ui\\chs\\chs_face_a\\chs_cs_f\\f_Random%s_BM_HQ_NOMIP",
+                     i == TEX_FACE_RANDOM - TEX_ICON_FIRST ? "" : "_all");
+            g_generated[i] = TexInfo{g_generatedPaths[i], 128, 128, ARC_LOOSE, true};
+            continue;
+        } else if (i >= TEX_STAGE_FIRST - TEX_ICON_FIRST) {
             // Slot 0 is the RANDOM icon ("99", localized as typeC); the
             // second set of stages (ids 100 and up) is the "_b" art.
             const int stage = i - (TEX_STAGE_FIRST - TEX_ICON_FIRST);

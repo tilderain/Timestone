@@ -89,7 +89,8 @@ private:
         const TexInfo& info = GetTexInfo(tex);
         std::string path;
         for (const char* c = info.path; *c; ++c) path += *c == '\\' ? '/' : *c;
-        if (info.localized) path += info.archive == ARC_STAGE ? "_typeC" : "_typeD";
+        if (info.localized)
+            path += info.archive == ARC_STAGE || info.archive == ARC_LOOSE ? "_typeC" : "_typeD";
         char line[1024];
         snprintf(line, sizeof(line),
                  "{\"type\":\"%s\",\"tex\":\"%s\",\"pos\":[%.2f,%.2f],\"size\":[%.2f,%.2f],"

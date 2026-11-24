@@ -406,7 +406,9 @@ void* GetTexture(Tex tex)
         // The cards are "typeB" art: one for Japanese, "_other" for the rest.
         using Compose = void(__fastcall*)(int, const char*, char*, char);
         // The stage select's RANDOM icon is "typeC" art (mode 1).
-        const int mode = info.archive == ARC_BANNER ? 2 : info.archive == ARC_STAGE ? 1 : 3;
+        // ...and so are the roster's RANDOM cells, which are loose files.
+        const int mode = info.archive == ARC_BANNER ? 2
+            : info.archive == ARC_STAGE || info.archive == ARC_LOOSE ? 1 : 3;
         Native<Compose>(COMPOSE_LOCALIZED_NAME)(mode, info.path, path, 1);
     } else {
         snprintf(path, sizeof(path), "%s", info.path);

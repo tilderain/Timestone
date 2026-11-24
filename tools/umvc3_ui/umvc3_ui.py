@@ -186,7 +186,8 @@ def extract(game_dir, cache):
     faces = os.path.join(ui_dir, 'chs', 'chs_face_a', 'chs_cs_f')
     if os.path.isdir(faces):
         for name in sorted(os.listdir(faces)):
-            if not name.endswith('_BM_HQ_NOMIP.tex'):
+            # (and the roster's RANDOM cells, "typeC" art; the plain name is English)
+            if not name.endswith(('_BM_HQ_NOMIP.tex', '_BM_HQ_NOMIP_typeC.tex')):
                 continue
             try:
                 image = tex_decode(open(os.path.join(faces, name), 'rb').read())

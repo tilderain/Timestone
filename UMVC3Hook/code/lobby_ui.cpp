@@ -359,23 +359,14 @@ void DrawPingWithNumber(const Painter& p, float x, float y, int pingMs, float sc
 }
 
 // A team member's select-screen face in a box `w` wide, anchored A_TC or
-// A_MC. A random member is the stage select's RANDOM icon, centred in the
-// same box; the one drawn again for every game has "ALL" written across it.
+// A_MC. A random member is the select screen's own roster cell for it: RANDOM,
+// or RANDOM ALL for the one drawn again for every game.
 void DrawFace(const Painter& p, int32_t id, int color, float x, float y, float w, Anchor anchor,
               Color tint = kWhite)
 {
-    if (!IsRandomMember(id)) {
-        p.Sprite(CharacterFace(id, color), x, y, w, w * kFaceAspect, kFaceUv, anchor, tint);
-        return;
-    }
-    const float cy = anchor == A_TC ? y + w * kFaceAspect * 0.5f : y;
-    p.Sprite(TEX_STAGE_FIRST, x, cy, w, w * kStageIconAspect, kStageIconUv, A_MC, tint);
-    if (id == kCharRandomAll) {
-        const float tagY = cy + w * kStageIconAspect * 0.27f, tagH = w * 0.2f;
-        p.Fill(x - w * 0.27f, tagY - tagH * 0.5f, w * 0.54f, tagH,
-               Color{0.0f, 0.0f, 0.0f, 0.8f * tint.a});
-        p.Text("ALL", x, tagY, w * 0.0058f, A_MC, WithAlpha(kYellow, tint.a));
-    }
+    const Tex face = id == kCharRandomAll ? TEX_FACE_RANDOM_ALL
+                   : IsRandomMember(id) ? TEX_FACE_RANDOM : CharacterFace(id, color);
+    p.Sprite(face, x, y, w, w * kFaceAspect, kFaceUv, anchor, tint);
 }
 
 const char* CharacterLabel(const RosterSource& roster, int32_t id)
@@ -3363,11 +3354,12 @@ void LobbyUi::DrawTeamBanners(Canvas& canvas, float x, float y, float w) const
         // wanted; until it is in, its place is a dark plate.
         p.Fill(cardX, y, cardW, cardH, Color{0.0f, 0.0f, 0.0f, 0.6f});
         if (IsRandomMember(character)) {
-            // No card to show until the match draws one: the RANDOM icon on
-            // the plate, and its name where the assist would be.
-            const float iconH = cardH * 0.72f;
-            p.Sprite(TEX_STAGE_FIRST, cardX + cardW * 0.5f, y + cardH * 0.5f,
-                     iconH / kStageIconAspect, iconH, kStageIconUv, A_MC);
+            // No card to show until the match draws one: the select
+            // screen's RANDOM / RANDOM ALL cell on the plate, and its name
+            // where the assist would be.
+            const float iconH = cardH * 0.86f;
+            DrawFace(p, character, 0, cardX + cardW * 0.5f, y + cardH * 0.5f, iconH / kFaceAspect,
+                     A_MC);
             p.Text(CharacterLabel(roster_, character), cardX + cardW * 0.5f, y + cardH + 16.0f,
                    0.56f, A_MC, kDim);
             continue;
