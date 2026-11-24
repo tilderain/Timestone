@@ -1229,6 +1229,10 @@ void InstallMainMenuHooks()
 // press (0x1402B42C0). The press-start screen normally maps player 0 to
 // whichever pad pressed Start; the lobby skips it, so do the same here for
 // whichever pad is being used.
+// Not a pad that belongs to another player: one paired as player 2 for local
+// versus (u2PCtrlSelect__move) stays player 2's, as it does in the game,
+// whatever is pressed on it here. Otherwise the second player touching their
+// pad on this menu swapped the two sides.
 void FollowActivePad()
 {
     const uint64_t manager = *reinterpret_cast<uint64_t*>(_addr(SMVC3MANAGER_INSTANCE_PTR));
@@ -1240,9 +1244,7 @@ void FollowActivePad()
         const bool active = slotObject[0x08] != 0;
         const uint32_t pressed = *reinterpret_cast<const uint32_t*>(slotObject + 0x16C);
         if (!active || !pressed || assign[0] == slot) continue;
-        // Same exchange as the game's own assignment (0x14025B090).
-        for (int i = 1; i < 4; ++i)
-            if (assign[i] == slot) assign[i] = assign[0];
+        if (assign[1] == slot || assign[2] == slot || assign[3] == slot) continue;
         HookLog("LobbyFlow: player 1 menu input moved from pad slot %d to %d\n", assign[0], slot);
         assign[0] = slot;
         return;
@@ -1254,11 +1256,16 @@ void ApplyPressStartState()
     if (const uint64_t manager = *reinterpret_cast<uint64_t*>(_addr(SMVC3MANAGER_INSTANCE_PTR))) {
         int32_t* assign = reinterpret_cast<int32_t*>(manager + MANAGER_PAD_ASSIGN);
         // Keyboard input is routed through whichever slot player 0 maps to.
-        if (assign[0] < 0 || assign[0] > 3) {
-            for (int i = 1; i < 4; ++i)
-                if (assign[i] == 0) assign[i] = assign[0];
-            assign[0] = 0;
-        }
+        if (assign[0] < 0 || assign[0] > 3) assign[0] = 0;
+        // The press-start screen leaves only player 1 with a pad
+        // (uMenuTitle__setup empties the table, sMvc3Manager__resetPadIds).
+        // A netplay match maps slots 0 and 1 to both players (TrainingBoot),
+        // and offline the game takes "player 2 has a pad" for a second local
+        // player: the 2P controller prompt is skipped (u2PCtrlSelect__setup),
+        // player 2's side of the select screen and its characters are read
+        // from that pad (cChrInput__processFrameInput), and training offers
+        // its player 2 options.
+        for (int i = 1; i < 4; ++i) assign[i] = -1;
     }
     if (const uint64_t pad = *reinterpret_cast<uint64_t*>(_addr(SPAD_INSTANCE_PTR))) {
         *reinterpret_cast<uint8_t*>(pad + SPAD_KEYBOARD_BLOCKED_1) = 0;

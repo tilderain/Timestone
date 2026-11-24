@@ -173,6 +173,11 @@ connected player-2 device. `SetupPadToPlayerMapping` currently:
 - On a netplay client, copies both resolved P1 gameplay binding tables to P2
   through the native `sGameConfig` setters before P2 input is transmitted.
 
+That mapping does not outlive the match: back at the lobby or the main menu,
+`ApplyPressStartState` (lobby_flow.cpp) clears players 2 to 4 again, the state
+the press-start screen leaves. See
+[the lobby notes](native_lobby_ui.md) for what the offline menus read from it.
+
 Training boot must not call
 `sPad__Map__resetDefaultTranslation @ 0x1405142A0` after startup. `sPad::PadSlot`
 already calls it from its constructor. The function writes the fixed default
