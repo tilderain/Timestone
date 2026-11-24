@@ -118,11 +118,8 @@ const char* const kTopHelp[] = {
 constexpr int kTopCount = 4;
 const char kDiscordSetupQuestion[] =
     "Show what you are doing in Timestone on your Discord status?\n"
-    "People who can see your Discord activity (friends, and servers you share it with) "
-    "would see your lobby, opponent, characters, score and match time, and could join "
-    "public lobbies.\n"
-    "Timestone only looks for the Discord app if you choose YES. Change it any time "
-    "in Settings (F3 offline, Esc in a match).";
+    "Change it any time in Settings (F3 / Esc menu)\n"
+    "Your Discord status is never shared with Timestone. Discord must be running.";
 
 const char* const kSlotMenuItems[] = {"JOIN QUEUE & SPECTATE", "JOIN QUEUE", "SPECTATE ONLY"};
 constexpr int kSlotMenuCount = 3;
