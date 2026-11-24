@@ -42,6 +42,41 @@ SignalHandler g_previousAbortHandler = SIG_DFL;
 bool g_abortHandlerInstalled = false;
 volatile LONG g_crashInFlight = 0;
 
+// Exception_RunGuarded: the slot holds the running thread's jump buffer while
+// a guarded call is in progress. A plain TLS slot, not thread_local: the
+// handler reads it on every first-chance exception of every thread, and
+// thread_local here allocates on a thread's first use.
+DWORD g_guardSlot = TLS_OUT_OF_INDEXES;
+
+[[noreturn]] __attribute__((noinline)) void GuardLanding(void** buffer)
+{
+    __builtin_longjmp(buffer, 1);
+}
+
+// A fault inside a guarded call resumes the thread in GuardLanding, which
+// jumps back out of the call. True when the exception was one of those.
+bool ResumeGuardedCall(PEXCEPTION_POINTERS info)
+{
+    if (g_guardSlot == TLS_OUT_OF_INDEXES || !info || !info->ExceptionRecord ||
+        !info->ContextRecord)
+        return false;
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_DATATYPE_MISALIGNMENT && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code != EXCEPTION_PRIV_INSTRUCTION)
+        return false;
+    void* buffer = TlsGetValue(g_guardSlot);
+    if (!buffer) return false;
+    TlsSetValue(g_guardSlot, nullptr);
+    CONTEXT* context = info->ContextRecord;
+    // As at a function's first instruction: below everything the faulting
+    // code had on its stack, 8 off a 16-byte boundary, home space above.
+    context->Rsp = (context->Rsp & ~static_cast<DWORD64>(15)) - 0x38;
+    context->Rcx = reinterpret_cast<DWORD64>(buffer);
+    context->Rip = reinterpret_cast<DWORD64>(&GuardLanding);
+    return true;
+}
+
 constexpr uintptr_t kPreferredImageBase = 0x140000000;
 constexpr uintptr_t kSCharacterPointer = 0x140D44A70;
 constexpr uintptr_t kTeam0Offset = 0x40;
@@ -1176,6 +1211,7 @@ void AbortSignalHandler(int signal)
 
 LONG CALLBACK VectoredExceptionHandler(PEXCEPTION_POINTERS info)
 {
+    if (ResumeGuardedCall(info)) return EXCEPTION_CONTINUE_EXECUTION;
     return HandleException(info, true);
 }
 
@@ -1190,12 +1226,30 @@ LONG WINAPI UnhandledExceptionHandler(PEXCEPTION_POINTERS info)
 
 } // namespace
 
+__attribute__((noinline)) bool Exception_RunGuarded(void (*function)(void*), void* argument)
+{
+    // Without the handler (or nested in another guarded call) a fault is an
+    // ordinary crash, as before.
+    if (!g_exceptionHandler || g_guardSlot == TLS_OUT_OF_INDEXES ||
+        TlsGetValue(g_guardSlot)) {
+        function(argument);
+        return true;
+    }
+    void* buffer[5];
+    if (__builtin_setjmp(buffer)) return false;
+    TlsSetValue(g_guardSlot, buffer);
+    function(argument);
+    TlsSetValue(g_guardSlot, nullptr);
+    return true;
+}
+
 void Exception_InstallHandler()
 {
     if (g_exceptionHandler || g_unhandledExceptionFilterInstalled || g_abortHandlerInstalled)
         return;
 
     g_crashInFlight = 0;
+    if (g_guardSlot == TLS_OUT_OF_INDEXES) g_guardSlot = TlsAlloc();
     g_exceptionHandler = AddVectoredExceptionHandler(1, VectoredExceptionHandler);
     g_previousUnhandledExceptionFilter =
         SetUnhandledExceptionFilter(UnhandledExceptionHandler);

@@ -5,6 +5,7 @@
 #include "d3d9reset.h"
 #include "shader_constants.h"
 #include "d3d9ex.h"
+#include "exception.h"
 
 #include "mk10utils.h"
 #include "framestepper.h"
@@ -989,6 +990,68 @@ const char* NearestExport(HMODULE module, uintptr_t address, uintptr_t* distance
     return best;
 }
 
+struct ThreadStackWalk {
+    CONTEXT context;
+    uintptr_t stackLow;
+    uintptr_t stackHigh;
+    uintptr_t frames[40];
+    volatile int count;
+};
+
+// The stack range of a thread of this process, from its TEB. False when it
+// cannot be read; the walk then relies on the fault guard alone.
+bool ThreadStackRange(HANDLE thread, uintptr_t* low, uintptr_t* high)
+{
+    using Query = LONG (__stdcall*)(HANDLE, int, void*, ULONG, ULONG*);
+    static const Query query = reinterpret_cast<Query>(
+        GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread"));
+    struct {
+        LONG exitStatus;
+        void* teb;
+        void* process;
+        void* thread;
+        uintptr_t affinity;
+        LONG priority;
+        LONG basePriority;
+    } basic = {};
+    if (!query || query(thread, 0 /* ThreadBasicInformation */, &basic, sizeof(basic), nullptr) < 0 ||
+        !basic.teb || IsBadReadPtr(basic.teb, sizeof(NT_TIB)))
+        return false;
+    const NT_TIB* tib = static_cast<const NT_TIB*>(basic.teb);
+    *low = reinterpret_cast<uintptr_t>(tib->StackLimit);
+    *high = reinterpret_cast<uintptr_t>(tib->StackBase);
+    return *low < *high;
+}
+
+// Walks a stopped thread's stack. A thread stopped at an arbitrary
+// instruction can leave the unwinder with a stack pointer that is not one
+// (0.6.6 died this way in ntdll, closing the window): every step is checked
+// against the thread's stack, and the caller runs this under the fault guard.
+void WalkThreadStack(void* argument)
+{
+    ThreadStackWalk& walk = *static_cast<ThreadStackWalk*>(argument);
+    CONTEXT& context = walk.context;
+    while (walk.count < 40 && context.Rip) {
+        walk.frames[walk.count] = static_cast<uintptr_t>(context.Rip);
+        walk.count = walk.count + 1;
+        if ((context.Rsp & 7) || context.Rsp < walk.stackLow ||
+            context.Rsp > walk.stackHigh - 8)
+            break;
+        DWORD64 imageBase = 0;
+        PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+        if (function) {
+            void* handlerData = nullptr;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, function,
+                             &context, &handlerData, &establisher, nullptr);
+        } else {
+            // Leaf function: the return address is at the stack top.
+            context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp);
+            context.Rsp += 8;
+        }
+    }
+}
+
 // Logs where a thread is, as module+offset frames. The thread is suspended
 // only while its stack is walked into a local array: it may be holding the
 // log or heap lock, so nothing is logged or allocated until it runs again.
@@ -1001,34 +1064,22 @@ void LogThreadBacktrace(DWORD threadId, const char* label)
         HookLog("D3D9: %s backtrace unavailable (OpenThread error=%lu)\n", label, GetLastError());
         return;
     }
-    uintptr_t frames[40] = {};
-    int count = 0;
+    ThreadStackWalk walk = {};
+    walk.stackHigh = ~static_cast<uintptr_t>(0);
+    ThreadStackRange(thread, &walk.stackLow, &walk.stackHigh);
+    bool complete = true;
     if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
-        CONTEXT context = {};
-        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-        if (GetThreadContext(thread, &context)) {
-            while (count < 40 && context.Rip) {
-                frames[count++] = static_cast<uintptr_t>(context.Rip);
-                DWORD64 imageBase = 0;
-                PRUNTIME_FUNCTION function =
-                    RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
-                if (function) {
-                    void* handlerData = nullptr;
-                    DWORD64 establisher = 0;
-                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, function,
-                                     &context, &handlerData, &establisher, nullptr);
-                } else {
-                    // Leaf function: the return address is at the stack top.
-                    if (IsBadReadPtr(reinterpret_cast<void*>(context.Rsp), 8)) break;
-                    context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp);
-                    context.Rsp += 8;
-                }
-            }
-        }
+        walk.context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (GetThreadContext(thread, &walk.context))
+            complete = Exception_RunGuarded(WalkThreadStack, &walk);
         ResumeThread(thread);
     }
     CloseHandle(thread);
+    const uintptr_t* frames = walk.frames;
+    const int count = walk.count;
 
+    if (!complete)
+        HookLog("D3D9: %s thread %lu: the stack walk faulted and was cut short\n", label, threadId);
     HookLog("D3D9: %s thread %lu is at (%d frames):\n", label, threadId, count);
     for (int i = 0; i < count; ++i) {
         HMODULE module = nullptr;
