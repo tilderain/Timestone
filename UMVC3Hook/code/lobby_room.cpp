@@ -99,17 +99,17 @@ void EncodeMember(char* out, size_t size, int slot, int side, bool ready, Member
                   bool accepted, int delayPick, const Team& team, int wins, int losses,
                   int setWins, int queueSlot, uint32_t queueSeq, int delayHover,
                   const uint8_t health[3], int watchSlot, uint32_t watchSeq, uint64_t upstream,
-                  int setFormat)
+                  int setFormat, bool selecting)
 {
     snprintf(out, size,
-             "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u|%d",
+             "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u|%d|%d",
              kMemberVersion, slot, side, ready ? 1 : 0, static_cast<int>(status),
              accepted ? 1 : 0, delayPick,
              team.chars[0], team.chars[1], team.chars[2], team.assists[0], team.assists[1],
              team.assists[2], team.colors[0], team.colors[1], team.colors[2], wins, losses,
              setWins, queueSlot, queueSeq, delayHover, health[0], health[1], health[2],
              watchSlot, watchSeq, static_cast<unsigned>(upstream >> 32),
-             static_cast<unsigned>(upstream & 0xFFFFFFFFu), setFormat);
+             static_cast<unsigned>(upstream & 0xFFFFFFFFu), setFormat, selecting ? 1 : 0);
 }
 
 bool DecodeMember(const char* text, Member& member)
@@ -121,16 +121,17 @@ bool DecodeMember(const char* text, Member& member)
     int watchSlot = -1;
     unsigned watchSeq = 0;
     unsigned upstreamHigh = 0, upstreamLow = 0;
-    int setFormat = 0; // last and optional: builds before it do not send one
+    int setFormat = 0; // optional: builds before it do not send one
+    int selecting = 0; // last and optional, likewise
     Team team = {};
-    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u|%d", &version,
+    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u|%d|%d", &version,
                         &slot, &side, &ready, &status, &accepted, &delayPick, &team.chars[0],
                         &team.chars[1],
                         &team.chars[2], &team.assists[0], &team.assists[1], &team.assists[2],
                         &team.colors[0], &team.colors[1], &team.colors[2], &wins, &losses,
                         &setWins, &queueSlot, &queueSeq, &delayHover, &health[0], &health[1],
                         &health[2], &watchSlot, &watchSeq, &upstreamHigh, &upstreamLow,
-                        &setFormat) < 29)
+                        &setFormat, &selecting) < 29)
         return false;
     if (version != kMemberVersion) return false;
     if (slot < -1 || slot >= kMaxSlots || side < 0 || side > 2 || status < 0 ||
@@ -142,6 +143,9 @@ bool DecodeMember(const char* text, Member& member)
     member.ready = ready != 0;
     member.status = static_cast<MemberStatus>(status);
     member.accepted = accepted != 0;
+    // Only someone seated and not yet fighting can be picking.
+    member.selecting = selecting != 0 && slot >= 0 && side < 2 &&
+                       status != static_cast<int>(MemberStatus::Fighting);
     member.delayPick = static_cast<int8_t>(delayPick);
     member.delayHover = static_cast<int8_t>(
         delayHover < kDelayPickNone || delayHover > kMaxDelayPick ? kDelayPickNone : delayHover);
@@ -457,7 +461,7 @@ void SteamRoomService::PublishLocal()
                  local_.accepted, local_.delayPick, local_.team, local_.wins, local_.losses,
                  local_.setWins, local_.queueSlot, local_.queueSeq, local_.delayHover,
                  local_.health, local_.watchSlot, local_.watchSeq, local_.upstream,
-                 local_.setFormat);
+                 local_.setFormat, local_.selecting);
     SteamRoom_SetLocalData(kMemberKey, encoded);
     publishedOnce_ = true;
 }
@@ -684,6 +688,14 @@ void SteamRoomService::SetLocalStatus(MemberStatus status)
 {
     if (local_.status == status) return;
     local_.status = status;
+    PublishLocal();
+    RefreshRoom();
+}
+
+void SteamRoomService::SetSelecting(bool selecting)
+{
+    if (local_.selecting == selecting) return;
+    local_.selecting = selecting;
     PublishLocal();
     RefreshRoom();
 }
@@ -923,6 +935,8 @@ void SteamRoomService::RefreshRoom()
             member.ready = local_.ready;
             member.status = local_.status;
             member.accepted = local_.accepted;
+            member.selecting = local_.selecting && local_.slot >= 0 &&
+                               local_.status != MemberStatus::Fighting;
             member.delayPick = static_cast<int8_t>(local_.delayPick);
             member.delayHover = static_cast<int8_t>(local_.delayHover);
             member.team = local_.team;
@@ -1040,16 +1054,18 @@ void SteamRoomService::RefreshRoom()
 
     bool anyLive = false;
     for (int slot = 0; slot < next.settings.slotCount; ++slot) {
-        int seated = 0, ready = 0, fighting = 0;
+        int seated = 0, ready = 0, fighting = 0, selecting = 0;
         for (int i = 0; i < next.memberCount; ++i) {
             const Member& member = next.members[i];
             if (member.slot != slot || member.side > 1) continue;
             ++seated;
             ready += member.ready ? 1 : 0;
             fighting += member.status == MemberStatus::Fighting ? 1 : 0;
+            selecting += member.selecting ? 1 : 0;
         }
+        // Both on the character select is a match on its way, as both ready is.
         next.slots[slot] = fighting == 2 ? SlotState::InProgress
-                         : seated == 2 && ready == 2 ? SlotState::Starting
+                         : seated == 2 && (ready == 2 || selecting == 2) ? SlotState::Starting
                          : seated == 2 ? SlotState::Standby
                          : seated == 1 ? SlotState::Waiting : SlotState::Open;
         anyLive |= next.slots[slot] == SlotState::InProgress;

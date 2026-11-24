@@ -42,6 +42,10 @@ void Spectate_RecRestart(uint32_t restartSeed);
 // player 1). Each player records both sides: its own and the one it is sent.
 void Spectate_RecSelectBegin();
 void Spectate_RecSelect(int team, const CharSelPacket& packet);
+// The same for the select screen a match is started from, before its first
+// game: recording begins here (Spectate_RecBegin at the launch then goes on
+// from it), and Spectate_RecEnd with no game played says it was backed out of.
+void Spectate_RecPreSelectBegin();
 
 // --- Watching ------------------------------------------------------------------
 enum class SpectateState : uint8_t {
@@ -79,6 +83,13 @@ enum class SpectateStep : uint8_t {
 SpectateStep Spectate_Next(int32_t frame, int32_t actionStep, int32_t* fastForward);
 bool Spectate_GetRestart(TrainingBootConfig* config, uint32_t* restartSeed);
 void Spectate_OnRestartApplied();
+// Joining, and the players are on the select screen their match starts from:
+// the spectator can go there too (then Spectate_OnPreSelectApplied). The
+// screen is left through Spectate_TakeLaunch when the first game is there,
+// or Spectate_PreSelectEnded when the players backed out.
+bool Spectate_PreSelectOpen();
+void Spectate_OnPreSelectApplied();
+bool Spectate_PreSelectEnded();
 // The local game has left the battle for the select screen. From here:
 // a team's side of the screen as the feed last had it (`version` changes
 // with it), and how the screen ends.
@@ -110,6 +121,7 @@ struct SpectateRoomMember {
     uint64_t id;
     int8_t slot;        // seated at, -1 if none
     bool fighting;
+    bool selecting;     // on the character select their match starts from
     int8_t watchSlot;   // watching, -1 if none
     uint32_t watchSeq;
     uint64_t upstream;  // who feeds them

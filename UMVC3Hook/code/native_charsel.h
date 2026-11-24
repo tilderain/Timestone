@@ -26,6 +26,8 @@ struct Config {
     // The team in use, with no random members left: what the clock running
     // out falls back to. Nothing is picked in advance on the screen.
     lobby::Team team;
+    // Members of `team` (bits 0..2) that stand for RANDOM ALL.
+    uint8_t teamRandomMask;
     uint32_t seconds;      // time to pick a team
     uint32_t stageSeconds; // time the picking player has for the stage
     // A spectator's screen: neither team is the local player's. Both are
@@ -70,6 +72,12 @@ bool RemoteLockedIn();
 // Valid once the respective side is locked in.
 lobby::Team LocalTeam();
 lobby::Team RemoteTeam();
+// Members (bits 0..2) the respective player left to RANDOM ALL: on the
+// screen's own RANDOM ALL cell, or in the preset or fallback team put in.
+// The characters shown are this game's draw; the caller draws again for
+// each later game of the set.
+uint8_t LocalRandomMask();
+uint8_t RemoteRandomMask();
 // Both teams are complete, on a player's screen or a spectator's.
 bool AllLockedIn();
 // Seconds left to pick.
@@ -100,8 +108,10 @@ void OnTeamPacket(int team, const CharSelPacket& packet);
 bool CanPickPreset();
 // While set, the local side takes no input: the list is on top of it.
 void SetPresetListOpen(bool open);
-// Puts a whole team (no random members) on the local side and completes it.
-bool ApplyLocalTeam(const lobby::Team& team);
+// Puts a whole team (no random members left in it) on the local side and
+// completes it. `randomMask`: the members that were RANDOM ALL before the
+// caller drew them.
+bool ApplyLocalTeam(const lobby::Team& team, uint8_t randomMask);
 
 // True for a character both the game and this build can put in a match.
 bool IsSelectableCharacter(int32_t characterId);

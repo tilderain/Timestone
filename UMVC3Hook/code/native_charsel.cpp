@@ -106,6 +106,9 @@ constexpr int kSelectableTableSize = 60;
 // and in versus it has two rows of match options under the stage.
 constexpr size_t MENU_STAGE_PAGE = 0xF8;    // uMenuChrSelOption*
 constexpr size_t MENU_STAGE_SELECT = 0x2C0; // the team whose "complete" opens the page
+// Set by picking the roster's RANDOM ALL cell (slotState246): from the member
+// being picked on, the screen draws each one itself. Cleared by a step back.
+constexpr size_t MENU_RAND_ALL = 0x2C4;     // uint8_t[2]
 // Frames each team has been "complete". Team 0's handler waits for both to
 // pass 5, and each only counts in its own handler.
 constexpr size_t MENU_WAIT_COUNT = 0x2CC;   // float[2]
@@ -213,6 +216,14 @@ struct Session {
     bool presetListOpen = false;
     bool teamPending = false; // ApplyLocalTeam: put in at the next tick
     Team pendingTeam = {};
+    uint8_t pendingRandomMask = 0;
+    // RANDOM ALL on the local side: the first member it covers while the
+    // screen's own flag is up (-1 otherwise), and what the locked-in team
+    // ends with. A team put in whole brings its own mask.
+    int randomFrom = -1;
+    uint8_t localRandomMask = 0;
+    bool randomMaskGiven = false;
+    uint8_t remoteRandomMask[2] = {};
     Team localTeam = {};
     CharSelPacket local = {};
     bool localValid = false;
@@ -332,6 +343,7 @@ bool IsValidPeerPacket(const CharSelPacket& packet)
         return false;
     if ((packet.flags & CHARSEL_LOCKED_IN) && state != kStateTeamComplete) return false;
     if (packet.stageCursor >= kStagePositions || packet.coin > 1) return false;
+    if (packet.randomMask > 7) return false;
     if ((packet.flags & CHARSEL_STAGE_DECIDED) &&
         (!(packet.flags & CHARSEL_LOCKED_IN) || !IsValidStage(packet.stageId)))
         return false;
@@ -650,7 +662,7 @@ void PlayTeamCompleteSounds(int team)
 // Puts a whole team on the local side through the game's own reserve-unit
 // path (uMenuChrSel__commitCharSelectionForSlot): all three records, the
 // card, the archives, and the slot at "team complete".
-void CommitLocalTeam(void* menu, const Team& team)
+void CommitLocalTeam(void* menu, const Team& team, uint8_t randomMask)
 {
     void* gameUi = Instance(SGAMEUI_GET_INSTANCE);
     if (!gameUi || !IsValidTeam(team)) {
@@ -665,6 +677,8 @@ void CommitLocalTeam(void* menu, const Team& team)
             Native<Close>(ASSIST_CLOSE)(widget);
         }
     }
+    g.localRandomMask = randomMask & 7;
+    g.randomMaskGiven = true;
     g.overrideTeam = team;
     g.commitOverride = true;
     using Commit = void(__fastcall*)(void*, uint32_t, int32_t);
@@ -723,7 +737,16 @@ void ReadLocalSide(void* menu)
             packet.assistHover = std::min<uint8_t>(Field<uint8_t>(widget, ASSIST_HIGHLIGHT), 2);
     }
 
+    // RANDOM ALL picked on the roster: it covers the member being picked when
+    // the flag went up and every one after it.
+    if (!g.localLocked && state < kStateTeamComplete) {
+        if (!Field<uint8_t>(menu, MENU_RAND_ALL + local)) g.randomFrom = -1;
+        else if (g.randomFrom < 0) g.randomFrom = PickedCount(state);
+    }
     if (state == kStateTeamComplete && !g.localLocked) {
+        if (!g.randomMaskGiven)
+            g.localRandomMask = g.randomFrom >= 0 && g.randomFrom < 3
+                ? static_cast<uint8_t>((7u << g.randomFrom) & 7u) : 0;
         Team team = {};
         for (int member = 0; member < 3; ++member) {
             team.chars[member] = packet.chars[member];
@@ -741,6 +764,7 @@ void ReadLocalSide(void* menu)
             HookLog("NativeCharSel: the screen completed a team that is not valid (%d/%d/%d); "
                     "the team in use is played\n", team.chars[0], team.chars[1], team.chars[2]);
             team = g.config.team;
+            g.localRandomMask = g.config.teamRandomMask & 7;
             for (int member = 0; member < 3; ++member) {
                 packet.chars[member] = team.chars[member];
                 packet.colors[member] = team.colors[member];
@@ -758,6 +782,7 @@ void ReadLocalSide(void* menu)
         // whatever the screen holds.
         packet.slotState = kStateTeamComplete;
         packet.flags |= CHARSEL_LOCKED_IN;
+        packet.randomMask = g.localRandomMask;
         for (int member = 0; member < 3; ++member) {
             packet.chars[member] = g.localTeam.chars[member];
             packet.colors[member] = g.localTeam.colors[member];
@@ -823,11 +848,11 @@ void BeforeTick(void* menu)
     if (!g.localLocked && state >= 2 && state < kStateTeamComplete) {
         if (g.teamPending) {
             g.teamPending = false;
-            CommitLocalTeam(menu, g.pendingTeam);
+            CommitLocalTeam(menu, g.pendingTeam, g.pendingRandomMask);
         } else if (now >= g.deadlineTick) {
             HookLog("NativeCharSel: out of time; the team in use goes in\n");
             g.presetListOpen = false;
-            CommitLocalTeam(menu, g.config.team);
+            CommitLocalTeam(menu, g.config.team, g.config.teamRandomMask);
         }
     }
 }
@@ -1229,6 +1254,12 @@ bool LocalLockedIn() { return g.active && !Watching() && g.localLocked; }
 bool RemoteLockedIn() { return g.active && !Watching() && g.remoteLocked[1 - g.config.localTeam]; }
 Team LocalTeam() { return g.localTeam; }
 Team RemoteTeam() { return g.remoteTeam[1 - g.config.localTeam]; }
+uint8_t LocalRandomMask() { return g.localLocked ? g.localRandomMask : 0; }
+uint8_t RemoteRandomMask()
+{
+    const int team = 1 - g.config.localTeam;
+    return g.remoteLocked[team] ? g.remoteRandomMask[team] : 0;
+}
 bool AllLockedIn() { return g.active && TeamLocked(0) && TeamLocked(1); }
 
 uint32_t SecondsLeft()
@@ -1338,6 +1369,7 @@ void OnTeamPacket(int team, const CharSelPacket& received)
             g.remoteTeam[team].assists[member] = packet.assists[member];
         }
         g.remoteLocked[team] = true;
+        g.remoteRandomMask[team] = packet.randomMask & 7;
         g.coin[team] = packet.coin; // fixed here; later ones are not looked at
         HookLog("NativeCharSel: team %d locked in from its owner: %d/%d/%d\n", team,
                 packet.chars[0], packet.chars[1], packet.chars[2]);
@@ -1358,12 +1390,13 @@ void SetPresetListOpen(bool open)
     if (g.active) g.presetListOpen = open;
 }
 
-bool ApplyLocalTeam(const Team& team)
+bool ApplyLocalTeam(const Team& team, uint8_t randomMask)
 {
     if (!g.active || Watching() || g.status != Status::Selecting || g.localLocked ||
         !IsValidTeam(team))
         return false;
     g.pendingTeam = team;
+    g.pendingRandomMask = randomMask & 7;
     g.teamPending = true;
     return true;
 }

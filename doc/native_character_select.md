@@ -777,3 +777,24 @@ Still unread, and needed before writing it:
 - Not covered: the select opened from the room's start prompt is not sent to
   spectators (no game is being watched yet), and a spectator does not see the
   players' result-menu choices.
+
+## Spectators on the select a match starts from (built 2026-11-24, not run)
+
+- Room: a member record has an optional last field, `selecting`, set by the
+  two players while they are on the screen opened from the start prompt
+  (`SteamRoomService::SetSelecting`). A slot whose two players are both
+  selecting is `SlotState::Starting`, as with both ready, so a room member
+  who asked to watch that setup starts joining (`UpdateSpectateJoin`), and a
+  selecting player counts as a feed source (`ChooseUpstream`).
+- Feed: `MSG_SELECT` with game 0 is the screen before any game
+  (`SelectState::pre`). It is served while the log has no game; `team` 3
+  says the players backed out. Recording starts at `BeginCharSelect`
+  (`Spectate_RecPreSelectBegin`) and the launch's `Spectate_RecBegin` goes on
+  from it.
+- Spectator: joining, with `Spectate_PreSelectOpen`, `BeginWatchSelect` opens
+  the screen in watch mode from the room and `WatchSelectFrame` runs it from
+  the game tick. `Spectate_TakeLaunch` (the first game's configuration)
+  starts the ordinary spectator launch, and the battle is booted from the
+  select area when the local versus sequence is through or 12 s later.
+  Backing out by the players, the slot no longer starting for 4 s, a seat
+  from a queue or the cancel button returns to the room.

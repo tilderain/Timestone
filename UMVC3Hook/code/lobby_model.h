@@ -106,6 +106,10 @@ struct Member {
     // Pre-match steps with the player in the opposite seat, in order:
     // accepted the match, picked an input delay, then `ready` (team settled).
     bool accepted;
+    // On the shared character select with the player in the opposite seat
+    // (native_charsel.h). A slot whose two players are both there counts as
+    // starting, which is what lets the room's spectators follow them in.
+    bool selecting;
     int8_t delayPick;
     int8_t delayHover; // what they have highlighted while still choosing
     Team team;

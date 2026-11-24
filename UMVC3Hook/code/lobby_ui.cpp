@@ -3636,9 +3636,9 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         DrawCharPicker(canvas);
         const int32_t highlighted = PickerCharacter(charPickerCursor_);
         return matchClock(highlighted == kCharRandom
-                              ? "A random character, drawn once for the whole set."
+                              ? "Randoms character once per set."
                               : highlighted == kCharRandomAll
-                                    ? "A random character, drawn again for every match of the set."
+                                    ? "Randoms every single match. Money match me!!"
                                     : "Choose a character.");
     }
     if (colorPickerOpen_) {

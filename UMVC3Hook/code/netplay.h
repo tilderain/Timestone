@@ -116,7 +116,10 @@ struct CharSelPacket {
     // Who picks the stage is a coin toss: each player sends one bit, chosen
     // when they open the screen, and the two are XORed (0 = player 1).
     uint8_t  coin;
-    uint8_t  reserved[2];
+    // With CHARSEL_LOCKED_IN: the team members (bits 0..2) that were left to
+    // RANDOM ALL. They are drawn again for every game of the set.
+    uint8_t  randomMask;
+    uint8_t  reserved;
     int32_t  stageId;            // the stage, once CHARSEL_STAGE_DECIDED
 };
 
