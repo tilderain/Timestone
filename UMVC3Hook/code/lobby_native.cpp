@@ -1014,6 +1014,40 @@ KeyState ReadKeyboard(bool textActive)
     return keys;
 }
 
+// The clipboard's text, as if typed: its first line, without control
+// characters. What the field cannot take (length, glyphs) is left to it.
+void AppendClipboardText(char* out, size_t capacity)
+{
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenClipboard(nullptr)) return;
+    if (HANDLE handle = GetClipboardData(CF_UNICODETEXT)) {
+        if (const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(handle))) {
+            const size_t units = GlobalSize(handle) / sizeof(wchar_t);
+            bool any = false;
+            for (size_t i = 0; i < units && text[i]; ++i) {
+                uint32_t unit = text[i];
+                if (unit == L'\r' || unit == L'\n') {
+                    if (any) break;
+                    continue;
+                }
+                if (unit == L'\t') unit = L' ';
+                if (unit < 0x20 || unit == 0x7F) continue;
+                if (unit >= 0xD800 && unit <= 0xDBFF) {
+                    const uint32_t low = i + 1 < units ? text[i + 1] : 0;
+                    if (low < 0xDC00 || low > 0xDFFF) continue;
+                    unit = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+                    ++i;
+                } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+                    continue;
+                }
+                AppendUtf8(out, capacity, unit);
+                any = true;
+            }
+            GlobalUnlock(handle);
+        }
+    }
+    CloseClipboard();
+}
+
 void CollectTypedText(bool textActive, bool foreground)
 {
     g_typed[0] = '\0';
@@ -1048,6 +1082,16 @@ void CollectTypedText(bool textActive, bool foreground)
         g_textKeysPrimed = true;
         for (int vk = 0; vk < 256; ++vk) g_previousKeys[vk] = IsKeyHeld(vk);
         g_typed[0] = '\0';
+        return;
+    }
+    // Ctrl+V or Shift+Insert pastes. Ctrl with Alt is AltGr, which types.
+    const bool control = IsKeyHeld(VK_CONTROL) && !IsKeyHeld(VK_MENU);
+    const bool paste = (control && IsKeyHeld('V') && !g_previousKeys['V']) ||
+                       (IsKeyHeld(VK_SHIFT) && !control && IsKeyHeld(VK_INSERT) &&
+                        !g_previousKeys[VK_INSERT]);
+    if (paste && !Ime_Composing()) {
+        AppendClipboardText(g_typed, sizeof(g_typed));
+        for (int vk = 0; vk < 256; ++vk) g_previousKeys[vk] = IsKeyHeld(vk);
         return;
     }
     if (g_typed[0]) {
