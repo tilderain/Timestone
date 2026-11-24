@@ -123,7 +123,7 @@ static bool g_opponentDisconnected = false;
 static DWORD g_handshakeStartTick = 0;
 static uint32_t g_handshakeTraceGeneration = 0;
 static bool g_handshakeStallLogged = false;
-static bool g_delayRestartWaitPopup = false;
+static uint8_t g_restartWaitTimedBarrier = 0;
 static ULONGLONG g_restartWaitStartTick = 0;
 static uint8_t g_restartWaitPopupBarrier = 0;
 
@@ -505,7 +505,10 @@ static float GetGameUpdatesPerSecond(int32_t currentFrame)
 // Forward declarations
 static void CaptureNetInput();
 static bool IsTrainingMode();
-static constexpr ULONGLONG MATCH_RESTART_WAIT_POPUP_DELAY_MS = 1500;
+// The waiting notice only comes up once a pre-match barrier has held this game
+// for this long without a break. Shorter waits (the other side still loading)
+// just hold the picture.
+static constexpr ULONGLONG MATCH_START_WAIT_POPUP_DELAY_MS = 1500;
 
 enum class PreMatchWaitBarrier : uint8_t {
     Opening = 1,
@@ -514,17 +517,18 @@ enum class PreMatchWaitBarrier : uint8_t {
 
 static bool ShouldTickPreMatchWaitPopup(PreMatchWaitBarrier barrier)
 {
-    if (!g_delayRestartWaitPopup)
-        return true;
-
     const uint8_t barrierId = static_cast<uint8_t>(barrier);
     if (g_restartWaitPopupBarrier != 0)
         return g_restartWaitPopupBarrier == barrierId;
 
+    // Each barrier is timed on its own: the load between the two is not
+    // waiting.
     const ULONGLONG now = GetTickCount64();
-    if (g_restartWaitStartTick == 0)
+    if (g_restartWaitStartTick == 0 || g_restartWaitTimedBarrier != barrierId) {
         g_restartWaitStartTick = now;
-    if (now - g_restartWaitStartTick < MATCH_RESTART_WAIT_POPUP_DELAY_MS)
+        g_restartWaitTimedBarrier = barrierId;
+    }
+    if (now - g_restartWaitStartTick < MATCH_START_WAIT_POPUP_DELAY_MS)
         return false;
 
     g_restartWaitPopupBarrier = barrierId;
@@ -689,7 +693,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
     if (!Netplay_IsActive()) {
         GameUI_SetWaitingForOpponent(false);
-        g_delayRestartWaitPopup = false;
         g_restartWaitStartTick = 0;
         g_restartWaitPopupBarrier = 0;
     }
@@ -755,7 +758,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
         Controller_ClearDesyncDetection();
 
         if (restartNetplay && g_restartKind == RESTART_TRAINING) {
-            g_delayRestartWaitPopup = false;
             g_restartWaitStartTick = 0;
             g_restartWaitPopupBarrier = 0;
             Rollback_ClearPendingReSimulation();
@@ -823,7 +825,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         Rollback_FreeSnapshots();
         if (restartNetplay) {
-            g_delayRestartWaitPopup = true;
             g_restartWaitStartTick = 0;
             g_restartWaitPopupBarrier = 0;
             Netplay_ClearInputQueues();
@@ -1081,7 +1082,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Controller_ResetFightTimer(releasedAction);
             Rollback_FreeSnapshots();
             g_battleSynchronized = true;
-            g_delayRestartWaitPopup = false;
             g_restartWaitStartTick = 0;
             g_restartWaitPopupBarrier = 0;
             if (g_trainingRestartBarrier) {
@@ -1471,7 +1471,6 @@ void FrameStepper_EndNetplaySession()
     g_nativeRestartTransitionPending = false;
     g_trainingRestartBarrier = false;
     g_trainingRestartLeftFighting = false;
-    g_delayRestartWaitPopup = false;
     g_restartWaitStartTick = 0;
     g_restartWaitPopupBarrier = 0;
     g_battleSynchronized = false;
