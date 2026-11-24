@@ -14,19 +14,19 @@ jobs:
   build:
     #runs-on: [self-hosted, nixos]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # Runs for fork PRs too: GitHub gives fork PRs a read-only GITHUB_TOKEN and no secrets, so a PR build can't sign, release or push.
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Nix
-      uses: DeterminateSystems/nix-installer-action@v22
+      uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
 
     # Nix caching to allow faster builds via deps
     - name: Enable Nix cache (GitHub Actions)
-      uses: DeterminateSystems/magic-nix-cache-action@v14
+      uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
       with:
         use-flakehub: false   # stay in-repo; no third-party cache service
         use-gha-cache: true   # back /nix/store with the Actions cache
@@ -39,12 +39,7 @@ jobs:
 
     - name: Compute release tag
       id: tag
-      run: |
-        if [ "${{ github.event_name }}" = "pull_request" ]; then
-          echo "tag=v${{ steps.version.outputs.version }}-dev-pr${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-        else
-          echo "tag=v${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
-        fi
+      run: echo "tag=v${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
 
     - name: Build package
       run: nix build .#timestone
@@ -59,14 +54,45 @@ jobs:
         cp -L result-linux/TimestoneInstall.sh dist/   # the Linux installer; a release file of its own
 
     - name: Upload unsigned artifacts
+      id: unsigned
       uses: actions/upload-artifact@v7
       with:
         name: timestone-unsigned
         path: dist/
+        retention-days: 14
         if-no-files-found: error
+
+    - name: Upload unsigned Timestone.asi (PR test build)
+      id: asi
+      if: github.event_name == 'pull_request'
+      uses: actions/upload-artifact@v7
+      with:
+        path: dist/Timestone.asi
+        archive: false   # single file: downloads as Timestone.asi, not a zip
+        retention-days: 14
+        if-no-files-found: error
+
+    - name: Link the PR test build
+      if: github.event_name == 'pull_request'
+      env:
+        ASI_URL: ${{ steps.asi.outputs.artifact-url }}
+        ZIP_URL: ${{ steps.unsigned.outputs.artifact-url }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        {
+          echo "## Unsigned PR test build"
+          echo ""
+          echo "**UNSIGNED, for testing only. This is not a release.** Built from PR head \`${HEAD_SHA:0:7}\` merged into \`movement\`."
+          echo ""
+          echo "- [Timestone.asi]($ASI_URL): replaces the \`Timestone.asi\` next to \`umvc3.exe\`."
+          echo "- [timestone-unsigned]($ZIP_URL): zip of Timestone.asi, TimestoneUpdater.exe, dinput8.dll and THIRDPARTYNOTICES."
+          echo ""
+          echo "The links need a GitHub login and expire after 14 days."
+        } >> "$GITHUB_STEP_SUMMARY"
 
   sign:
     needs: build
+    if: github.event_name == 'push'   # PR builds stay unsigned
     runs-on: windows-2025
     steps:
     - uses: actions/download-artifact@v8
@@ -83,7 +109,7 @@ jobs:
 
     - name: Sign with Azure Artifact Signing
       if: vars.ENABLE_SIGNING == 'true'   # feature flag — set the ENABLE_SIGNING repo variable to 'true' to re-enable
-      uses: azure/artifact-signing-action@v2
+      uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
       with:
         endpoint: https://eus.codesigning.azure.net/
         signing-account-name: Timestone
@@ -151,13 +177,13 @@ jobs:
 
   release-draft:
     needs: [build, sign]
-    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}   # PR builds get a -dev-prN prerelease
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
     outputs:
       created: ${{ steps.check.outputs.exists == 'false' }}
-    environment: prerelease   # pauses for manual approval — required reviewers in repo settings
+    environment: prerelease   # no protection rules configured; add required reviewers in repo settings to pause here
     steps:
     - uses: actions/download-artifact@v8
       with:
@@ -170,12 +196,6 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -e
-        # PR dev prereleases (vX-dev-prN) refresh on every push; only the main
-        # release is guarded against re-creation once a version exists.
-        if [ "${{ github.event_name }}" = "pull_request" ]; then
-          echo "exists=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
         TAGS="$(gh release list --json tagName --jq '.[].tagName')"
         echo "existing release tags: $TAGS"
         if printf '%s\n' "$TAGS" | grep -qx "${{ needs.build.outputs.tag }}"; then
@@ -186,7 +206,7 @@ jobs:
 
     - name: Create draft release
       if: steps.check.outputs.exists == 'false'
-      uses: softprops/action-gh-release@v3   # v2 is deprecated (Node 20)
+      uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
       with:
         tag_name: ${{ needs.build.outputs.tag }}
         name: Timestone ${{ needs.build.outputs.tag }}
@@ -269,7 +289,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
-    environment: release   # pauses for manual approval — required reviewers in repo settings
+    environment: release   # no protection rules configured; add required reviewers in repo settings to pause here
     steps:
     - name: Promote prerelease to full release
       env:
