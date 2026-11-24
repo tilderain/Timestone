@@ -59,6 +59,14 @@ constexpr uintptr_t SMVC3MANAGER_INSTANCE_PTR = 0x140D510A0;
 constexpr size_t MANAGER_PAD_ASSIGN = 0x140; // int32_t[4], pad slot per player index
 constexpr int kPadSlots = 4;
 
+// The menu's two cues, the same for either player: uMenuSubBase__playCursorSe
+// (0x1403F7920) and uMenuSubBase__playDecideSe (0x14032A7F0), bank 1.
+constexpr uintptr_t GSOUND_GET_INSTANCE = 0x140003AA0;
+constexpr uintptr_t GSOUND_RESOLVE_REF = 0x1402AA2B0;         // (this, cRef* out, bank)
+constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, team, 1.0f, 0)
+constexpr uint32_t kCueCursor = 8;
+constexpr uint32_t kCueDecide = 9;
+
 constexpr size_t CUNIT_FLAGS = 0x10;
 constexpr size_t CUNIT_VT_KILL = 0x78;
 
@@ -85,6 +93,19 @@ void KillUnit(void* unit)
 {
     using Kill = void(__fastcall*)(void*);
     (*reinterpret_cast<Kill*>(*reinterpret_cast<uint8_t**>(unit) + CUNIT_VT_KILL))(unit);
+}
+
+void PlayMenuCue(uint32_t id)
+{
+    using GetInstance = void*(__fastcall*)();
+    void* sound = Native<GetInstance>(GSOUND_GET_INSTANCE)();
+    if (!sound) return;
+    using ResolveRef = void*(__fastcall*)(void*, void*, uint32_t);
+    using Play = void*(__fastcall*)(void*, void*, void*, uint32_t, uint64_t, float, uint32_t);
+    alignas(16) uint8_t ref[32] = {};
+    alignas(16) uint8_t handle[32] = {};
+    void* bank = Native<ResolveRef>(GSOUND_RESOLVE_REF)(sound, ref, 1);
+    Native<Play>(GSOUND_PLAY_ORDINARY_VOICE)(sound, handle, bank, id, 0, 1.0f, 0);
 }
 
 bool IsChoice(uint8_t value)
@@ -116,6 +137,7 @@ struct Session {
 
     uint8_t remoteCursor = 0;
     uint8_t remoteChoice = kNone;
+    uint32_t remoteCueFrame = 0; // tick the other player's side last made a sound on
     bool badPacketLogged = false;
 
     ResultMenuPacket lastSent = {};
@@ -424,6 +446,18 @@ void OnPeerPacket(const ResultMenuPacket& packet)
                     "(cursor %u choice %u)\n", packet.cursor, packet.choice);
         }
         return;
+    }
+    // What the other player's step sounds like on their own screen, while
+    // the menu is up here too; one cue a tick however fast packets come.
+    const bool audible = MenuUp() && g.menuOpen && g.remoteCueFrame != g.frame;
+    if (!g.remoteChoice && packet.choice) {
+        if (audible) {
+            g.remoteCueFrame = g.frame;
+            PlayMenuCue(kCueDecide);
+        }
+    } else if (!g.remoteChoice && packet.cursor != g.remoteCursor && audible) {
+        g.remoteCueFrame = g.frame;
+        PlayMenuCue(kCueCursor);
     }
     g.remoteCursor = packet.cursor;
     if (!g.remoteChoice && packet.choice) {

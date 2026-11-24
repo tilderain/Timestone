@@ -3472,8 +3472,12 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
         DrawTeamBanners(canvas, x + 40.0f, cardsY, cardsW);
         const float selectY = cardsY + TeamBannerHeight(cardsW) + 64.0f;
         option("CHARACTER SELECT", cx, selectY, rowW, !start);
-        p.Text(start ? "Go into battle with this team." : "Choose or edit your team first.", cx,
-               selectY + 44.0f, 0.62f, A_MC, kDim);
+        // (Without the game's own select screen the option opens the team
+        // screen, as it used to.)
+        p.Text(start ? "Go into battle with this team."
+                     : nativeCharSel_ ? "Pick teams and stage together on the select screen."
+                                      : "Choose or edit your team first.",
+               cx, selectY + 44.0f, 0.62f, A_MC, kDim);
         {
             // Both picks are in: the delay the match will run at.
             const int mine = delayValue(local->delayPick), theirs = delayValue(other->delayPick);
