@@ -89,7 +89,9 @@ constexpr uint32_t kMenuExitVoice = 1;
 // select moves on to the stage: voice 0xA0 of sound bank 6.
 constexpr uintptr_t GSOUND_INSTANCE = 0x140003AA0;
 constexpr uintptr_t GSOUND_RESOLVE_REF = 0x1402AA2B0;      // (this, cRef* out, bank)
-constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, 0, 1.0f, 0)
+// The last argument is the owning unit, a pointer: a 32-bit 0 leaves the upper
+// half of its stack slot as it was, and the voice keeps that as its owner.
+constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, 0, 1.0f, owner unit)
 constexpr uint32_t kStageSelectBank = 6;
 constexpr uint32_t kStageSelectVoice = 0xA0;
 constexpr uintptr_t MENU_SE_CURSOR = 0x1403F7920;  // system voice 8 when +0x88 != +0x8C
@@ -1513,14 +1515,14 @@ void Native_PlaySfx(uint32_t sfxMask)
     if (sfxMask & SFX_MATCH_FOUND) {
         using GetSound = void*(__fastcall*)();
         using ResolveRef = void*(__fastcall*)(void*, void*, uint32_t);
-        using PlayVoice = void*(__fastcall*)(void*, void*, void*, uint32_t, uint32_t, float, uint32_t);
+        using PlayVoice = void*(__fastcall*)(void*, void*, void*, uint32_t, uint64_t, float, void*);
         bool played = false;
         if (void* sound = Native<GetSound>(GSOUND_INSTANCE)()) {
             alignas(16) uint8_t ref[32] = {};
             alignas(16) uint8_t handle[32] = {};
             void* bank = Native<ResolveRef>(GSOUND_RESOLVE_REF)(sound, ref, kStageSelectBank);
             Native<PlayVoice>(GSOUND_PLAY_ORDINARY_VOICE)(sound, handle, bank, kStageSelectVoice, 0,
-                                                         1.0f, 0);
+                                                         1.0f, nullptr);
             played = *reinterpret_cast<uint64_t*>(handle + 8) != UINT64_MAX;
         }
         // That bank belongs to character select; if it is not loaded here the
@@ -1534,13 +1536,13 @@ void Native_PlaySfx(uint32_t sfxMask)
     } else if (sfxMask & SFX_MENU_EXIT) {
         using GetSound = void*(__fastcall*)();
         using ResolveRef = void*(__fastcall*)(void*, void*, uint32_t);
-        using PlayVoice = void*(__fastcall*)(void*, void*, void*, uint32_t, uint32_t, float, uint32_t);
+        using PlayVoice = void*(__fastcall*)(void*, void*, void*, uint32_t, uint64_t, float, void*);
         if (void* sound = Native<GetSound>(GSOUND_INSTANCE)()) {
             alignas(16) uint8_t ref[32] = {};
             alignas(16) uint8_t handle[32] = {};
             void* bank = Native<ResolveRef>(GSOUND_RESOLVE_REF)(sound, ref, kMenuExitBank);
             Native<PlayVoice>(GSOUND_PLAY_ORDINARY_VOICE)(sound, handle, bank, kMenuExitVoice, 0,
-                                                         1.0f, 0);
+                                                         1.0f, nullptr);
         }
         Native<PlayVoid>(MAINMENU_SE_EXIT)();
     } else if (sfxMask & SFX_CONFIRM) {

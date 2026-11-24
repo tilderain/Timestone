@@ -63,7 +63,9 @@ constexpr int kPadSlots = 4;
 // (0x1403F7920) and uMenuSubBase__playDecideSe (0x14032A7F0), bank 1.
 constexpr uintptr_t GSOUND_GET_INSTANCE = 0x140003AA0;
 constexpr uintptr_t GSOUND_RESOLVE_REF = 0x1402AA2B0;         // (this, cRef* out, bank)
-constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, team, 1.0f, 0)
+// The last argument is the owning unit, a pointer: a 32-bit 0 leaves the upper
+// half of its stack slot as it was, and the voice keeps that as its owner.
+constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, team, 1.0f, owner unit)
 constexpr uint32_t kCueCursor = 8;
 constexpr uint32_t kCueDecide = 9;
 
@@ -101,11 +103,11 @@ void PlayMenuCue(uint32_t id)
     void* sound = Native<GetInstance>(GSOUND_GET_INSTANCE)();
     if (!sound) return;
     using ResolveRef = void*(__fastcall*)(void*, void*, uint32_t);
-    using Play = void*(__fastcall*)(void*, void*, void*, uint32_t, uint64_t, float, uint32_t);
+    using Play = void*(__fastcall*)(void*, void*, void*, uint32_t, uint64_t, float, void*);
     alignas(16) uint8_t ref[32] = {};
     alignas(16) uint8_t handle[32] = {};
     void* bank = Native<ResolveRef>(GSOUND_RESOLVE_REF)(sound, ref, 1);
-    Native<Play>(GSOUND_PLAY_ORDINARY_VOICE)(sound, handle, bank, id, 0, 1.0f, 0);
+    Native<Play>(GSOUND_PLAY_ORDINARY_VOICE)(sound, handle, bank, id, 0, 1.0f, nullptr);
 }
 
 bool IsChoice(uint8_t value)

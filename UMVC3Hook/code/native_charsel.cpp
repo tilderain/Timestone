@@ -139,7 +139,9 @@ constexpr uintptr_t BGMAIN_STATUS_KIND = 0x14036D650;    // (background) -> 0 wh
 // then from the select screen's bank the team-complete cue and the announcer.
 constexpr uintptr_t GSOUND_GET_INSTANCE = 0x140003AA0;
 constexpr uintptr_t GSOUND_RESOLVE_REF = 0x1402AA2B0;         // (this, cRef* out, bank)
-constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, team, 1.0f, 0)
+// The last argument is the owning unit, a pointer: a 32-bit 0 leaves the upper
+// half of its stack slot as it was, and the voice keeps that as its owner.
+constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, team, 1.0f, owner unit)
 // The announcer calling a character's name, as a pick does (slotState246).
 constexpr uintptr_t GSOUND_PLAY_CHARACTER_NAME = 0x1402AC980; // (this, cRef* out, character id)
 constexpr uintptr_t BGMAIN_DELAY_ELAPSED = 0x14036DCB0;  // (background) -> bool
@@ -572,12 +574,12 @@ void PlayVoice(uint32_t bank, uint32_t id, int team)
     void* sound = Instance(GSOUND_GET_INSTANCE);
     if (!sound) return;
     using ResolveRef = void*(__fastcall*)(void*, void*, uint32_t);
-    using Play = void*(__fastcall*)(void*, void*, void*, uint32_t, uint64_t, float, uint32_t);
+    using Play = void*(__fastcall*)(void*, void*, void*, uint32_t, uint64_t, float, void*);
     alignas(16) uint8_t ref[32] = {};
     alignas(16) uint8_t handle[32] = {};
     void* bankRef = Native<ResolveRef>(GSOUND_RESOLVE_REF)(sound, ref, bank);
     Native<Play>(GSOUND_PLAY_ORDINARY_VOICE)(sound, handle, bankRef, id,
-                                             static_cast<uint64_t>(team), 1.0f, 0);
+                                             static_cast<uint64_t>(team), 1.0f, nullptr);
 }
 
 // What a pick sounds like in the game (slotState246, 0x140364C50): the pick
