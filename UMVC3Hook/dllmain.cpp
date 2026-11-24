@@ -268,7 +268,9 @@ static DWORD WINAPI HookLogOpenThread(LPVOID parameter)
 	return 0;
 }
 
-bool HookLogOpenInViewer()
+// `waitMs`: how long to wait for the viewer to be started. A caller about to
+// end the process must wait, or the shell call dies with it.
+static bool HookLogOpenInViewerImpl(DWORD waitMs)
 {
 	char* path = new char[MAX_PATH]();
 	AcquireSRWLockExclusive(&g_hookLogLock);
@@ -282,8 +284,21 @@ bool HookLogOpenInViewer()
 		delete[] path;
 		return false;
 	}
+	if (waitMs) WaitForSingleObject(thread, waitMs);
 	CloseHandle(thread);
 	return true;
+}
+
+bool HookLogOpenInViewer()
+{
+	return HookLogOpenInViewerImpl(0);
+}
+
+// For a fatal error the player has just acknowledged: the log is written out
+// and opened before the process goes.
+bool HookLogOpenInViewerBeforeExit()
+{
+	return HookLogOpenInViewerImpl(5000);
 }
 
 void HookLogTryFlush()

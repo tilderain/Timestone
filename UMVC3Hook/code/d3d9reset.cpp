@@ -30,6 +30,7 @@
 
 extern void HookLog(const char* fmt, ...);
 extern void HookLogFlush();
+extern bool HookLogOpenInViewerBeforeExit();
 extern bool HookLog_IsGameLoaded();
 // Window policy remains with the window-management code in dllmain.cpp.
 extern void PrepareD3D9PresentationParameters(D3DPRESENT_PARAMETERS*, const char*);
@@ -138,11 +139,17 @@ std::atomic<uint32_t> g_gameFrameHeartbeat { 0 };
     snprintf(text, sizeof(text),
         "Graphics recovery could not complete (0x%08X).\n%s\n\n"
         "The game must close: rendering will not resume on a failed device.\n"
-        "Please keep the Timestone log. If an overlay is enabled, try disabling it.",
+        "The Timestone log opens when you press OK; please keep it. "
+        "If an overlay is enabled, try disabling it.",
         (uint32_t)result, operation);
     // No owner HWND: the device/UI thread may itself be stuck in a driver.
-    if (showMessage)
+    if (showMessage) {
         MessageBoxA(nullptr, text, "Timestone graphics recovery", MB_OK | MB_ICONERROR);
+        // Written out again (other threads may have logged since) and shown,
+        // before the process ends under it.
+        if (!HookLogOpenInViewerBeforeExit())
+            HookLogFlush();
+    }
     const JobState state = g_job.state.load();
     if (state == JobState::Running || state == JobState::Queued) {
         // Never unwind/free a live request or run DLL detach while a driver is
