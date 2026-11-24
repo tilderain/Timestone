@@ -1396,6 +1396,20 @@ static void CaptureLocalSkipInput()
         g_localPending |= TIMELINE_SKIP_FLAG;
 }
 
+// The same two for the result screen (native_result.cpp), whose own skips
+// (the winner's quote, the score board's count-up) are taken from the
+// timeline as well so that both players' screens move on together.
+extern "C" bool Controller_TimelineSkipPressed()
+{
+    return Netplay_IsActive() && FrameStepper_IsBattleSynchronized() && TimelineSkipPressed();
+}
+
+extern "C" void Controller_CaptureSkipInput()
+{
+    if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized())
+        CaptureLocalSkipInput();
+}
+
 // While set, the raw pad read answers with this in place of any pad: the
 // native skip test sees the timeline's press or nothing.
 static bool g_padReadOverridden = false;

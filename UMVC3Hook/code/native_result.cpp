@@ -13,6 +13,10 @@
 #include <cstring>
 
 extern void HookLog(const char* fmt, ...);
+// The intro / outro skip's press, from confirmed frames of the input timeline
+// (controller.cpp): the same on both players' machines and a spectator's.
+extern "C" bool Controller_TimelineSkipPressed();
+extern "C" void Controller_CaptureSkipInput();
 
 namespace resultmenu {
 namespace {
@@ -35,7 +39,10 @@ constexpr size_t SCORE_SCHEDULER = 0x58;      // uMenuSubBase::mpUiScheduler
 constexpr size_t SCORE_POPUP_OWNER = 0x0A;    // mRno[2]: player + 1 while "really leave?" is up
 constexpr size_t SCORE_CHOICE = 0x940;        // int32_t[2]: 0, or 1 / 2 / 4
 constexpr size_t SCORE_SELECT_POS = 0x948;    // int32_t[2]: 0..2
-constexpr size_t SCORE_VT_DECIDE_SOUND = 0xB8;
+// The "return to the main menu?" pop-up the board opens for MAIN MENU: a
+// uUiChoiceWindow, which reads the pad of the player index it was opened for.
+constexpr uintptr_t CHOICE_WINDOW_INPUT = 0x140322630; // uUiChoiceWindow__processChoiceInput
+constexpr size_t CHOICE_WINDOW_PAD_NO = 0x11C;
 // The menu takes input once the board's scheduler has passed this frame.
 constexpr uint32_t kMenuInputFrame = 0x78;
 constexpr uintptr_t SCHEDULER_GET_FRAME = 0x1401F8A70; // (scheduler) -> frame
@@ -102,12 +109,10 @@ struct Session {
     uint32_t scoreFrame = 0;
     bool menuSeen = false;
     bool inScoreTick = false;
-    bool cutDecide = false; // this tick's confirm is not the game's to see
+    bool menuOpen = false;  // the board has reached its menu: input is the players' own
 
     uint8_t localCursor = 0;
     uint8_t localChoice = kNone;
-    bool decideHeld = false;
-    bool leaveArmed = false;
 
     uint8_t remoteCursor = 0;
     uint8_t remoteChoice = kNone;
@@ -119,7 +124,6 @@ struct Session {
 
 Session g;
 bool g_installed = false;
-std::atomic<bool> g_leaveArmed{false};
 
 using PadRead = uint64_t(__fastcall*)(void*, uint32_t);
 using ScoreTick = void(__fastcall*)(void*, uint64_t, uint64_t, uint64_t);
@@ -162,9 +166,16 @@ uint64_t LocalRead(PadRead original, void* self, uint32_t player)
 uint64_t ReadFor(PadRead original, void* self, uint32_t player, bool decide)
 {
     if (!g.active) return original(self, player);
+    // Everything before the menu (the winner's quote, the score board's
+    // count-up) is skipped by a confirm from either player. Those skips come
+    // from the input timeline, so both screens take them on the same frame;
+    // the menu itself is each player's own, with no delay.
+    if (!g.menuOpen) {
+        if (!decide || player != 0) return 0;
+        return Controller_TimelineSkipPressed() ? DecideMask() : 0;
+    }
     if (g.watching || static_cast<int>(player) != g.localTeam) return 0;
     uint64_t value = LocalRead(original, self, player);
-    if (decide && g.inScoreTick && g.cutDecide) value &= ~static_cast<uint64_t>(DecideMask());
     return value;
 }
 
@@ -200,33 +211,6 @@ void BeforeScoreTick(void* score)
     // A choice made stays made.
     if (g.localChoice) Field<int32_t>(score, SCORE_CHOICE + 4 * local) = g.localChoice;
 
-    // MAIN MENU. The game asks "really?" in a pop-up that reads the pad of
-    // the player index it was opened for, which on a client is a slot with
-    // nothing in it. Its confirm is kept from the game instead, and a second
-    // press takes the place of the pop-up.
-    g.cutDecide = false;
-    const bool held = (LocalRead(g_originalRaw, score, static_cast<uint32_t>(local)) &
-                       DecideMask()) != 0;
-    const bool pressed = held && !g.decideHeld;
-    g.decideHeld = held;
-    const int32_t cursor = Field<int32_t>(score, SCORE_SELECT_POS + 4 * local);
-    if (cursor != 2 || g.localChoice) {
-        g.leaveArmed = false;
-    } else {
-        g.cutDecide = true;
-        if (pressed && Field<uint8_t>(score, SCORE_POPUP_OWNER) == 0 && MenuTakesInput(score)) {
-            if (!g.leaveArmed) {
-                g.leaveArmed = true;
-            } else {
-                g.leaveArmed = false;
-                g.localChoice = kMainMenu;
-                Field<int32_t>(score, SCORE_CHOICE + 4 * local) = kMainMenu;
-                using Sound = void(__fastcall*)(void*);
-                (*reinterpret_cast<Sound*>(*reinterpret_cast<uint8_t**>(score) +
-                                           SCORE_VT_DECIDE_SOUND))(score);
-            }
-        }
-    }
 }
 
 void AfterScoreTick(void* score)
@@ -249,6 +233,7 @@ void __fastcall Hook_ScoreTick(void* score, uint64_t a, uint64_t b, uint64_t c)
     }
     g.score = score;
     g.scoreFrame = g.frame;
+    g.menuOpen = MenuTakesInput(score);
     if (!g.menuSeen) {
         g.menuSeen = true;
         HookLog("NativeResult: result menu up (game %u, local team %d%s)\n", g.generation,
@@ -263,6 +248,38 @@ void __fastcall Hook_ScoreTick(void* score, uint64_t a, uint64_t b, uint64_t c)
     g_originalScoreTick(score, a, b, c);
     g.inScoreTick = false;
     AfterScoreTick(score);
+}
+
+// MAIN MENU's "really?" pop-up. It looks its pad up from the player index it
+// was opened for, which in a match is the second hardware slot for player 2:
+// on a netplay client nothing is there. While the local player's pop-up reads
+// its input, that index is pointed at the slot the local player is using.
+using ChoiceInput = void(__fastcall*)(void*);
+ChoiceInput g_originalChoiceInput = nullptr;
+
+void __fastcall Hook_ChoiceInput(void* window)
+{
+    const uint64_t manager = *reinterpret_cast<uint64_t*>(_addr(SMVC3MANAGER_INSTANCE_PTR));
+    const uint32_t player = Field<uint32_t>(window, CHOICE_WINDOW_PAD_NO);
+    if (!g.active || g.watching || !manager || !MenuUp() || player >= kPadSlots ||
+        static_cast<int>(player) != g.localTeam) {
+        g_originalChoiceInput(window);
+        return;
+    }
+    int32_t* pads = reinterpret_cast<int32_t*>(manager + MANAGER_PAD_ASSIGN);
+    const int32_t saved = pads[player];
+    // The slot with something held on it; the first one when all are idle.
+    int32_t slot = 0;
+    for (int candidate = 0; candidate < kPadSlots; ++candidate) {
+        pads[player] = candidate;
+        if (g_originalInput(g.score, player) || g_originalAnalog(g.score, player)) {
+            slot = candidate;
+            break;
+        }
+    }
+    pads[player] = slot;
+    g_originalChoiceInput(window);
+    pads[player] = saved;
 }
 
 // A rollback that reaches back over the frame the result screen is created on
@@ -284,6 +301,9 @@ void __fastcall Hook_ResultMove(void* result, uint64_t a, uint64_t b, uint64_t c
         }
         g.result = result;
         g.resultFrame = g.frame;
+        // A press on the result screen reaches the timeline from here: the
+        // characters no longer read their pads.
+        if (!g.watching) Controller_CaptureSkipInput();
     }
     g_originalResultMove(result, a, b, c);
 }
@@ -317,7 +337,6 @@ void Reset()
     const uint32_t frame = g.frame;
     g = Session{};
     g.frame = frame;
-    g_leaveArmed.store(false, std::memory_order_relaxed);
 }
 
 } // namespace
@@ -341,6 +360,8 @@ bool Install()
     ok &= Hook(RESULT_PHASE_CHARSEL, &Hook_CharSel, &g_originalCharSel, "result: character select");
     ok &= Hook(RESULT_PHASE_TITLE_D, &Hook_TitleD, &g_originalTitleD, "result: main menu");
     ok &= Hook(RESULT_PHASE_TITLE_10, &Hook_Title10, &g_originalTitle10, "result: title (2)");
+    ok &= Hook(CHOICE_WINDOW_INPUT, &Hook_ChoiceInput, &g_originalChoiceInput,
+               "the leave pop-up's input");
     g_installed = ok;
     HookLog("NativeResult: hooks %s\n", ok ? "installed" : "incomplete; the result menu is the game's own");
     return ok;
@@ -362,7 +383,6 @@ void Tick(bool active, int localTeam, bool watching, uint32_t generation)
         g.watching = watching;
         g.generation = generation;
     }
-    g_leaveArmed.store(g.leaveArmed && MenuUp(), std::memory_order_relaxed);
 }
 
 bool MenuUp()
@@ -419,11 +439,6 @@ void KillScreen()
     if (UnitAlive(g.result)) KillUnit(g.result);
     g.result = nullptr;
     g.score = nullptr;
-}
-
-bool LeaveArmed()
-{
-    return g_leaveArmed.load(std::memory_order_relaxed);
 }
 
 } // namespace resultmenu

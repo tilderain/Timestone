@@ -11,7 +11,7 @@
 // (ResultMenuPacket). What the game would do with the two choices is not
 // allowed to happen; the caller reads them and acts.
 //
-// Game thread only, except LeaveArmed.
+// Game thread only.
 
 #include "netplay.h"
 
@@ -50,8 +50,5 @@ void OnPeerPacket(const ResultMenuPacket& packet);
 // Retires the result screen, as the game's own handlers do when they leave
 // it for another area.
 void KillScreen();
-
-// MAIN MENU was pressed once: a second press leaves the match. Any thread.
-bool LeaveArmed();
 
 } // namespace resultmenu

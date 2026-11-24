@@ -2659,19 +2659,6 @@ void LobbyFlow_DrawOverlay()
         draw->AddText(font, size, at, IM_COL32(255, 255, 255, 255), score);
     }
 
-    // MAIN MENU on the result screen, pressed once.
-    if (g_phase == Phase::InMatch && resultmenu::LeaveArmed()) {
-        const char* text = "PRESS AGAIN TO LEAVE THE MATCH";
-        const ImVec2 display = ImGui::GetIO().DisplaySize;
-        ImFont* font = ImGui::GetFont();
-        const float size = display.y * 0.034f;
-        const ImVec2 extent = font->CalcTextSizeA(size, 100000.0f, 0.0f, text);
-        const ImVec2 at((display.x - extent.x) * 0.5f, display.y * 0.9f);
-        ImDrawList* draw = ImGui::GetBackgroundDrawList();
-        draw->AddText(font, size, ImVec2(at.x + 2.0f, at.y + 2.0f), IM_COL32(0, 0, 0, 220), text);
-        draw->AddText(font, size, at, IM_COL32(255, 230, 60, 255), text);
-    }
-
     const uint32_t waited = g_nativeWaitFrames.load(std::memory_order_relaxed);
     if (waited < kNativeSlowFrames) return;
     const bool failed = waited >= kNativeFailedFrames;
@@ -3270,7 +3257,7 @@ static void MatchCharSelFrame()
 // side goes to the other player, and the two choices are acted on.
 //   - REMATCH from both: the synchronized restart.
 //   - CHARACTER SELECT from either: the restart through the select screen.
-//   - MAIN MENU: the player who chose it leaves the match.
+//   - MAIN MENU (confirmed in the game's own pop-up): that player leaves.
 // One player (the host) asks for the first two; the restart packet tells the
 // other. A game that decided the set is followed by neither.
 static void UpdateResultMenu()
