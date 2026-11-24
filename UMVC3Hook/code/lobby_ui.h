@@ -176,6 +176,7 @@ private:
     void StepTeamField(int delta);
     void SetTeamCharacter(int member, int32_t id);
     bool RandomOffered() const;
+    int32_t PickerCharacter(int cell) const;
     void BeginText(TextTarget target, const char* initial);
     void EndText(bool accept);
 

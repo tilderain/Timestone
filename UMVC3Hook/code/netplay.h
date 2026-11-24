@@ -88,6 +88,11 @@ struct SetFormatPacket {
     uint32_t type;               // PACKET_SET_FORMAT
     int32_t  firstTo;            // games to win the set, 0 = endless
     int32_t  rotation;           // lobby::Rotation
+    // Team members drawn again for every game of the set (lobby::kCharRandomAll):
+    // bits 0..2 player 1's members, bits 3..5 player 2's. Each draw is worked
+    // out from rerollSeed on both sides, so none of them is sent.
+    uint32_t rerollMask;
+    uint32_t rerollSeed;
 };
 
 struct LaunchTrainingPacket {
@@ -105,6 +110,9 @@ struct LaunchTrainingPacket {
     uint8_t  voiceValidMask;      // valid teams: bit 0=P1, bit 1=P2
     int32_t  stageId;
     uint32_t flags;              // LaunchTrainingFlags
+    // Initial player settings exchange: the sender's voice choice for every
+    // character, bit N for character id N (set = English).
+    uint32_t voiceMask;
 };
 
 struct LaunchP2SelectionPacket {
@@ -143,6 +151,8 @@ enum LaunchTrainingFlags : uint32_t {
     LAUNCH_TRAINING_FIVE_BARS = 1 << 2,
     // Initial player settings exchange: simpleMode[sender's team] is set.
     LAUNCH_TRAINING_SIMPLE_MODE_VALID = 1 << 3,
+    // Initial player settings exchange: voiceMask is set.
+    LAUNCH_TRAINING_VOICE_MASK_VALID = 1 << 4,
 };
 
 enum DesyncAction : uint32_t {

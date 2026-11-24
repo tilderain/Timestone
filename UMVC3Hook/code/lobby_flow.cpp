@@ -430,11 +430,13 @@ int32_t PickMatchStage(int localStage, int opponentStage)
     return count ? pool[(roll >> 8) % count] : g_rosterPrefs.stageId;
 }
 
-// Fills in a team's random members (kCharRandom) for a match: a character not
-// already on the team, one of its installed colors and one of its assists.
-// Player 1 does this for both teams as it launches, so the draw happens once
-// for the whole set and both players see the same result.
-void ResolveRandomMembers(Team& team, uint32_t& state)
+// Fills in a team's random members (kCharRandom, kCharRandomAll) for a match:
+// a character not already on the team, one of its installed colors and one of
+// its assists. Player 1 does this for both teams as it launches, so both
+// players see the same result. A `shared` draw is one both players make for
+// themselves from the same state (LobbyFlow_RerollRandomMembers): it keeps to
+// the six standard colors, which every install has.
+void ResolveRandomMembers(Team& team, uint32_t& state, bool shared = false)
 {
     const auto next = [&state] {
         state ^= state << 13;
@@ -443,14 +445,14 @@ void ResolveRandomMembers(Team& team, uint32_t& state)
         return state >> 8;
     };
     for (int i = 0; i < 3; ++i) {
-        if (team.chars[i] != lobby::kCharRandom) continue;
+        if (!lobby::IsRandomMember(team.chars[i])) continue;
         int32_t pool[50];
         int count = 0;
         for (int32_t id = 1; id <= 50; ++id)
             if (id != team.chars[0] && id != team.chars[1] && id != team.chars[2])
                 pool[count++] = id;
         const int32_t id = pool[next() % count];
-        const int colors = RosterColorCount(id);
+        const int colors = shared ? 6 : RosterColorCount(id);
         team.chars[i] = id;
         team.colors[i] = static_cast<int32_t>(next() % colors);
         team.assists[i] = static_cast<int32_t>(next() % 3);
@@ -493,7 +495,7 @@ void RemoveDuplicateCharacters(Team& team)
         bool repeated = false;
         for (int j = 0; j < i; ++j) repeated |= team.chars[j] == team.chars[i];
         // Any number of members may be left to chance.
-        if (!repeated || team.chars[i] == lobby::kCharRandom) continue;
+        if (!repeated || lobby::IsRandomMember(team.chars[i])) continue;
         for (int32_t id = 1; id <= 50; ++id) {
             if (id == team.chars[0] || id == team.chars[1] || id == team.chars[2]) continue;
             team.chars[i] = id;
@@ -596,7 +598,7 @@ UiPrefs LoadPrefs()
             preset.team.chars[m] = v[m * 3];
             preset.team.assists[m] = v[m * 3 + 1];
             preset.team.colors[m] = v[m * 3 + 2];
-            const bool random = preset.team.chars[m] == lobby::kCharRandom;
+            const bool random = lobby::IsRandomMember(preset.team.chars[m]);
             usable &= (random || (preset.team.chars[m] >= 1 && preset.team.chars[m] <= 50)) &&
                       preset.team.assists[m] >= 0 && preset.team.assists[m] <= 2;
             if (usable &&
@@ -663,7 +665,7 @@ void SavePrefs(const UiPrefs& prefs)
     // The launcher's roster shares these keys and knows no random member: it
     // keeps a team of real characters, the last one this player used.
     bool anyRandom = false;
-    for (int i = 0; i < 3; ++i) anyRandom |= prefs.team.chars[i] == lobby::kCharRandom;
+    for (int i = 0; i < 3; ++i) anyRandom |= lobby::IsRandomMember(prefs.team.chars[i]);
     for (int i = 0; i < 3 && !anyRandom; ++i) {
         g_rosterPrefs.chars[i] = prefs.team.chars[i];
         g_rosterPrefs.assists[i] = prefs.team.assists[i];
@@ -790,6 +792,11 @@ int g_setFirstTo = 1;
 // until known. Player 2 gets them over the match connection (PumpHandshake).
 int g_launchFirstTo = -1;
 Rotation g_launchRotation = Rotation::WinnerStays;
+// Team members drawn again for every game of the set (kCharRandomAll), as
+// SetFormatPacket carries them: bits 0..2 player 1's, bits 3..5 player 2's.
+// Player 1 decides both and the seed every draw is worked out from.
+uint32_t g_rerollMask = 0;
+uint32_t g_rerollSeed = 0;
 int g_setWins[2] = {0, 0}; // [0] local, [1] opponent
 bool g_setOver = false;
 uint32_t g_setOverTicks = 0;
@@ -1469,8 +1476,15 @@ bool SendLaunchAsHost()
     settings.rollbackFrames = rollback;
     settings.effective_frame = -1;
 
-    // Random members are drawn here, once, for the set that is starting.
+    // Random members are drawn here for the set that is starting. The ones
+    // asked for as "random all" are drawn again before each later game.
     Team localTeam = g_pairing.localTeam, opponentTeam = g_pairing.opponentTeam;
+    g_rerollMask = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (localTeam.chars[i] == lobby::kCharRandomAll) g_rerollMask |= 1u << i;
+        if (opponentTeam.chars[i] == lobby::kCharRandomAll) g_rerollMask |= 8u << i;
+    }
+    g_rerollSeed = RandomSeed();
     uint32_t randomState = RandomSeed();
     ResolveRandomMembers(localTeam, randomState);
     ResolveRandomMembers(opponentTeam, randomState);
@@ -1492,6 +1506,8 @@ bool SendLaunchAsHost()
     format.type = PACKET_SET_FORMAT;
     format.firstTo = g_launchFirstTo;
     format.rotation = static_cast<int32_t>(g_launchRotation);
+    format.rerollMask = g_rerollMask;
+    format.rerollSeed = g_rerollSeed;
 
     LaunchTrainingPacket launch = {};
     launch.type = PACKET_LAUNCH_TRAINING;
@@ -1836,9 +1852,11 @@ bool PumpHandshake(bool bothReady)
                    event.packet->dataLength == sizeof(SetFormatPacket)) {
             const auto& format = *reinterpret_cast<const SetFormatPacket*>(event.packet->data);
             if (format.firstTo >= 0 && format.firstTo <= lobby::kMaxFirstTo &&
-                (format.rotation == 1 || format.rotation == 2)) {
+                (format.rotation == 1 || format.rotation == 2) && format.rerollMask <= 0x3F) {
                 g_launchFirstTo = format.firstTo;
                 g_launchRotation = static_cast<Rotation>(format.rotation);
+                g_rerollMask = format.rerollMask;
+                g_rerollSeed = format.rerollSeed;
                 HookLog("LobbyFlow: P1 set rules FT%d rotation %d\n", format.firstTo,
                         format.rotation);
             }
@@ -1870,6 +1888,7 @@ void UpdateMatchStart(bool cancelPressed)
         g_matchIsHost = pairing.localSide == 0;
         g_launchSent = false;
         g_launchFirstTo = -1;
+        g_rerollMask = 0;
         if (!SteamRoom_ConnectPeer(pairing.opponentId, g_matchIsHost)) {
             g_service->FinishMatch(false, false);
             g_service->Stand(); // do not retry every frame
@@ -2557,6 +2576,46 @@ bool LobbyFlow_AllowResultRestart()
 {
     if (!g_enabled || g_phase != Phase::InMatch) return true;
     return g_gameCounted && !g_setOver;
+}
+
+// A game of a room set is restarting with `config`: the members a player left
+// to chance for every game are drawn again. Both players make the same draw
+// for themselves, from the seed player 1 sent with the set's rules and the
+// number of the game that is ending, so nothing has to be agreed in between.
+void LobbyFlow_RerollRandomMembers(TrainingBootConfig& config)
+{
+    if (!g_enabled || g_phase != Phase::InMatch || g_spectating || !g_rerollMask) return;
+    uint32_t state = g_rerollSeed ^ (FrameStepper_GetBattleGeneration() * 0x9E3779B9u);
+    state ^= state >> 16;
+    state *= 0x85EBCA6Bu;
+    state ^= state >> 13;
+    if (!state) state = 0x9E3779B9u;
+    for (int side = 0; side < 2; ++side) {
+        const uint32_t mask = (g_rerollMask >> (side * 3)) & 7u;
+        if (!mask) continue;
+        int32_t* chars = side ? config.p2Chars : config.p1Chars;
+        int32_t* colors = side ? config.p2Colors : config.p1Colors;
+        int32_t* assists = side ? config.p2Assists : config.p1Assists;
+        Team team = {};
+        for (int i = 0; i < 3; ++i) {
+            // The character being replaced can come up again.
+            team.chars[i] = (mask >> i) & 1u ? lobby::kCharRandomAll : chars[i];
+            team.colors[i] = colors[i];
+            team.assists[i] = assists[i];
+        }
+        ResolveRandomMembers(team, state, true);
+        for (int i = 0; i < 3; ++i) {
+            if (!((mask >> i) & 1u)) continue;
+            chars[i] = team.chars[i];
+            colors[i] = team.colors[i];
+            assists[i] = team.assists[i];
+            config.voiceLanguage[side][i] = TrainingBoot_GetVoiceLanguage(side, team.chars[i]);
+        }
+        HookLog("LobbyFlow: P%d random members drawn again: %d/%d/%d\n", side + 1, team.chars[0],
+                team.chars[1], team.chars[2]);
+        // The room sees the team now being played.
+        if (side == g_pairing.localSide && g_service) g_service->SetTeam(team);
+    }
 }
 
 void LobbyFlow_GameTick()

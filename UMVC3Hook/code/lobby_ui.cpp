@@ -360,21 +360,28 @@ void DrawPingWithNumber(const Painter& p, float x, float y, int pingMs, float sc
 
 // A team member's select-screen face in a box `w` wide, anchored A_TC or
 // A_MC. A random member is the stage select's RANDOM icon, centred in the
-// same box.
+// same box; the one drawn again for every game has "ALL" written across it.
 void DrawFace(const Painter& p, int32_t id, int color, float x, float y, float w, Anchor anchor,
               Color tint = kWhite)
 {
-    if (id != kCharRandom) {
+    if (!IsRandomMember(id)) {
         p.Sprite(CharacterFace(id, color), x, y, w, w * kFaceAspect, kFaceUv, anchor, tint);
         return;
     }
     const float cy = anchor == A_TC ? y + w * kFaceAspect * 0.5f : y;
     p.Sprite(TEX_STAGE_FIRST, x, cy, w, w * kStageIconAspect, kStageIconUv, A_MC, tint);
+    if (id == kCharRandomAll) {
+        const float tagY = cy + w * kStageIconAspect * 0.27f, tagH = w * 0.2f;
+        p.Fill(x - w * 0.27f, tagY - tagH * 0.5f, w * 0.54f, tagH,
+               Color{0.0f, 0.0f, 0.0f, 0.8f * tint.a});
+        p.Text("ALL", x, tagY, w * 0.0058f, A_MC, WithAlpha(kYellow, tint.a));
+    }
 }
 
 const char* CharacterLabel(const RosterSource& roster, int32_t id)
 {
     if (id == kCharRandom) return "RANDOM";
+    if (id == kCharRandomAll) return "RANDOM ALL";
     const char* name = roster.characterName ? roster.characterName(id) : "";
     return name ? name : "";
 }
@@ -1846,7 +1853,7 @@ void LobbyUi::UpdatePresetList(const Input& input)
             }
             if (!made) {
                 bool random = false;
-                for (int i = 0; i < 3; ++i) random |= prefs_.team.chars[i] == kCharRandom;
+                for (int i = 0; i < 3; ++i) random |= IsRandomMember(prefs_.team.chars[i]);
                 ShowNotice(random ? "A reserve unit cannot hold\na random character."
                                   : "A reserve unit cannot hold\nthe same character twice.");
                 return;
@@ -1885,7 +1892,7 @@ void LobbyUi::StepTeamField(int delta)
         if (field == 0) {
             return; // characters are picked from the grid (confirm), not stepped
         } else if (field == 1) {
-            if (team.chars[member] == kCharRandom) return; // drawn with the character
+            if (IsRandomMember(team.chars[member])) return; // drawn with the character
             team.assists[member] = ((team.assists[member] + delta) % 3 + 3) % 3;
         } else {
             return; // colors are picked from their panel (confirm), not stepped
@@ -1995,7 +2002,7 @@ void LobbyUi::SetTeamCharacter(int member, int32_t id)
 {
     Team& team = prefs_.team;
     team.chars[member] = id;
-    if (id == kCharRandom) {
+    if (IsRandomMember(id)) {
         // The color and assist come with the character when it is drawn.
         team.colors[member] = 0;
         team.assists[member] = 0;
@@ -2012,6 +2019,15 @@ bool LobbyUi::RandomOffered() const
     return prefs_.slot >= 0 && prefs_.slot < kTeamPresets;
 }
 
+// What a cell of the character grid stands for: the roster's characters, then
+// RANDOM and RANDOM ALL.
+int32_t LobbyUi::PickerCharacter(int cell) const
+{
+    const int count = roster_.characterCount ? roster_.characterCount() : 0;
+    if (cell < count) return roster_.characterId(cell);
+    return cell == count ? kCharRandom : kCharRandomAll;
+}
+
 // The character grid for a team member row: the roster's select-screen faces.
 // Directions move a cell (left and right wrap around the ends), confirm puts
 // the character in the slot.
@@ -2023,8 +2039,9 @@ void LobbyUi::UpdateCharPicker(const Input& input)
         Play(SFX_CANCEL);
         return;
     }
-    // The cell after the roster, on a row of its own under it, is RANDOM.
-    const int cells = count + (RandomOffered() ? 1 : 0);
+    // The two cells after the roster, on a row of their own under it, are
+    // RANDOM and RANDOM ALL.
+    const int cells = count + (RandomOffered() ? 2 : 0);
     const bool onRandom = charPickerCursor_ >= count;
     int next = charPickerCursor_;
     if (input.left) next -= 1;
@@ -2041,7 +2058,8 @@ void LobbyUi::UpdateCharPicker(const Input& input)
             next += kCharGridColumns;
             if (next >= count && cells > count) {
                 charPickerColumn_ = charPickerCursor_ % kCharGridColumns;
-                next = count;
+                // The nearer of the two.
+                next = count + (charPickerColumn_ * 2 >= kCharGridColumns ? 1 : 0);
             }
         }
     }
@@ -2055,13 +2073,12 @@ void LobbyUi::UpdateCharPicker(const Input& input)
     charPickerOpen_ = false;
     Play(SFX_CONFIRM);
     const int member = (teamCursor_ - kTeamRowFirstSlot) / 3;
-    const int32_t id = charPickerCursor_ >= count ? kCharRandom
-                                                  : roster_.characterId(charPickerCursor_);
+    const int32_t id = PickerCharacter(charPickerCursor_);
     if (id == prefs_.team.chars[member]) return; // same character: the team stays as it was
     Team& team = prefs_.team;
     int other = -1;
     // Any number of members may be random: only a real character is traded.
-    for (int i = 0; i < 3 && id != kCharRandom; ++i)
+    for (int i = 0; i < 3 && !IsRandomMember(id); ++i)
         if (i != member && team.chars[i] == id) other = i;
     if (other >= 0) {
         // A team never holds a character twice (the game's own team editor
@@ -2200,7 +2217,8 @@ void LobbyUi::UpdateTeam(const Input& input)
         charPickerColumn_ = kCharGridColumns / 2;
         for (int i = 0; i < count; ++i)
             if (roster_.characterId(i) == prefs_.team.chars[member]) charPickerCursor_ = i;
-        if (prefs_.team.chars[member] == kCharRandom && RandomOffered()) charPickerCursor_ = count;
+        if (IsRandomMember(prefs_.team.chars[member]) && RandomOffered())
+            charPickerCursor_ = prefs_.team.chars[member] == kCharRandom ? count : count + 1;
         charPickerOpen_ = true;
         Play(SFX_CONFIRM);
         return;
@@ -2212,7 +2230,7 @@ void LobbyUi::UpdateTeam(const Input& input)
         const int colors = roster_.colorCount ? roster_.colorCount(prefs_.team.chars[member]) : 1;
         // One color leaves nothing to choose from, and a random member's
         // color is drawn with it.
-        if (colors > 1 && prefs_.team.chars[member] != kCharRandom) {
+        if (colors > 1 && !IsRandomMember(prefs_.team.chars[member])) {
             const int current = prefs_.team.colors[member];
             colorPickerCursor_ = current >= 0 && current < colors ? current : 0;
             colorPickerOpen_ = true;
@@ -2446,9 +2464,14 @@ void LobbyUi::DrawTeamCard(Canvas& canvas, float x, float y, float w) const
         const float cx = x + 28.0f + column * (i + 0.5f);
         p.Text(kTeamSlotNames[i], cx, y + 118.0f, 0.56f, A_MC, kFaint);
         DrawFace(p, prefs_.team.chars[i], prefs_.team.colors[i], cx, y + 144.0f, face, A_TC);
+        // "RANDOM ALL" is drawn smaller if it has to be, never cut.
+        if (IsRandomMember(prefs_.team.chars[i])) {
+            p.TextShrink(CharacterLabel(roster_, prefs_.team.chars[i]), cx, y + 256.0f, 0.7f,
+                         column - 10.0f, A_MC, kText);
+            continue; // its assist is not known yet
+        }
         p.TextFit(CharacterLabel(roster_, prefs_.team.chars[i]), cx, y + 256.0f, 0.7f,
                   column - 10.0f, A_MC);
-        if (prefs_.team.chars[i] == kCharRandom) continue; // its assist is not known yet
         char assist[48];
         snprintf(assist, sizeof(assist), "ASSIST %s", kAssistLetters[prefs_.team.assists[i] % 3]);
         p.Text(assist, cx, y + 278.0f, 0.54f, A_MC, kDim);
@@ -3292,13 +3315,14 @@ void LobbyUi::DrawTeamBanners(Canvas& canvas, float x, float y, float w) const
         // The card's archive is read in the background the first time it is
         // wanted; until it is in, its place is a dark plate.
         p.Fill(cardX, y, cardW, cardH, Color{0.0f, 0.0f, 0.0f, 0.6f});
-        if (character == kCharRandom) {
+        if (IsRandomMember(character)) {
             // No card to show until the match draws one: the RANDOM icon on
             // the plate, and its name where the assist would be.
             const float iconH = cardH * 0.72f;
             p.Sprite(TEX_STAGE_FIRST, cardX + cardW * 0.5f, y + cardH * 0.5f,
                      iconH / kStageIconAspect, iconH, kStageIconUv, A_MC);
-            p.Text("RANDOM", cardX + cardW * 0.5f, y + cardH + 16.0f, 0.56f, A_MC, kDim);
+            p.Text(CharacterLabel(roster_, character), cardX + cardW * 0.5f, y + cardH + 16.0f,
+                   0.56f, A_MC, kDim);
             continue;
         }
         p.Sprite(CharacterBanner(character, color), cardX, y, cardW, cardH, kBannerUv, A_TL);
@@ -3498,7 +3522,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
                 valueColor = kDim;
             }
             // A random member's assist and color are drawn with it.
-            if (field != 0 && character == kCharRandom) {
+            if (field != 0 && IsRandomMember(character)) {
                 snprintf(value, sizeof(value), "-");
                 valueColor = kDim;
                 randomRow = true;
@@ -3563,7 +3587,12 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
     }
     if (charPickerOpen_) {
         DrawCharPicker(canvas);
-        return matchClock("Choose a character.");
+        const int32_t highlighted = PickerCharacter(charPickerCursor_);
+        return matchClock(highlighted == kCharRandom
+                              ? "A random character, drawn once for the whole set."
+                              : highlighted == kCharRandomAll
+                                    ? "A random character, drawn again for every match of the set."
+                                    : "Choose a character.");
     }
     if (colorPickerOpen_) {
         DrawColorPicker(canvas);
@@ -3726,21 +3755,22 @@ void LobbyUi::DrawCharPicker(Canvas& canvas) const
         p.Sprite(CharacterFace(id, current ? prefs_.team.colors[member] : 0), cx, cy, size,
                  size * kFaceAspect, kFaceUv, A_MC);
     }
-    if (random) {
-        // RANDOM, alone on the last row and centred under the roster.
-        const float cx = x + w * 0.5f, cy = gridY + (rows - 1) * cellH + cellH * 0.5f;
-        const bool selected = charPickerCursor_ >= count;
+    for (int index = count; random && index < count + 2; ++index) {
+        // RANDOM and RANDOM ALL, on the last row and centred under the roster.
+        const int32_t id = PickerCharacter(index);
+        const float cx = x + w * 0.5f + (index == count ? -0.6f : 0.6f) * cell;
+        const float cy = gridY + (rows - 1) * cellH + cellH * 0.5f;
+        const bool selected = charPickerCursor_ == index;
         if (selected) {
             p.Box(TEX_ROW_SEL, cx - cell * 0.5f - 5.0f, cy - cellH * 0.5f - 5.0f, cell + 10.0f,
                   cellH + 10.0f);
-        } else if (prefs_.team.chars[member] == kCharRandom) {
+        } else if (prefs_.team.chars[member] == id) {
             p.Box(TEX_ROW_SEL, cx - cell * 0.5f, cy - cellH * 0.5f, cell, cellH,
                   WithAlpha(kCyan, 0.6f));
         }
-        DrawFace(p, kCharRandom, 0, cx, cy, selected ? face + 8.0f : face, A_MC);
+        DrawFace(p, id, 0, cx, cy, selected ? face + 8.0f : face, A_MC);
     }
-    const int32_t highlighted = charPickerCursor_ >= count ? kCharRandom
-                                                           : roster_.characterId(charPickerCursor_);
+    const int32_t highlighted = PickerCharacter(charPickerCursor_);
     p.TextFit(CharacterLabel(roster_, highlighted), x + w * 0.5f, y + h - 30.0f, 0.8f, w - 120.0f,
               A_MC, highlighted == prefs_.team.chars[member] ? kCyan : kText);
 }

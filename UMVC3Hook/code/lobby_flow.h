@@ -74,6 +74,10 @@ void LobbyFlow_OnResultPhase(int32_t winTeam);
 // False while a rematch must not be started from the result phase: the game
 // just finished has not been counted yet, or it decided the set.
 bool LobbyFlow_AllowResultRestart();
+// A game of a room set is restarting with this configuration: draws the team
+// members that are random for every game again, the same on both players.
+struct TrainingBootConfig;
+void LobbyFlow_RerollRandomMembers(TrainingBootConfig& config);
 // Ask to leave the current match and return to the room. Safe from the
 // render thread; the transition happens on the next game tick.
 void LobbyFlow_RequestReturnToLobby(const char* reason);

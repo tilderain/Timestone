@@ -31,9 +31,12 @@ constexpr int kMaxFirstTo = 10;
 // before. Only a player's own presets can hold one; the game's reserve units
 // cannot.
 constexpr int32_t kCharRandom = -1;
+// The same, but drawn again for every game of the set instead of once.
+constexpr int32_t kCharRandomAll = -2;
+inline bool IsRandomMember(int32_t id) { return id == kCharRandom || id == kCharRandomAll; }
 
 struct Team {
-    int32_t chars[3];   // a character id, or kCharRandom
+    int32_t chars[3];   // a character id, kCharRandom or kCharRandomAll
     int32_t assists[3]; // 0 = alpha, 1 = beta, 2 = gamma
     int32_t colors[3];  // zero-based archive variant
 };

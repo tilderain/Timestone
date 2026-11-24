@@ -121,6 +121,9 @@ void TrainingBoot_SetConfig(const TrainingBootConfig& cfg);
 
 // The configuration the running (or next) battle was booted with.
 const TrainingBootConfig& TrainingBoot_GetConfig();
+// The voice (0=Japanese, 1=English) a team's player chose for a character, as
+// both players of a netplay match know it once the battle has booted.
+uint8_t TrainingBoot_GetVoiceLanguage(int team, int32_t character);
 // A spectator boots someone else's match: every setting comes with the
 // configuration, and none is taken from this player's own options.
 void TrainingBoot_SetSpectatorBoot(bool enabled);

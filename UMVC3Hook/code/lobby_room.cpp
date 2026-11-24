@@ -84,7 +84,7 @@ int ParseFirstTo(const char* text)
 bool IsPlausibleTeam(const Team& team)
 {
     for (int i = 0; i < 3; ++i) {
-        const bool character = team.chars[i] == kCharRandom ||
+        const bool character = IsRandomMember(team.chars[i]) ||
                                (team.chars[i] >= 1 && team.chars[i] <= 50);
         if (!character || team.assists[i] < 0 || team.assists[i] > 2 || team.colors[i] < 0 ||
             team.colors[i] > 7)

@@ -834,6 +834,25 @@ int main(int argc, char** argv)
         Settle(ui, 2);
         ok &= Capture(ui, directory, "team_random_presets");
     }
+    {   // A member drawn again for every game: RANDOM ALL, beside RANDOM.
+        FakeService service;
+        UiPrefs prefs = DefaultPrefs();
+        prefs.presets[0].team.chars[1] = kCharRandom;
+        prefs.presets[0].team.chars[2] = kCharRandomAll;
+        prefs.team = prefs.presets[0].team;
+        LobbyUi ui(service, kRoster, prefs);
+        Settle(ui);
+        ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::confirm));
+        Settle(ui);
+        for (int i = 0; i < 7; ++i) ui.Update(Press(&Input::down)); // ANCHOR character
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_random_all");
+        ui.Update(Press(&Input::confirm));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "team_random_all_pick");
+    }
     {   // The pre-match prompt with a random member on the team in use.
         FakeService service;
         UiPrefs prefs = DefaultPrefs();

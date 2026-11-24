@@ -1049,6 +1049,20 @@ whole set and is made again for the next one. `BeginLaunch` publishes the
 team actually being played for the match slot's portraits and spectators;
 `LobbyUi::ReturnToRoom` publishes the player's own choice again.
 
+`kCharRandomAll` (-2, "RANDOM ALL", the cell beside RANDOM) is the same but
+drawn again for every game of the set. Its first draw is the one above. For
+the later ones `SetFormatPacket` carries which members are concerned
+(`rerollMask`) and a seed (`rerollSeed`), both from player 1. Every rematch is
+a synchronized full restart (`ChrSelImGui_ApplyRestart`), where each player
+calls `LobbyFlow_RerollRandomMembers` and works the new members out from that
+seed and the battle generation, so no draw is sent and both arrive at the same
+team. These draws keep to the six standard colors, which every install has,
+and take the owner's voice choice for the new character from the mask each
+player sends in the initial settings exchange (`LaunchTrainingPacket::voiceMask`).
+Spectators get the new roster with the restart, as for any roster change. A
+team taken to the game's own character select is drawn once before the screen
+and is not drawn again. **Unverified in game.**
+
 A client from before this (0.6.4) fails `IsPlausibleTeam` on a -1 and shows
 that member as not seated; lobbies are matched by version, so this only
 arises between a development build and the release of the same number. Not
