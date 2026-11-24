@@ -34,6 +34,10 @@ extern "C" bool FrameStepper_ScheduleRosterRestart(int32_t targetFrame,
 extern "C" bool FrameStepper_IsBattleSynchronized();
 extern "C" bool FrameStepper_IsMatchRestartPending();
 extern "C" bool FrameStepper_RequestMatchRestart();
+// As above, with the battle giving way to the shared character select.
+extern "C" bool FrameStepper_RequestSelectRestart();
+extern "C" uint32_t FrameStepper_GetRestartSeed();
+extern "C" void FrameStepper_SetRestartSeed(uint32_t seed);
 extern "C" uint32_t FrameStepper_GetBattleGeneration();
 extern "C" bool FrameStepper_IsDesyncCheckReady();
 extern "C" void FrameStepper_NotifyFighting();

@@ -21,6 +21,11 @@ namespace lobby {
 Canvas* Native_BeginFrame();
 // Hides units that were not used this frame.
 void Native_EndFrame();
+// Depth the first sprite of a frame is drawn at; each later one is a step
+// nearer. 0 puts back the lobby's own (31800, behind nothing in the title
+// area). Over another screen it has to start in front of that screen's
+// sprites: the character select's reach down to 16995.
+void Native_SetDepthBase(int depth);
 // Kills every unit the backend created and drops its resource references.
 // Call before requesting an area transition away from the title area.
 void Native_Shutdown();

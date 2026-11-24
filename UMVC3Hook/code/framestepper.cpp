@@ -192,6 +192,10 @@ static bool RequestMatchRestart()
         return false;
     if (g_restartTargetFrame >= 0 || g_trainingRestartBarrier)
         return false;
+    // The battle has given way to the character select: there is nothing to
+    // restart until the next one is booted from it.
+    if (TrainingBoot_IsSelectRestart())
+        return false;
     if (!IsPastIntroStep())
         return false;
 
@@ -215,6 +219,50 @@ static bool RequestMatchRestart()
 extern "C" bool FrameStepper_RequestMatchRestart()
 {
     return RequestMatchRestart();
+}
+
+// The synchronized restart, with the battle giving way to the shared
+// character select instead of starting over (RESTART_CHARSEL). Asked for by
+// one player (the host); the other is sent the same frame.
+extern "C" bool FrameStepper_RequestSelectRestart()
+{
+    if (Spectate_IsViewing() || !Netplay_IsActive())
+        return false;
+    if (g_restartTargetFrame >= 0 || g_trainingRestartBarrier ||
+        g_nativeRestartTransitionPending)
+        return false;
+    if (!IsPastIntroStep())
+        return false;
+
+    Controller_ClearDesyncDetection();
+    Rollback_ClearPendingReSimulation();
+    const int32_t targetFrame = Controller_GetNetFrameCount();
+    uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
+    if (sReplay)
+        g_restartRoundSeed = *(uint32_t*)(sReplay + 0x58);
+    Netplay_SendSelectRestart(targetFrame, g_restartRoundSeed);
+    g_restartKind = RESTART_CHARSEL;
+    g_restartButtonMode = 0;
+    g_restartTargetFrame = targetFrame;
+    HookLog("FrameStepper: scheduled the character select for frame %d\n", targetFrame);
+    return true;
+}
+
+// The seed the last restart was given. The restart through the character
+// select puts it in place again when the battle is finally booted.
+extern "C" uint32_t FrameStepper_GetRestartSeed()
+{
+    return g_restartRoundSeed;
+}
+
+extern "C" void FrameStepper_SetRestartSeed(uint32_t seed)
+{
+    g_restartRoundSeed = seed;
+    uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
+    if (sReplay) {
+        *(uint32_t*)(sReplay + 0x23424) = seed;
+        *(uint32_t*)(sReplay + 0x58) = seed;
+    }
 }
 
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
@@ -598,6 +646,21 @@ static bool SpectatorFrameStart(void* sMvc3Main)
             }
         }
         return false;
+    case SpectateStep::Select:
+        // The players went to the character select: the same transition, with
+        // both sides of the screen shown from the feed.
+        if (g_restartTargetFrame < 0 && !g_trainingRestartBarrier &&
+            !g_nativeRestartTransitionPending) {
+            uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
+            if (sReplay)
+                g_restartRoundSeed = *(uint32_t*)(sReplay + 0x58);
+            g_restartKind = RESTART_CHARSEL;
+            g_restartButtonMode = 0;
+            g_restartTargetFrame = frame;
+            HookLog("FrameStepper: spectator follows to the character select at frame %d\n",
+                    frame);
+        }
+        return false;
     case SpectateStep::Play:
         break;
     }
@@ -743,10 +806,23 @@ static void __fastcall HookedMove(void* sMvc3Main)
             // Spectators follow with the roster the restart was given.
             if (restartNetplay && !Spectate_IsViewing())
                 Spectate_RecRestart(g_restartRoundSeed);
+        } else if (g_restartKind == RESTART_CHARSEL) {
+            // The select screen's area is asked for in place of the battle's
+            // reload; the battle is booted from there once both players are
+            // through it (LobbyFlow, TrainingBoot_FinishSelectRestart).
+            if (!restartNetplay || !LobbyFlow_BeginMatchCharSelect()) {
+                HookLog("FrameStepper: character select rejected at frame %d\n",
+                        g_restartTargetFrame);
+                g_restartTargetFrame = -1;
+                g_restartKind = RESTART_FULL_MATCH;
+                g_restartButtonMode = 0;
+                return;
+            }
         }
         HookLogFlush();
+        const bool selectTransition = g_restartKind == RESTART_CHARSEL;
         const bool fullRosterTransition =
-            ChrSelImGui_TakeFullTransitionRequested();
+            ChrSelImGui_TakeFullTransitionRequested() || selectTransition;
         static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
         static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
         static constexpr uintptr_t SREPLAY_PTR = 0x140D4D9D8;
@@ -855,9 +931,11 @@ static void __fastcall HookedMove(void* sMvc3Main)
             g_battleAdvertiseTick = 0;
         }
         g_restartTargetFrame = -1;
+        g_restartKind = RESTART_FULL_MATCH;
 
         HookLog("FrameStepper: queued %s (%s, generation=%u seed=0x%08X)\n",
-                  fullRosterTransition ? "full roster transition" : "match restart",
+                  selectTransition ? "character select"
+                  : fullRosterTransition ? "full roster transition" : "match restart",
                   restartNetplay ? "netplay" : "offline",
                   g_battleGeneration, g_restartRoundSeed);
         }
@@ -1764,6 +1842,11 @@ void FrameStepper_Process()
             // soon as it receives the host's restart packet; execution clears the
             // same state at the target frame below.
             Rollback_ClearPendingReSimulation();
+            if (remoteRestartKind > RESTART_CHARSEL) {
+                HookLog("FrameStepper: ignored a restart of unknown kind %u\n",
+                        remoteRestartKind);
+                continue;
+            }
             g_restartTargetFrame = remoteRestartFrame;
             g_restartRoundSeed = remoteRestartSeed;
             g_restartKind = remoteRestartKind;
@@ -1788,7 +1871,8 @@ void FrameStepper_Process()
     }
     if (Netplay_IsActive() && !Spectate_IsViewing())
     {
-        if (KeyPressed(VK_F3))
+        // (On the character select F3 is the pause menu's key.)
+        if (KeyPressed(VK_F3) && !LobbyFlow_PlayerInCharSelect())
         {
             g_statusHudMode = (g_statusHudMode + 2) % 3;
             SaveStatusHudMode();

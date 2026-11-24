@@ -19,6 +19,7 @@
 #include <cstdint>
 
 struct TrainingBootConfig;
+struct CharSelPacket;
 
 // --- Recording (the two players) ----------------------------------------------
 // A netplay session in a room match begins / is over.
@@ -36,6 +37,11 @@ void Spectate_RecChecksum(int32_t frame, uint32_t checksum, const uint32_t parts
                           const uint32_t rng[6]);
 // The game is being restarted (a rematch) with the roster in TrainingBoot.
 void Spectate_RecRestart(uint32_t restartSeed);
+// The players left the game for the character select; and, from then until
+// the restart that ends it, what a team's side of that screen shows (0 =
+// player 1). Each player records both sides: its own and the one it is sent.
+void Spectate_RecSelectBegin();
+void Spectate_RecSelect(int team, const CharSelPacket& packet);
 
 // --- Watching ------------------------------------------------------------------
 enum class SpectateState : uint8_t {
@@ -67,10 +73,23 @@ enum class SpectateStep : uint8_t {
              // -1: one frame time later than usual, the last picture standing)
     Restart, // the game was restarted: do the same (Spectate_GetRestart)
     Leave,   // the match is over
+    Select,  // the game is played out and the players are on the character
+             // select: go there too (Spectate_OnSelectApplied)
 };
 SpectateStep Spectate_Next(int32_t frame, int32_t actionStep, int32_t* fastForward);
 bool Spectate_GetRestart(TrainingBootConfig* config, uint32_t* restartSeed);
 void Spectate_OnRestartApplied();
+// The local game has left the battle for the select screen. From here:
+// a team's side of the screen as the feed last had it (`version` changes
+// with it), and how the screen ends.
+void Spectate_OnSelectApplied();
+bool Spectate_GetSelect(int team, CharSelPacket* packet, uint32_t* version);
+enum class SpectateSelectEnd : uint8_t {
+    Running, // the players are still on it
+    Restart, // they started the next game: boot `config`
+    Over,    // the match ended there
+};
+SpectateSelectEnd Spectate_SelectResult(TrainingBootConfig* config, uint32_t* restartSeed);
 // After each simulated frame, for the periodic comparison with the players.
 bool Spectate_WantsChecksum(int32_t frame);
 void Spectate_OnChecksum(int32_t frame, uint32_t checksum, const uint32_t parts[4],

@@ -146,6 +146,8 @@ static bool g_skipNativeConfigLoad = false;
 static bool g_restartConfigPending = false;
 static bool g_restartTransitionActive = false;
 static bool g_restartSawActionSetup = false;
+// The restart is waiting on the character select (TrainingBoot_BeginSelectRestart).
+static bool g_restartAwaitingSelect = false;
 static TrainingBootCpuMode g_cpuMode = TRAINING_CPU_NONE;
 static bool g_fiveBarStart = false;
 static bool g_initialSettingsSent = false;
@@ -225,6 +227,7 @@ void TrainingBoot_PrepareNextBoot(bool networkRequired)
     g_restartConfigPending = false;
     g_restartTransitionActive = false;
     g_restartSawActionSetup = false;
+    g_restartAwaitingSelect = false;
 }
 
 bool TrainingBoot_HasBooted()
@@ -950,9 +953,46 @@ bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg)
     return true;
 }
 
+// A restart that goes through the character select: the battle has given way
+// to the select screen, and the next one is booted from there once the teams
+// and the stage are picked. Until then the restart counts as pending, which
+// is what keeps the netplay start-up barrier from reading the old battle.
+void TrainingBoot_BeginSelectRestart()
+{
+    g_restartTransitionActive = true;
+    g_restartConfigPending = false;
+    g_restartSawActionSetup = false;
+    g_restartAwaitingSelect = true;
+    HookLog("TrainingBoot: restart through the character select begun\n");
+}
+
+bool TrainingBoot_IsSelectRestart()
+{
+    return g_restartAwaitingSelect;
+}
+
+bool TrainingBoot_FinishSelectRestart(const TrainingBootConfig& cfg)
+{
+    if (!g_restartAwaitingSelect)
+        return false;
+    g_bootConfig = cfg;
+    g_hasBooted = false;
+    g_skipNativeConfigLoad = true;
+    BootIntoTraining(true);
+    g_skipNativeConfigLoad = false;
+    if (!g_hasBooted)
+        return false; // not ready this tick; the caller tries again
+    g_restartAwaitingSelect = false;
+    g_restartSawActionSetup = false;
+    HookLog("TrainingBoot: booted the battle picked on the character select\n");
+    return true;
+}
+
 void TrainingBoot_UpdateRestart()
 {
     if (!g_restartTransitionActive)
+        return;
+    if (g_restartAwaitingSelect)
         return;
 
     uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);

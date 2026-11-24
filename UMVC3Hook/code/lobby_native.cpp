@@ -218,6 +218,7 @@ uint32_t g_textureRetryFrame[TEX_COUNT] = {};
 bool g_textureFailureLogged[TEX_COUNT] = {};
 uint32_t g_frame = 0;
 uint32_t g_stageFrames = 0;
+int g_depthFar = kDepthFar; // where a frame's first sprite goes (Native_SetDepthBase)
 int g_nextDepth = kDepthFar;
 
 void* CloneUnit(Kind kind)
@@ -1184,8 +1185,13 @@ Canvas* Native_BeginFrame()
 
     HideSchedulerUnits();
     for (Pool& pool : g_pools) pool.used = 0;
-    g_nextDepth = kDepthFar;
+    g_nextDepth = g_depthFar;
     return &g_canvas;
+}
+
+void Native_SetDepthBase(int depth)
+{
+    g_depthFar = depth > 0 ? depth : kDepthFar;
 }
 
 void Native_EndFrame()

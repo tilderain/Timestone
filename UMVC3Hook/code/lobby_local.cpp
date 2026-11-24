@@ -30,7 +30,9 @@ constexpr int kChatEntries = 64;
 constexpr int kChatSize = 160;
 constexpr ULONGLONG kMemberTimeoutMs = 4000;
 constexpr uint64_t kIdBase = 0x0110000100000000ull; // shaped like a SteamID
-constexpr uint16_t kMatchPortBase = 27100;
+// The match connection between two test instances: one fixed port, so it can
+// be watched or shaped with ordinary network tools.
+constexpr uint16_t kMatchPort = 7777;
 
 struct KeyValue {
     char key[kKeySize];
@@ -507,16 +509,16 @@ bool LocalLobby_PollChat(uint64_t* sender, char* buffer, int capacity, int* size
 }
 
 // --- Match connection -----------------------------------------------------------
-// The player-1 side listens on a localhost port derived from its own id; the
-// other side derives the same port from the id it was told to connect to.
+// The player-1 side listens on localhost port 7777 and the other side dials
+// it. One match at a time: a second pairing on this PC (three or more test
+// windows and two match slots) cannot open the port while the first holds it.
 bool LocalLobby_ConnectPeer(uint64_t memberId, bool asHost)
 {
     DestroyMatchHost();
     g_matchIsHost = asHost;
     g_matchFailed = false;
     snprintf(g_peerName, sizeof(g_peerName), "%s", LocalLobby_GetMemberName(memberId));
-    const uint64_t hostId = asHost ? g_localId : memberId;
-    const uint16_t port = static_cast<uint16_t>(kMatchPortBase + (hostId - kIdBase) % 2000);
+    const uint16_t port = kMatchPort;
     if (asHost) {
         ENetAddress address = {};
         address.host = ENET_HOST_ANY;

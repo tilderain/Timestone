@@ -30,6 +30,7 @@ enum PacketType : uint32_t {
     PACKET_BENCHMARK = 19, // Benchmark payload on the extension channel
     PACKET_INPUT_REQUEST = 20, // InputRequestPacket
     PACKET_SET_FORMAT = 21, // SetFormatPacket
+    PACKET_CHARSEL = 22, // CharSelPacket
 };
 
 #pragma pack(push, 1)
@@ -93,6 +94,64 @@ struct SetFormatPacket {
     // out from rerollSeed on both sides, so none of them is sent.
     uint32_t rerollMask;
     uint32_t rerollSeed;
+};
+
+// Lobby matches: one player's side of the shared character select screen, as
+// it is right now. Sent whenever it changes and a few times a second besides;
+// the receiver draws the sender's team from it (native_charsel.h). The first
+// one a player receives also brings them to the screen.
+struct CharSelPacket {
+    uint32_t type;               // PACKET_CHARSEL
+    uint32_t sequence;
+    uint8_t  slotState;          // the select screen's state for this team: 0..8 or 0x0B
+    uint8_t  cursorCell;         // roster grid cell under the cursor, 0..55
+    uint8_t  flags;              // CharSelFlags
+    uint8_t  assistHover;        // assist highlighted while one is being chosen
+    int32_t  chars[3];           // 0 for a member not picked yet
+    int32_t  colors[3];          // zero-based archive variant IDs
+    int32_t  assists[3];         // 0=Alpha, 1=Beta, 2=Gamma
+    // One of the two picks the stage once both teams are final (see `coin`);
+    // the other leaves these at 0.
+    uint8_t  stageCursor;        // stage select position, 0..18 (0 = random)
+    // Who picks the stage is a coin toss: each player sends one bit, chosen
+    // when they open the screen, and the two are XORed (0 = player 1).
+    uint8_t  coin;
+    uint8_t  reserved[2];
+    int32_t  stageId;            // the stage, once CHARSEL_STAGE_DECIDED
+};
+
+// On the extension channel of a running netplay session (the first field is
+// PACKET_EXTENSION, the second one of these).
+constexpr uint32_t kResultMenuMagic = 0x314D5352; // "RSM1"
+constexpr uint32_t kCharSelExtMagic = 0x31534843; // "CHS1"
+
+// A player's side of the result screen's menu (native_result.h), sent to the
+// other player whenever it changes and a few times a second besides.
+struct ResultMenuPacket {
+    uint32_t type;               // PACKET_EXTENSION
+    uint32_t magic;              // kResultMenuMagic
+    uint32_t generation;         // the game it belongs to
+    uint8_t  cursor;             // 0 rematch, 1 character select, 2 main menu
+    uint8_t  choice;             // 0 none yet, else ResultChoice
+    uint8_t  reserved[2];
+};
+
+// The select screen's packet while it is reached from a match: the session's
+// own connection carries it.
+struct CharSelExtPacket {
+    uint32_t type;               // PACKET_EXTENSION
+    uint32_t magic;              // kCharSelExtMagic
+    uint32_t generation;
+    uint8_t  inner[56];          // CharSelPacket
+};
+
+static_assert(sizeof(CharSelPacket) == sizeof(CharSelExtPacket::inner));
+
+enum CharSelFlags : uint8_t {
+    CHARSEL_LOCKED_IN = 1 << 0,   // the team is final
+    CHARSEL_PRESET_LIST = 1 << 1, // the sender has their preset list open
+    CHARSEL_LEFT = 1 << 2,        // the sender backed out of the screen
+    CHARSEL_STAGE_DECIDED = 1 << 3, // stageId is final
 };
 
 struct LaunchTrainingPacket {
@@ -181,6 +240,9 @@ struct RestartMatchPacket {
 enum RestartMatchKind : uint32_t {
     RESTART_FULL_MATCH = 0,
     RESTART_TRAINING = 1,
+    // The battle ends for the shared character select (native_charsel.h); the
+    // next one is booted from there with the teams and the stage picked.
+    RESTART_CHARSEL = 2,
 };
 
 struct MultiResimPacket {
@@ -366,6 +428,8 @@ void Netplay_SendDesyncUnpause();
 bool Netplay_GetInboundDesync(DesyncPacket& outPacket);
 
 void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
+// The same, with the battle giving way to the character select (RESTART_CHARSEL).
+void Netplay_SendSelectRestart(int32_t targetFrame, uint32_t roundSeed);
 void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed,
                                  int32_t buttonRestart);
 bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,

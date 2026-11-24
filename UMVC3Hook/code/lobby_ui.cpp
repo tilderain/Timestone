@@ -646,9 +646,8 @@ bool LobbyUi::MoveCursor(int& cursor, int count, const Input& input, bool wrap)
 void LobbyUi::Update(const Input& input)
 {
     ++frame_;
-    // The team screen keeps the backdrop of the screen it was opened from.
-    const bool roomBackdrop = screen_ == Screen::Room || editingRoom_ ||
-                              (screen_ == Screen::Team && teamReturn_ == Screen::Room);
+    // The team screen has the space backdrop wherever it was opened from.
+    const bool roomBackdrop = screen_ == Screen::Room || editingRoom_ || screen_ == Screen::Team;
     if (roomBackdrop) {
         if (roomBackdrop_ < kRoomBackdropFrames) ++roomBackdrop_;
     } else {
@@ -1312,6 +1311,10 @@ bool LobbyUi::UpdateHandshake(const Input& given)
         if (entryFrames_ - teamFrames_ >= kEntryTimeout || (input.confirm && handshakeCursor_ == 0)) {
             service_.SetReady(true);
             Play(SFX_CONFIRM);
+        } else if (input.confirm && nativeCharSel_) {
+            // The flow takes both players to the game's select screen.
+            Play(SFX_CONFIRM);
+            charSelRequested_ = true;
         } else if (input.confirm) {
             Play(SFX_CONFIRM);
             teamForMatch_ = true;
@@ -1827,6 +1830,50 @@ void LobbyUi::RefreshPreset()
 
 // Every team slot at once: confirm uses one (a free slot first takes a copy
 // of the team in use), X renames a preset and Y deletes it.
+bool LobbyUi::TakeCharSelectRequested()
+{
+    const bool requested = charSelRequested_;
+    charSelRequested_ = false;
+    return requested;
+}
+
+void LobbyUi::OpenPresetPicker()
+{
+    presetPicker_ = true;
+    presetListCursor_ = prefs_.slot;
+    Play(SFX_CONFIRM);
+}
+
+bool LobbyUi::UpdatePresetPicker(const Input& input, Team* picked)
+{
+    if (!presetPicker_) return false;
+    ++frame_; // the selection frame pulses on it
+    if (input.cancel || input.menu) {
+        presetPicker_ = false;
+        Play(SFX_CANCEL);
+        return false;
+    }
+    const int rows = kTeamPresets + (roster_.presetCount ? roster_.presetCount() : 0);
+    if (presetListCursor_ >= rows) presetListCursor_ = rows - 1;
+    MoveCursor(presetListCursor_, rows, input);
+    if (!input.confirm) return false;
+    Team team;
+    if (!SlotTeam(presetListCursor_, &team)) {
+        Play(SFX_CANCEL); // an empty slot: nothing to pick
+        return false;
+    }
+    SelectSlot(presetListCursor_);
+    presetPicker_ = false;
+    Play(SFX_CONFIRM);
+    *picked = team;
+    return true;
+}
+
+void LobbyUi::DrawPresetPicker(Canvas& canvas) const
+{
+    if (presetPicker_) DrawPresetList(canvas);
+}
+
 void LobbyUi::UpdatePresetList(const Input& input)
 {
     if (input.cancel || input.menu) {
@@ -2289,7 +2336,7 @@ void LobbyUi::DrawBackdrop(Canvas& canvas) const
     // pushed far back so panels and text read.
     canvas.Sprite(TEX_WHITE, 0.0f, 0.0f, kScreenW, kScreenH, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
                   Color{0.02f, 0.03f, 0.07f, 0.74f});
-    // In a room the space backdrop fades in over it: stars and a scrolling
+    // In a room and in team setup the space backdrop fades in over it: stars and a scrolling
     // grid, after the lobby of the first game (space_bg.cpp).
     if (roomBackdrop_ > 0) {
         const float t = roomBackdrop_ / static_cast<float>(kRoomBackdropFrames);

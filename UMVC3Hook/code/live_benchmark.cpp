@@ -1,6 +1,7 @@
 #include "../pch.h"
 #include "../imgui/imgui.h"
 #include "live_benchmark.h"
+#include "lobby_flow.h"
 #include "lag_diagnostics.h"
 #include "escmenu_imgui.h"
 #include "framestepper.h"
@@ -547,7 +548,8 @@ void LiveBenchmark_Update()
         uint32_t magic = 0;
         if (size >= 8) std::memcpy(&magic, bytes + 4, sizeof(magic));
         if (magic != Magic) {
-            ChrSelImGui_HandleExtension(bytes, size);
+            if (!LobbyFlow_HandleExtension(bytes, size))
+                ChrSelImGui_HandleExtension(bytes, size);
             continue;
         }
         if (size != sizeof(Packet)) continue;

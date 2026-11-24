@@ -155,6 +155,13 @@ void BootIntoTraining(bool queueAreaTransition = true);
 bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg);
 void TrainingBoot_UpdateRestart();
 bool TrainingBoot_IsRestartPending();
+// A restart that goes through the shared character select (native_charsel.h)
+// instead of straight back into the battle. Begin marks the restart pending
+// with nothing queued; Finish boots the battle from the select screen's area
+// with what was picked (false while the boot cannot commit yet: call again).
+void TrainingBoot_BeginSelectRestart();
+bool TrainingBoot_IsSelectRestart();
+bool TrainingBoot_FinishSelectRestart(const TrainingBootConfig& cfg);
 
 // Init the hook on aTitle__update.
 void TrainingBoot_InitHooks();

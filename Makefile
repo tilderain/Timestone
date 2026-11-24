@@ -120,6 +120,8 @@ CPP_SRC   := \
 	$(SRCDIR)/code/lobby_local.cpp \
 	$(SRCDIR)/code/spectate.cpp \
 	$(SRCDIR)/code/lobby_flow.cpp \
+	$(SRCDIR)/code/native_charsel.cpp \
+	$(SRCDIR)/code/native_result.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
 	$(SRCDIR)/code/online_rewards.cpp \
 	$(SRCDIR)/code/load_diag.cpp \
