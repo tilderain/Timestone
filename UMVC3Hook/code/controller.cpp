@@ -1068,6 +1068,11 @@ extern "C" int32_t Controller_FirstRollbackFrame()
     return g_introLastFrame >= 0 ? g_introLastFrame + INTRO_QUIET_FRAMES + 1 : 0;
 }
 
+// A bit of the timeline's input word that no logical action uses: "an attack
+// is held", for the intro and outro skip. It travels with the inputs (packets,
+// snapshots, the spectator log) and is stripped before a character sees them.
+static constexpr uint32_t TIMELINE_SKIP_FLAG = 0x80000000u;
+
 struct FrameInputRemapContext {
     uint32_t ownerTeam;
     uint32_t timelineTeam;
@@ -1113,6 +1118,8 @@ static uint32_t ResolveTimelineInput(FrameInputRemapContext* context,
             : (g_delayFrames == 0 ? currentInput : 0);
     }
 
+    // Not an input: the intro / outro skip's own bit (see TimelineSkipPressed).
+    resolved &= ~TIMELINE_SKIP_FLAG;
     // Through the intro the characters are given nothing (see above); what
     // was pressed is still captured and sent, which is what the skip reads.
     if (IsIntroQuietFrame(context->frame))
@@ -1340,12 +1347,16 @@ extern "C" uint32_t Controller_CaptureOpeningMember()
 // the time it is read: the answer is the same live and in any replay, and no
 // rollback can move the frame the intro or the outro ends on. Only a press
 // counts, not a button held since the loading.
-// The timeline holds logical actions (the output of cChrInput__buttonRemap:
-// directions in the low four bits, then the actions the player's button
-// config maps to), not pad buttons. The four attacks are 0xF0 there, which is
-// also what the game's own online intro tests on its synchronized buttons
-// (processNormalIntro, 0x140008440). The pad read the native skip makes is
-// then answered in the pad's layout, where it tests the face buttons, 0xF000.
+// What is read there is a bit of its own (TIMELINE_SKIP_FLAG, declared with
+// the timeline), set while the local player holds an attack and never given
+// to a character. The attacks themselves must not be added to the timeline
+// here: with no input delay the local characters are simulated from what
+// their own input hook read, before anything added here, while the other
+// peer and every replay would get the added bits (the outro desync of
+// 2026-11-24, where the winner acted on them on one side only).
+// The four attacks are 0xF0 in the logical layout cChrInput__buttonRemap
+// produces. The pad read the native skip makes is answered in the pad's
+// layout, where it tests the face buttons, 0xF000.
 static constexpr uint32_t SKIP_ACTIONS = 0xF0;
 static constexpr uint32_t SKIP_PAD_BUTTONS = IN_X | IN_Y | IN_A | IN_B;
 static constexpr int32_t SKIP_INPUT_LAG = 16; // the largest rollback window there is
@@ -1370,8 +1381,8 @@ static bool TimelineSkipPressed()
         (g_isResimulating ? g_resimulateCurrentFrame : GetGameFrameCount()) - SKIP_INPUT_LAG;
     if (frame < 1)
         return false;
-    return (ConfirmedInputs(frame) & SKIP_ACTIONS) != 0 &&
-           (ConfirmedInputs(frame - 1) & SKIP_ACTIONS) == 0;
+    return (ConfirmedInputs(frame) & TIMELINE_SKIP_FLAG) != 0 &&
+           (ConfirmedInputs(frame - 1) & TIMELINE_SKIP_FLAG) == 0;
 }
 
 // Characters do not necessarily read their pads during the intro or the
@@ -1381,7 +1392,8 @@ static void CaptureLocalSkipInput()
 {
     if (g_isResimulating || Spectate_IsViewing())
         return;
-    g_localPending |= ReadLocalLogicalInput() & SKIP_ACTIONS;
+    if (ReadLocalLogicalInput() & SKIP_ACTIONS)
+        g_localPending |= TIMELINE_SKIP_FLAG;
 }
 
 // While set, the raw pad read answers with this in place of any pad: the
@@ -1565,10 +1577,14 @@ static void __fastcall hkStepResult9_10_11(uint64_t sAction)
         return;
     if (Netplay_IsActive() && LobbyFlow_InRoomMatch()) {
         // The result menu is up: the rematch waits for both players' choice
-        // there (LobbyFlow_GameTick acts on it).
+        // there (LobbyFlow_GameTick acts on it) and is then the synchronized
+        // restart. The native handler is never run: in versus all it does is
+        // restart the match by itself (restart mode 1, step 12) once it is
+        // let through, and what holds it back while the menu is up is not
+        // part of a rollback. A replay of these frames ran it, and that peer
+        // alone went back into the intro (desync of 2026-11-24).
         LobbyFlow_OnResultPhase(*(int32_t*)(sAction + 0x114));
-        if (FrameStepper_IsMatchRestartPending())
-            return;
+        return;
     } else if (Netplay_IsActive()) {
         LobbyFlow_OnResultPhase(*(int32_t*)(sAction + 0x114));
         if (!FrameStepper_IsMatchRestartPending() && LobbyFlow_AllowResultRestart() &&
