@@ -202,9 +202,8 @@ jobs:
 
           To install, download TimestoneInstall.exe and run it. It finds your Marvel 3 folder in Steam and puts the latest Timestone in it.
           On Linux and Steam Deck, download TimestoneInstall.sh instead and run it in a terminal: sh TimestoneInstall.sh
-          It is the same installer as a native program, and it sets Proton up to load Timestone.
 
-          To install by hand instead, extract the contents of Timestone.zip into your marvel folder
+          If you want to manual install instead, extract the contents of Timestone.zip into your marvel folder
 
           Go to your Marvel 3 install directory, 
           easiest way is go to Steam, right click Marvel 3, and select Manage -> Browse Local Files.
