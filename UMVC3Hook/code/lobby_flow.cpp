@@ -278,6 +278,9 @@ constexpr int kCharSelDepthBase = 16900;
 // Where the set score is drawn on the select screen, as a fraction of the
 // height: under the game's status bar (which ends at 667 of 720).
 constexpr float kSelectScoreY = 0.945f;
+// "PLAYER n IS SELECTING THE STAGE", in the lobby canvas's 1280x720: above
+// the stage page's window and below the screen's clock.
+constexpr float kStagePickerTextY = 104.0f;
 
 // Frames the lobby has been waiting for the native backend to come up.
 std::atomic<uint32_t> g_nativeWaitFrames{0};
@@ -2227,9 +2230,8 @@ void CharSelScreenFrame(const Input& input)
             char line[160];
             snprintf(line, sizeof(line), "PLAYER %d (%.40s) IS SELECTING THE STAGE", picker + 1,
                      mine ? g_service->LocalName() : g_pairing.opponentName);
-            // Between the stage page (down to about y 560) and the game's
-            // status bar (y 627..667), which is drawn over everything here.
-            canvas->Text(line, 640.0f, 598.0f, 0.74f, A_MC,
+            // Over the stage page, under the screen's clock.
+            canvas->Text(line, 640.0f, kStagePickerTextY, 0.74f, A_MC,
                          mine ? Color{1.0f, 0.9f, 0.2f, 1.0f} : Color{1.0f, 1.0f, 1.0f, 0.95f});
         } else if (offered) {
             canvas->Text("START: TEAM PRESETS", g_pairing.localSide == 0 ? 40.0f : 1240.0f, 700.0f,
@@ -3022,6 +3024,18 @@ static void EndMatchCharSelect(bool startingBattle)
 bool LobbyFlow_BeginMatchCharSelect()
 {
     if (!g_enabled || g_phase != Phase::InMatch || g_charSelArea || !g_ui) return false;
+    // Only from the result phase. The restart packet that asks for this comes
+    // from the other player: one sent in the middle of a game is not obeyed.
+    {
+        using GetInstance = uint64_t(__fastcall*)();
+        const uint64_t action = reinterpret_cast<GetInstance>(_addr(0x140001A90))();
+        const int32_t step = action ? *reinterpret_cast<int32_t*>(action + 0xD8) : 0;
+        if (step < 8 || step > 11) {
+            HookLog("LobbyFlow: character select asked for outside the result phase (step %d); "
+                    "ignored\n", step);
+            return false;
+        }
+    }
     charsel::Config config = {};
     config.seconds = kCharSelSeconds;
     config.stageSeconds = kCharSelStageSeconds;
@@ -3198,7 +3212,8 @@ static void SpectatorSelectFrame(ULONGLONG now)
             char line[160];
             snprintf(line, sizeof(line), "PLAYER %d (%.40s) IS SELECTING THE STAGE", picker + 1,
                      g_watchNames[picker]);
-            canvas->Text(line, 640.0f, 598.0f, 0.74f, A_MC, Color{1.0f, 1.0f, 1.0f, 0.95f});
+            canvas->Text(line, 640.0f, kStagePickerTextY, 0.74f, A_MC,
+                         Color{1.0f, 1.0f, 1.0f, 0.95f});
         }
         Native_EndFrame();
     }

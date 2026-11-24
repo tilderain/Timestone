@@ -137,6 +137,8 @@ constexpr uintptr_t BGMAIN_STATUS_KIND = 0x14036D650;    // (background) -> 0 wh
 constexpr uintptr_t GSOUND_GET_INSTANCE = 0x140003AA0;
 constexpr uintptr_t GSOUND_RESOLVE_REF = 0x1402AA2B0;         // (this, cRef* out, bank)
 constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, team, 1.0f, 0)
+// The announcer calling a character's name, as a pick does (slotState246).
+constexpr uintptr_t GSOUND_PLAY_CHARACTER_NAME = 0x1402AC980; // (this, cRef* out, character id)
 constexpr uintptr_t BGMAIN_DELAY_ELAPSED = 0x14036DCB0;  // (background) -> bool
 constexpr uintptr_t BGMAIN_SET_STAGE = 0x140378CA0;      // (background, table value)
 constexpr uintptr_t STAGE_PAGE_TABLE = 0x140B400C0;      // int32_t[19], [0] = 0x13 (random)
@@ -227,6 +229,7 @@ struct Session {
     uint8_t remoteAssistOpen[2] = {}; // the state the assist list was opened for
     bool remoteFinalApplied[2] = {};  // the locked-in team is on the screen
     uint8_t coin[2] = {};             // one bit per team, XORed: which team picks the stage
+    uint32_t remoteSoundFrame[2] = {}; // tick a side's step last made a sound on
     // The stage select, as the picking team's packets describe it.
     uint8_t remoteStageCursor = 0;
     bool remoteStageDecided = false;
@@ -565,6 +568,85 @@ void PlayVoice(uint32_t bank, uint32_t id, int team)
                                              static_cast<uint64_t>(team), 1.0f, 0);
 }
 
+// What a pick sounds like in the game (slotState246, 0x140364C50): the pick
+// cue of that side, then the announcer with the character's name. The other
+// player's picks arrive as state, so they are given the same here.
+void PlayPickSounds(int team, int32_t character)
+{
+    PlayVoice(6, team == 0 ? 0x8D : 0x97, team); // kCuePick
+    void* sound = Instance(GSOUND_GET_INSTANCE);
+    if (!sound) return;
+    using PlayName = void*(__fastcall*)(void*, void*, uint32_t);
+    alignas(16) uint8_t handle[32] = {};
+    Native<PlayName>(GSOUND_PLAY_CHARACTER_NAME)(sound, handle, static_cast<uint32_t>(character));
+}
+
+// The select screen's cues, bank 6, player 1's (player 2's are 10 higher):
+// roster cursor moved (slotState246), character picked, assist list moved,
+// assist decided, a step taken back (uMenuChrSelAssist__processAssistSelection,
+// 0x14036B4B0), team complete.
+enum SelectCue : uint32_t {
+    kCueCursor = 0x8C,
+    kCuePick = 0x8D,
+    kCueAssistMove = 0x8E,
+    kCueAssistDecide = 0x8F,
+    kCueBack = 0x90,
+    kCueComplete = 0x91,
+};
+
+void PlayTeamCompleteSounds(int team);
+
+void PlayCue(int team, SelectCue cue)
+{
+    PlayVoice(6, cue + (team == 0 ? 0u : 10u), team);
+}
+
+// The sounds of one step on a side drawn from packets, from what it showed
+// before to what it shows now: what the game plays when the same step is
+// taken on its own pad.
+void PlayRemoteStepSounds(int team, const CharSelPacket& before, const CharSelPacket& now)
+{
+    const uint8_t was = before.slotState, is = now.slotState;
+    const bool locked = (now.flags & CHARSEL_LOCKED_IN) != 0;
+    if (locked) {
+        // A third assist completes the team; a preset is all at once.
+        if (IsAssistState(was)) PlayCue(team, kCueAssistDecide);
+        PlayTeamCompleteSounds(team);
+        return;
+    }
+    if (is == was) {
+        if (IsAssistState(is)) {
+            if (now.assistHover != before.assistHover) PlayCue(team, kCueAssistMove);
+        } else if (is == 2 || is == 4 || is == 6) {
+            const int hovered = PickedCount(is);
+            if (now.cursorCell != before.cursorCell) {
+                PlayCue(team, kCueCursor);
+            } else if (hovered < 3 && now.colors[hovered] != before.colors[hovered]) {
+                // A color cycled on the character under the cursor: the same
+                // cue for either player (updateCharacterVariantSelection,
+                // 0x140362BA0 area: bank 1, voice 9).
+                PlayVoice(1, 9, 0);
+            }
+        }
+        return;
+    }
+    if (was > 7 || is > 7) return;
+    if (is < was) {
+        if (was >= 2) PlayCue(team, kCueBack);
+        return;
+    }
+    const int picked = PickedCount(is);
+    if (picked > PickedCount(was) && picked >= 1) PlayPickSounds(team, now.chars[picked - 1]);
+    else if (IsAssistState(was)) PlayCue(team, kCueAssistDecide);
+}
+
+// And a completed team: its cue and the announcer's call for that side.
+void PlayTeamCompleteSounds(int team)
+{
+    PlayVoice(6, team == 0 ? 0x91 : 0x9B, team);
+    PlayVoice(6, team == 0 ? 0x54 : 0x86, team);
+}
+
 // Puts a whole team on the local side through the game's own reserve-unit
 // path (uMenuChrSel__commitCharSelectionForSlot): all three records, the
 // card, the archives, and the slot at "team complete".
@@ -856,13 +938,19 @@ void __fastcall Hook_OptionUpdate(void* page)
             int32_t& cursor = Field<int32_t>(page, OPTION_STAGE_CURSOR);
             const int32_t wanted = g.remoteStageCursor;
             if (cursor != wanted) {
+                // What the picker's own page plays for a step
+                // (uMenuChrSelOption__updateStageSelection).
+                PlayVoice(6, 0x8C, 0);
                 // The shorter way round decides which way the picture slides.
                 const int32_t back = (cursor - wanted + kStagePositions) % kStagePositions;
                 Field<uint8_t>(page, OPTION_PAGE_LEFT) = back <= kStagePositions / 2;
                 cursor = wanted;
                 Field<int32_t>(page, OPTION_PAGE_COUNT) = 8;
             }
-            if (g.remoteStageDecided) Field<uint8_t>(page, OPTION_DECIDED) = 1;
+            if (g.remoteStageDecided && !Field<uint8_t>(page, OPTION_DECIDED)) {
+                Field<uint8_t>(page, OPTION_DECIDED) = 1;
+                PlayVoice(6, 0x8D, 0); // the confirm (aChrSelect__confirmStageSelectInput)
+            }
         }
     }
     g_originalOptionUpdate(page);
@@ -1178,9 +1266,30 @@ void OnPeerPacket(const CharSelPacket& packet)
     if (g.active && !Watching()) OnTeamPacket(1 - g.config.localTeam, packet);
 }
 
-void OnTeamPacket(int team, const CharSelPacket& packet)
+// The character a roster cell stands for, 0 for none (the "?" and random
+// cells included).
+int32_t CharacterAtCell(uint32_t cell)
+{
+    using FindGridIndex = uint64_t(__fastcall*)(int32_t);
+    for (int32_t id = 1; id < kSelectableTableSize; ++id)
+        if (IsSelectableCharacter(id) &&
+            static_cast<uint32_t>(Native<FindGridIndex>(MENU_FIND_GRID_INDEX)(id)) == cell)
+            return id;
+    return 0;
+}
+
+void OnTeamPacket(int team, const CharSelPacket& received)
 {
     if (!g.active || team < 0 || team > 1 || !IsRemoteTeam(team)) return;
+    CharSelPacket packet = received;
+    // The color shown for a member that is still being picked is drawn on
+    // the card of whatever the cursor is on: it must be one that character
+    // has here, which the range check alone does not say.
+    if (const int hovered = PickedCount(packet.slotState); hovered < 3) {
+        const int32_t character = CharacterAtCell(packet.cursorCell);
+        if (!character || !ChrColors_Available(character, packet.colors[hovered]))
+            packet.colors[hovered] = 0;
+    }
     if (packet.type != PACKET_CHARSEL || !IsValidPeerPacket(packet)) {
         if (!g.badPacketLogged) {
             g.badPacketLogged = true;
@@ -1211,6 +1320,14 @@ void OnTeamPacket(int team, const CharSelPacket& packet)
             }
         }
         return;
+    }
+    // The sounds of what just happened on that side. Not for the first
+    // packet: that is a screen joined part-way, not a step.
+    // (One step's worth a tick for each side, however fast packets come.)
+    if (g.remoteValid[team] && g.status == Status::Selecting &&
+        g.remoteSoundFrame[team] != g.frame) {
+        g.remoteSoundFrame[team] = g.frame;
+        PlayRemoteStepSounds(team, g.remote[team], packet);
     }
     g.remote[team] = packet;
     g.remoteValid[team] = true;

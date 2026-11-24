@@ -129,7 +129,7 @@ constexpr TailRange tails[] = {
     {0x140D45068, 0x68F8, 4}, // Doom single-animation latch
     {0x140D450A8, 0x6920, 8}, // Strange Grace next slot/count
     {0x140D450A8, 0x6928, 6}, // elapsed counter and two command latches
-    {0x140D450A8, 0x6930, 0x0C}, // Grace ages; shot refs handled separately
+    {0x140D450A8, 0x6930, 0x0C}, // Grace ages; the shot slots are in Rollback_CharacterShotTailOffsets
     {0x140D450A8, 0x6948, 4}, // action-reset voice clock (14007AD00)
     {0x140D450F0, 0x6920, 8}, // StrangeSh inherits Grace slot/count state
     {0x140D450F0, 0x692C, 2}, // inherited command eligibility latches
@@ -292,7 +292,17 @@ std::span<const uint32_t> Rollback_CharacterShotTailOffsets(uint64_t dti)
     static constexpr uint32_t emplacement[] = {0x68F0};
     // uRocketRaccoon__retireFixedShotSlot (1400C49C0): four tracked trap shots.
     static constexpr uint32_t traps[] = {0x6908, 0x6910, 0x6918, 0x6920};
+    // Doctor Strange's three Graces of Hoggoth (uShotVulcanElementalSummon),
+    // by slot. uDoctorStrange__captureElementalSummonShot (14007ABA0) fills
+    // a slot and retires the one it replaces, the move prunes dead ones, and
+    // the count and ages beside them (+6920, +6930) only advance for a slot
+    // that is set. Those are rewound with the tail; the slots were not, so
+    // after a rollback a Grace could be counted and aged with nothing in its
+    // slot, or sit in a slot the replay had not filled yet (desync of
+    // 2026-11-24). StrangeSh is a uDrStrange and has the same slots.
+    static constexpr uint32_t graces[] = {0x6908, 0x6910, 0x6918};
     switch (dti) {
+    case 0x140D450A8: case 0x140D450F0: return graces;
     case 0x140D44E10: return oneSpark;
     case 0x140D44E90: case 0x140D45068: return emplacement;
     case 0x140D459D8: return traps;
