@@ -85,7 +85,7 @@ jobs:
           echo "**UNSIGNED, for testing only. This is not a release.** Built from PR head \`${HEAD_SHA:0:7}\` merged into \`movement\`."
           echo ""
           echo "- [Timestone.asi]($ASI_URL): replaces the \`Timestone.asi\` next to \`umvc3.exe\`."
-          echo "- [timestone-unsigned]($ZIP_URL): zip of Timestone.asi, TimestoneUpdater.exe, dinput8.dll and THIRDPARTYNOTICES."
+          echo "- [timestone-unsigned]($ZIP_URL): zip of Timestone.asi, TimestoneInstall.exe, TimestoneInstall.sh, dinput8.dll and THIRDPARTYNOTICES."
           echo ""
           echo "The links need a GitHub login and expire after 14 days."
         } >> "$GITHUB_STEP_SUMMARY"
