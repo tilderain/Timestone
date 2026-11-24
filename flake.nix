@@ -34,8 +34,22 @@
           buildPhase = "make clean && make release";
           installPhase = ''
             mkdir -p "$out"
-            cp Timestone.asi TimestoneUpdater.exe dinput8.dll "$out/"
+            cp Timestone.asi TimestoneInstall.exe dinput8.dll "$out/"
             cp THIRDPARTYNOTICES "$out/Timestone-THIRDPARTYNOTICES"
+          '';
+        };
+
+        # The Linux installer inside TimestoneInstall.sh: linked whole against
+        # musl and static X11, so it runs on any distribution.
+        packages.timestone-install-linux = pkgs.pkgsStatic.stdenv.mkDerivation {
+          name = "timestone-install-linux";
+          src = pkgs.lib.cleanSource self;
+          nativeBuildInputs = [ pkgs.gnumake ];
+          buildInputs = with pkgs.pkgsStatic.xorg; [ libX11 libxcb libXau libXdmcp ];
+          buildPhase = ''make TimestoneInstall.sh HOST_CXX="$CXX"'';
+          installPhase = ''
+            mkdir -p "$out"
+            cp TimestoneInstall.sh "$out/"
           '';
         };
       });

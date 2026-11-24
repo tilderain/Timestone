@@ -121,6 +121,9 @@ void TrainingBoot_SetConfig(const TrainingBootConfig& cfg);
 
 // The configuration the running (or next) battle was booted with.
 const TrainingBootConfig& TrainingBoot_GetConfig();
+// The voice (0=Japanese, 1=English) a team's player chose for a character, as
+// both players of a netplay match know it once the battle has booted.
+uint8_t TrainingBoot_GetVoiceLanguage(int team, int32_t character);
 // A spectator boots someone else's match: every setting comes with the
 // configuration, and none is taken from this player's own options.
 void TrainingBoot_SetSpectatorBoot(bool enabled);
@@ -152,6 +155,13 @@ void BootIntoTraining(bool queueAreaTransition = true);
 bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg);
 void TrainingBoot_UpdateRestart();
 bool TrainingBoot_IsRestartPending();
+// A restart that goes through the shared character select (native_charsel.h)
+// instead of straight back into the battle. Begin marks the restart pending
+// with nothing queued; Finish boots the battle from the select screen's area
+// with what was picked (false while the boot cannot commit yet: call again).
+void TrainingBoot_BeginSelectRestart();
+bool TrainingBoot_IsSelectRestart();
+bool TrainingBoot_FinishSelectRestart(const TrainingBootConfig& cfg);
 
 // Init the hook on aTitle__update.
 void TrainingBoot_InitHooks();

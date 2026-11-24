@@ -21,7 +21,7 @@ AI has been used extensively throughout this project for reverse engineering, co
 Primary development is done on linux, with MinGW-w64. 
 You need a MinGW-w64 toolchain (gcc, g++, windres, binutils) make and zip. Try WSL first on windows, or use MSYS2 with the MinGW64 shell.
 
-    make release     # -> Timestone.asi + TimestoneUpdater.exe (+ Timestone.zip)
+    make release     # -> Timestone.asi + TimestoneInstall.exe (+ Timestone.zip)
 
 NixOS:    nix develop -c make release       (or: nix build .#timestone)
 Windows:  in an MSYS2 MINGW64 shell, first `pacman -S mingw-w64-x86_64-toolchain make zip`, then `make release`.

@@ -31,9 +31,12 @@ constexpr int kMaxFirstTo = 10;
 // before. Only a player's own presets can hold one; the game's reserve units
 // cannot.
 constexpr int32_t kCharRandom = -1;
+// The same, but drawn again for every game of the set instead of once.
+constexpr int32_t kCharRandomAll = -2;
+inline bool IsRandomMember(int32_t id) { return id == kCharRandom || id == kCharRandomAll; }
 
 struct Team {
-    int32_t chars[3];   // a character id, or kCharRandom
+    int32_t chars[3];   // a character id, kCharRandom or kCharRandomAll
     int32_t assists[3]; // 0 = alpha, 1 = beta, 2 = gamma
     int32_t colors[3];  // zero-based archive variant
 };
@@ -103,6 +106,10 @@ struct Member {
     // Pre-match steps with the player in the opposite seat, in order:
     // accepted the match, picked an input delay, then `ready` (team settled).
     bool accepted;
+    // On the shared character select with the player in the opposite seat
+    // (native_charsel.h). A slot whose two players are both there counts as
+    // starting, which is what lets the room's spectators follow them in.
+    bool selecting;
     int8_t delayPick;
     int8_t delayHover; // what they have highlighted while still choosing
     Team team;

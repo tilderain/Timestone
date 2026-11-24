@@ -31,6 +31,29 @@ static constexpr uintptr_t PTR_SUNIT = 0x140e17698;
 static constexpr uintptr_t DTI_UIRONMAN = 0x140D45518;
 static constexpr uintptr_t PTR_SCOLLISION = 0x140e18250;
 static constexpr uintptr_t PTR_SCAMERA = 0x140e17930;
+// sCamera: eight viewports of 0x1A0 bytes from +0x50, each with its camera
+// unit at +0x08 (sCamera::move, 0x140532D80).
+static constexpr size_t SCAMERA_SIZE = 0xD80;
+static constexpr uint32_t SCAMERA_VIEWPORTS = 8;
+static constexpr size_t SCAMERA_VIEWPORT_CAMERA = 0x58;
+static constexpr size_t SCAMERA_VIEWPORT_STRIDE = 0x1A0;
+
+// A viewport's camera as sCamera::move needs it: a unit that is alive, with
+// the two matrix getters it calls (vtable +0x90 and +0x98) in the game's code.
+static bool IsLiveCameraUnit(uint64_t camera)
+{
+    if (!camera) return true; // no camera is a state the game handles
+    if (!IsLikelyPointer(camera)) return false;
+    const uint64_t image = (uint64_t)_addr(0x140000000);
+    const auto inImage = [image](uint64_t address) {
+        return address >= image && address < image + 0xF06000;
+    };
+    const uint64_t vtable = *(const uint64_t*)camera;
+    if (!inImage(vtable)) return false;
+    const uint32_t state = *(const uint32_t*)(camera + 0x10) & 7;
+    if (state != 1 && state != 2) return false;
+    return inImage(*(const uint64_t*)(vtable + 0x90)) && inImage(*(const uint64_t*)(vtable + 0x98));
+}
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
@@ -1165,6 +1188,29 @@ void Rollback_RestoreSnapshot(int32_t frame)
             // Input history was restored once by the common kernel. None of
             // these embedded-record repairs touches its owner or payload.
 
+        } else if ((uint64_t)slot.regions[i].ptr == *(uint64_t*)_addr(PTR_SCAMERA) &&
+                   slot.regions[i].size == SCAMERA_SIZE && copySize == SCAMERA_SIZE) {
+            // The camera manager is restored whole, except that a viewport is
+            // not handed back a camera that no longer exists. Cameras outside
+            // the gameplay lanes (the intro's, a cut-in's) are not restored
+            // with the snapshot, and one that has been destroyed since may be
+            // any object by now; sCamera::move calls straight through it.
+            uint8_t* manager = (uint8_t*)slot.regions[i].ptr;
+            uint64_t liveCameras[SCAMERA_VIEWPORTS];
+            for (uint32_t v = 0; v < SCAMERA_VIEWPORTS; ++v)
+                liveCameras[v] = *(uint64_t*)(manager + SCAMERA_VIEWPORT_CAMERA + v * SCAMERA_VIEWPORT_STRIDE);
+            std::memcpy(manager, slot.data + offset, copySize);
+            bool kept = false;
+            for (uint32_t v = 0; v < SCAMERA_VIEWPORTS; ++v) {
+                uint64_t& camera =
+                    *(uint64_t*)(manager + SCAMERA_VIEWPORT_CAMERA + v * SCAMERA_VIEWPORT_STRIDE);
+                if (camera == liveCameras[v] || IsLiveCameraUnit(camera)) continue;
+                HookLog("Rollback: viewport %u keeps its camera 0x%llX; the snapshot's "
+                        "0x%llX (frame %d) is gone\n", v, liveCameras[v], camera, slot.frame);
+                camera = liveCameras[v];
+                kept = true;
+            }
+            if (!kept && copySize == slot.regions[i].size) SnapshotReuse_RegionRestored(i);
         } else if (slot.regions[i].skipVtable) {
             HookLog("Rollback: unsupported object restore size=0x%zX vtable=0x%llX\n",
                     copySize, slot.regions[i].expectedVtable);

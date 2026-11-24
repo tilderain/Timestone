@@ -1,6 +1,8 @@
 #include "lobby_flow.h"
 #include "../pch.h"
 
+extern "C" int32_t Controller_FirstRollbackFrame();
+
 #include "rollback_hooks.h"
 
 #include "controller.h"
@@ -267,6 +269,14 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
             bool shouldResim = Rollback_ConsumeReSimRequest(start, end);
             if (!shouldResim)
                 shouldResim = AutoTest_GetForcedClientResim(curFrame, &start, &end);
+            // No replay begins in the intro or just after it: the frames
+            // there are played on neutral input whatever was predicted, and
+            // their snapshots hold the intro's cameras (controller.cpp).
+            if (shouldResim) {
+                const int32_t first = Controller_FirstRollbackFrame();
+                if (start < first) start = first;
+                if (start >= end) shouldResim = false;
+            }
             if (shouldResim) {
                 Rollback_FreezeWatchdogHeartbeat("rollback-resimulate", curFrame);
                 Rollback_ReSimulate(start, end);

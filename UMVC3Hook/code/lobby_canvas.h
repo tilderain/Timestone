@@ -105,6 +105,11 @@ enum Tex : uint16_t {
     // stage. See StageIcon.
     TEX_STAGE_FIRST,
     TEX_STAGE_LAST = TEX_STAGE_FIRST + 19,
+    // The select screen's own RANDOM and RANDOM ALL roster cells, 128x128 and
+    // laid out like a character's face: loose files beside the faces,
+    // "typeC" art in the game's language.
+    TEX_FACE_RANDOM,
+    TEX_FACE_RANDOM_ALL,
     // The star layer of the lobby's space backdrop (space_bg.cpp): the one
     // image the plugin ships. Like a profile picture, its pixels are put into
     // a country flag texture the lobby never draws.

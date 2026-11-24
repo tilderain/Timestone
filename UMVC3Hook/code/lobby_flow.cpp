@@ -15,6 +15,8 @@
 #include "lobby_room.h"
 #include "lobby_ui.h"
 #include "mk10utils.h"
+#include "native_charsel.h"
+#include "native_result.h"
 #include "netplay.h"
 #include "savedata.h"
 #include "spectate.h"
@@ -248,6 +250,43 @@ bool g_matchIsHost = false;
 ULONGLONG g_phaseStartTick = 0;
 bool g_launchSent = false;
 
+// The game's own character select, shared by the two players of a pairing
+// (native_charsel.h). It runs in its own area, so while it is up the lobby is
+// driven from the game tick, not from the title area.
+bool g_charSelWanted = false;      // CHARACTER SELECT picked; the match connection is not up yet
+bool g_charSelPeerAsked = false;   // the other player has opened it: follow them in
+CharSelPacket g_charSelPeerFirst = {};
+bool g_charSelArea = false;        // its area is the running one, or about to be
+bool g_charSelUsed = false;        // this match's teams come from the screen
+bool g_charSelReturn = false;      // back in the title area after leaving it without a match
+// Reached from a match's result screen: the match's netplay session carries
+// it (and stays up through it), and the next game is booted from it.
+bool g_charSelInMatch = false;
+// A spectator's copy of the screen a match is being started from, joined
+// from the room before there is any game to watch.
+bool g_charSelWatchJoin = false;
+ULONGLONG g_watchSelectIdleTick = 0; // when the watched slot stopped being on its way
+int g_selectBootTries = 0;         // ticks the boot out of it has not committed
+uint32_t g_selectSeen[2] = {};     // spectator: each side's version last put on the screen
+ULONGLONG g_selectResultTick = 0;  // spectator: when the players' next game became known
+ULONGLONG g_charSelStartTick = 0;
+int g_presetHoldFrames = 0;        // the list just closed: its last button press is not the screen's
+constexpr uint32_t kCharSelSeconds = 60;
+constexpr uint32_t kCharSelStageSeconds = 20;
+// Past both clocks plus this (loading, the versus sequence, the launch), a
+// match that still has not started is given up.
+constexpr ULONGLONG kCharSelGraceMs = 75000;
+// The select screen's own sprites reach down to depth 16995; the preset list
+// is drawn in front of them.
+constexpr int kCharSelDepthBase = 16900;
+// Where the set score is drawn on the select screen, as a fraction of the
+// height: under the game's status bar (which ends at 667 of 720).
+constexpr float kSelectScoreY = 0.945f;
+// "PLAYER n IS SELECTING THE STAGE", in the lobby canvas's 1280x720: resting
+// on the stage page's window, whose top edge is at y 222 (chs_option_a: root
+// at 640,222 with a 400 x 364 frame hung from its top centre).
+constexpr float kStagePickerTextY = 200.0f;
+
 // Frames the lobby has been waiting for the native backend to come up.
 std::atomic<uint32_t> g_nativeWaitFrames{0};
 constexpr uint32_t kNativeSlowFrames = 180;    // show "starting" after 3 s
@@ -430,11 +469,13 @@ int32_t PickMatchStage(int localStage, int opponentStage)
     return count ? pool[(roll >> 8) % count] : g_rosterPrefs.stageId;
 }
 
-// Fills in a team's random members (kCharRandom) for a match: a character not
-// already on the team, one of its installed colors and one of its assists.
-// Player 1 does this for both teams as it launches, so the draw happens once
-// for the whole set and both players see the same result.
-void ResolveRandomMembers(Team& team, uint32_t& state)
+// Fills in a team's random members (kCharRandom, kCharRandomAll) for a match:
+// a character not already on the team, one of its installed colors and one of
+// its assists. Player 1 does this for both teams as it launches, so both
+// players see the same result. A `shared` draw is one both players make for
+// themselves from the same state (LobbyFlow_RerollRandomMembers): it keeps to
+// the six standard colors, which every install has.
+void ResolveRandomMembers(Team& team, uint32_t& state, bool shared = false)
 {
     const auto next = [&state] {
         state ^= state << 13;
@@ -443,14 +484,14 @@ void ResolveRandomMembers(Team& team, uint32_t& state)
         return state >> 8;
     };
     for (int i = 0; i < 3; ++i) {
-        if (team.chars[i] != lobby::kCharRandom) continue;
+        if (!lobby::IsRandomMember(team.chars[i])) continue;
         int32_t pool[50];
         int count = 0;
         for (int32_t id = 1; id <= 50; ++id)
             if (id != team.chars[0] && id != team.chars[1] && id != team.chars[2])
                 pool[count++] = id;
         const int32_t id = pool[next() % count];
-        const int colors = RosterColorCount(id);
+        const int colors = shared ? 6 : RosterColorCount(id);
         team.chars[i] = id;
         team.colors[i] = static_cast<int32_t>(next() % colors);
         team.assists[i] = static_cast<int32_t>(next() % 3);
@@ -493,7 +534,7 @@ void RemoveDuplicateCharacters(Team& team)
         bool repeated = false;
         for (int j = 0; j < i; ++j) repeated |= team.chars[j] == team.chars[i];
         // Any number of members may be left to chance.
-        if (!repeated || team.chars[i] == lobby::kCharRandom) continue;
+        if (!repeated || lobby::IsRandomMember(team.chars[i])) continue;
         for (int32_t id = 1; id <= 50; ++id) {
             if (id == team.chars[0] || id == team.chars[1] || id == team.chars[2]) continue;
             team.chars[i] = id;
@@ -596,7 +637,7 @@ UiPrefs LoadPrefs()
             preset.team.chars[m] = v[m * 3];
             preset.team.assists[m] = v[m * 3 + 1];
             preset.team.colors[m] = v[m * 3 + 2];
-            const bool random = preset.team.chars[m] == lobby::kCharRandom;
+            const bool random = lobby::IsRandomMember(preset.team.chars[m]);
             usable &= (random || (preset.team.chars[m] >= 1 && preset.team.chars[m] <= 50)) &&
                       preset.team.assists[m] >= 0 && preset.team.assists[m] <= 2;
             if (usable &&
@@ -663,7 +704,7 @@ void SavePrefs(const UiPrefs& prefs)
     // The launcher's roster shares these keys and knows no random member: it
     // keeps a team of real characters, the last one this player used.
     bool anyRandom = false;
-    for (int i = 0; i < 3; ++i) anyRandom |= prefs.team.chars[i] == lobby::kCharRandom;
+    for (int i = 0; i < 3; ++i) anyRandom |= lobby::IsRandomMember(prefs.team.chars[i]);
     for (int i = 0; i < 3 && !anyRandom; ++i) {
         g_rosterPrefs.chars[i] = prefs.team.chars[i];
         g_rosterPrefs.assists[i] = prefs.team.assists[i];
@@ -790,6 +831,11 @@ int g_setFirstTo = 1;
 // until known. Player 2 gets them over the match connection (PumpHandshake).
 int g_launchFirstTo = -1;
 Rotation g_launchRotation = Rotation::WinnerStays;
+// Team members drawn again for every game of the set (kCharRandomAll), as
+// SetFormatPacket carries them: bits 0..2 player 1's, bits 3..5 player 2's.
+// Player 1 decides both and the seed every draw is worked out from.
+uint32_t g_rerollMask = 0;
+uint32_t g_rerollSeed = 0;
 int g_setWins[2] = {0, 0}; // [0] local, [1] opponent
 bool g_setOver = false;
 uint32_t g_setOverTicks = 0;
@@ -1183,6 +1229,10 @@ void InstallMainMenuHooks()
 // press (0x1402B42C0). The press-start screen normally maps player 0 to
 // whichever pad pressed Start; the lobby skips it, so do the same here for
 // whichever pad is being used.
+// Not a pad that belongs to another player: one paired as player 2 for local
+// versus (u2PCtrlSelect__move) stays player 2's, as it does in the game,
+// whatever is pressed on it here. Otherwise the second player touching their
+// pad on this menu swapped the two sides.
 void FollowActivePad()
 {
     const uint64_t manager = *reinterpret_cast<uint64_t*>(_addr(SMVC3MANAGER_INSTANCE_PTR));
@@ -1194,9 +1244,7 @@ void FollowActivePad()
         const bool active = slotObject[0x08] != 0;
         const uint32_t pressed = *reinterpret_cast<const uint32_t*>(slotObject + 0x16C);
         if (!active || !pressed || assign[0] == slot) continue;
-        // Same exchange as the game's own assignment (0x14025B090).
-        for (int i = 1; i < 4; ++i)
-            if (assign[i] == slot) assign[i] = assign[0];
+        if (assign[1] == slot || assign[2] == slot || assign[3] == slot) continue;
         HookLog("LobbyFlow: player 1 menu input moved from pad slot %d to %d\n", assign[0], slot);
         assign[0] = slot;
         return;
@@ -1208,11 +1256,16 @@ void ApplyPressStartState()
     if (const uint64_t manager = *reinterpret_cast<uint64_t*>(_addr(SMVC3MANAGER_INSTANCE_PTR))) {
         int32_t* assign = reinterpret_cast<int32_t*>(manager + MANAGER_PAD_ASSIGN);
         // Keyboard input is routed through whichever slot player 0 maps to.
-        if (assign[0] < 0 || assign[0] > 3) {
-            for (int i = 1; i < 4; ++i)
-                if (assign[i] == 0) assign[i] = assign[0];
-            assign[0] = 0;
-        }
+        if (assign[0] < 0 || assign[0] > 3) assign[0] = 0;
+        // The press-start screen leaves only player 1 with a pad
+        // (uMenuTitle__setup empties the table, sMvc3Manager__resetPadIds).
+        // A netplay match maps slots 0 and 1 to both players (TrainingBoot),
+        // and offline the game takes "player 2 has a pad" for a second local
+        // player: the 2P controller prompt is skipped (u2PCtrlSelect__setup),
+        // player 2's side of the select screen and its characters are read
+        // from that pad (cChrInput__processFrameInput), and training offers
+        // its player 2 options.
+        for (int i = 1; i < 4; ++i) assign[i] = -1;
     }
     if (const uint64_t pad = *reinterpret_cast<uint64_t*>(_addr(SPAD_INSTANCE_PTR))) {
         *reinterpret_cast<uint8_t*>(pad + SPAD_KEYBOARD_BLOCKED_1) = 0;
@@ -1442,6 +1495,23 @@ void ApplyNetplaySettings(int32_t delay, int32_t rollback)
     }
 }
 
+// A team's members that are RANDOM ALL, as bits 0..2.
+uint8_t RandomAllMask(const Team& team)
+{
+    uint8_t mask = 0;
+    for (int i = 0; i < 3; ++i)
+        if (team.chars[i] == lobby::kCharRandomAll) mask |= static_cast<uint8_t>(1u << i);
+    return mask;
+}
+
+// g_rerollMask for the two teams locked in on the select screen: player 1's
+// RANDOM ALL members in bits 0..2, player 2's in bits 3..5.
+uint32_t SelectRerollMask(int localTeam)
+{
+    const uint32_t mine = charsel::LocalRandomMask(), theirs = charsel::RemoteRandomMask();
+    return localTeam == 0 ? mine | (theirs << 3) : theirs | (mine << 3);
+}
+
 // Player 1 owns the match parameters: netplay settings from measured ping,
 // both rosters as published in the room, and the stage. This mirrors what the
 // launcher's host sends before it starts the game.
@@ -1469,8 +1539,19 @@ bool SendLaunchAsHost()
     settings.rollbackFrames = rollback;
     settings.effective_frame = -1;
 
-    // Random members are drawn here, once, for the set that is starting.
+    // Random members are drawn here for the set that is starting. The ones
+    // asked for as "random all" are drawn again before each later game.
     Team localTeam = g_pairing.localTeam, opponentTeam = g_pairing.opponentTeam;
+    g_rerollMask = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (localTeam.chars[i] == lobby::kCharRandomAll) g_rerollMask |= 1u << i;
+        if (opponentTeam.chars[i] == lobby::kCharRandomAll) g_rerollMask |= 8u << i;
+    }
+    // From the select screen the teams arrive drawn: which members were
+    // RANDOM ALL comes with each player's locked-in team.
+    if (g_charSelUsed && charsel::LocalLockedIn() && charsel::RemoteLockedIn())
+        g_rerollMask = SelectRerollMask(g_pairing.localSide);
+    g_rerollSeed = RandomSeed();
     uint32_t randomState = RandomSeed();
     ResolveRandomMembers(localTeam, randomState);
     ResolveRandomMembers(opponentTeam, randomState);
@@ -1492,6 +1573,8 @@ bool SendLaunchAsHost()
     format.type = PACKET_SET_FORMAT;
     format.firstTo = g_launchFirstTo;
     format.rotation = static_cast<int32_t>(g_launchRotation);
+    format.rerollMask = g_rerollMask;
+    format.rerollSeed = g_rerollSeed;
 
     LaunchTrainingPacket launch = {};
     launch.type = PACKET_LAUNCH_TRAINING;
@@ -1504,6 +1587,8 @@ bool SendLaunchAsHost()
         launch.p2Assists[i] = opponentTeam.assists[i];
     }
     launch.stageId = PickMatchStage(g_pairing.localStage, g_pairing.opponentStage);
+    // From the select screen the stage is the one picked on it.
+    if (g_charSelUsed && charsel::StageDecided()) launch.stageId = charsel::StageId();
     HookLog("LobbyFlow: stage %d from preferences local=%d opponent=%d\n", launch.stageId,
             g_pairing.localStage, g_pairing.opponentStage);
 
@@ -1568,6 +1653,7 @@ void PumpSpectate()
             out.id = member.id;
             out.slot = member.side < 2 ? member.slot : -1;
             out.fighting = member.status == MemberStatus::Fighting;
+            out.selecting = member.selecting;
             out.watchSlot = member.watchSlot;
             out.watchSeq = member.watchSeq;
             out.upstream = member.upstream;
@@ -1671,6 +1757,9 @@ void BeginSpectateLaunch(const TrainingBootConfig& config, int cpuMode, bool fiv
     HookLog("LobbyFlow: launching setup %d's match as a spectator\n", Spectate_Slot() + 1);
 }
 
+void BeginWatchSelect();
+void WatchSelectFrame();
+
 // The room publishes who watches what (the screens set it); this follows.
 void UpdateSpectateJoin(bool cancelPressed)
 {
@@ -1733,16 +1822,145 @@ void UpdateSpectateJoin(bool cancelPressed)
     TrainingBootConfig config;
     int cpuMode = 0;
     bool fiveBars = false;
-    if (Spectate_TakeLaunch(&config, &cpuMode, &fiveBars))
+    if (Spectate_TakeLaunch(&config, &cpuMode, &fiveBars)) {
         BeginSpectateLaunch(config, cpuMode, fiveBars);
+    } else if (Spectate_PreSelectOpen()) {
+        // The two are on the character select their match starts from: watch
+        // that, and boot the match from it when they do.
+        BeginWatchSelect();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Character select (the game's own screen, native_charsel.h)
+// ---------------------------------------------------------------------------
+// The local player's team index in a running match.
+int MatchLocalTeam() { return Netplay_IsHost() ? 0 : 1; }
+
+void SendCharSelPacket(const CharSelPacket& packet)
+{
+    // Into the log spectators follow, before the first game as after it.
+    if (!g_charSelInMatch) Spectate_RecSelect(g_pairing.localSide, packet);
+    if (g_charSelInMatch) {
+        // From a match: over its own session, and into the log its
+        // spectators follow.
+        CharSelExtPacket out = {};
+        out.type = PACKET_EXTENSION;
+        out.magic = kCharSelExtMagic;
+        out.generation = FrameStepper_GetBattleGeneration();
+        memcpy(out.inner, &packet, sizeof(packet));
+        Netplay_SendExtensionPacket(&out, sizeof(out), true);
+        Spectate_RecSelect(MatchLocalTeam(), packet);
+        return;
+    }
+    if (!g_matchHost || !g_matchPeer) return;
+    ENetPacket* out = enet_packet_create(&packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
+    if (!out) return;
+    if (enet_peer_send(g_matchPeer, 0, out) != 0) {
+        enet_packet_destroy(out);
+        return;
+    }
+    enet_host_flush(g_matchHost);
+}
+
+// From the match connection, before the launch.
+void OnCharSelPacket(const CharSelPacket& packet)
+{
+    if (charsel::Active()) {
+        charsel::OnPeerPacket(packet);
+        Spectate_RecSelect(1 - g_pairing.localSide, packet);
+    } else if (!g_charSelArea && !(packet.flags & CHARSEL_LEFT)) {
+        // The other player went to the screen: this one follows at the next
+        // lobby frame, and what they sent is drawn once it is up.
+        g_charSelPeerAsked = true;
+        g_charSelPeerFirst = packet;
+    }
+}
+
+// Takes this player from the room to the select screen. Both players pick
+// there from nothing, whichever of them asked for it; the team in use only
+// comes back if the clock runs out.
+bool BeginCharSelect()
+{
+    const Member* local = LocalRoomMember();
+    charsel::Config config = {};
+    config.localTeam = g_pairing.localSide;
+    // Having chosen START in the prompt no longer stands: the team is the
+    // one picked on the screen.
+    if (local && local->ready) g_service->SetReady(false);
+    config.team = g_ui->Prefs().team;
+    config.teamRandomMask = RandomAllMask(config.team);
+    uint32_t randomState = RandomSeed();
+    ResolveRandomMembers(config.team, randomState);
+    config.seconds = kCharSelSeconds;
+    config.stageSeconds = kCharSelStageSeconds;
+
+    // The lobby's units die with the title area; the select screen gets a
+    // fresh set for the preset list, drawn in front of its own sprites.
+    Native_Shutdown();
+    if (!charsel::Begin(config)) {
+        HookLog("LobbyFlow: the character select could not be opened; using the team screen\n");
+        g_ui->SetNativeCharSelect(false);
+        g_ui->SetBusy(nullptr);
+        return false;
+    }
+    Native_SetDepthBase(kCharSelDepthBase);
+    g_titleNeedsSetup = true;
+    SetBgm(Bgm::None); // the screen plays its own
+    g_ui->SetBusy(nullptr);
+    g_ui->ClosePresetPicker();
+    g_charSelArea = true;
+    g_charSelUsed = true;
+    g_charSelStartTick = GetTickCount64();
+    g_presetHoldFrames = 0;
+    // The room's spectators can follow from here: the slot shows as starting
+    // and the feed opens with the screen.
+    g_service->SetSelecting(true);
+    Spectate_RecPreSelectBegin();
+    // Brings the other player along before this side has anything to show.
+    CharSelPacket hello = {};
+    hello.type = PACKET_CHARSEL;
+    SendCharSelPacket(hello);
+    if (g_charSelPeerAsked) charsel::OnPeerPacket(g_charSelPeerFirst);
+    g_charSelPeerAsked = false;
+    g_charSelWanted = false;
+    HookLog("LobbyFlow: character select opened as P%d\n", g_pairing.localSide + 1);
+    return true;
+}
+
+// Back to the room from the select screen without a match. The pairing has
+// already been given up (AbortMatchStart).
+void LeaveCharSelect()
+{
+    g_service->SetSelecting(false);
+    Spectate_RecEnd(); // no game came of it: spectators are told
+    charsel::End(false);
+    g_charSelArea = false;
+    g_charSelUsed = false;
+    g_charSelWanted = false;
+    g_charSelPeerAsked = false;
+    g_ui->ClosePresetPicker();
+    Native_Shutdown();
+    Native_SetDepthBase(0);
+    using GetInstance = uint64_t(__fastcall*)();
+    if (const uint64_t gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))())
+        *reinterpret_cast<int32_t*>(gameUi + SGAMEUI_BOOT_STATE) = kBootStateTitle;
+    if (!RequestTitleArea()) HookLog("LobbyFlow: sArea is unavailable; cannot return to title\n");
+    g_titleNeedsSetup = true;
+    g_charSelReturn = true;
+    HookLog("LobbyFlow: left the character select for the room\n");
 }
 
 void BeginLaunch()
 {
+    // The select screen stays up, frozen, while the boot runs; the boot gets
+    // the player's own control-type setting and the pad table back first.
+    if (g_charSelArea) charsel::ReleaseSettings();
     // The lobby stays on screen (busy overlay) until the boot commits; see
     // LobbyFlow_OnBattleBootCommitted.
     TrainingBoot_SetSpectatorBoot(false);
     g_spectating = false;
+    if (g_service) g_service->SetSelecting(false);
     Spectate_RecBegin(); // from here on this match can be watched
     TrainingBoot_PrepareNextBoot(true);
     SetNetworkHandles(g_matchHost, g_matchPeer);
@@ -1798,6 +2016,12 @@ bool PumpHandshake(bool bothReady)
             ENetEvent event;
             while (enet_host_service(g_matchHost, &event, 0) > 0) {
                 if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                    if (event.packet->dataLength == sizeof(CharSelPacket) &&
+                        *reinterpret_cast<uint32_t*>(event.packet->data) == PACKET_CHARSEL) {
+                        CharSelPacket packet;
+                        memcpy(&packet, event.packet->data, sizeof(packet));
+                        OnCharSelPacket(packet);
+                    }
                     enet_packet_destroy(event.packet);
                 } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
                     AbortMatchStart("Connection to opponent has been lost.", true);
@@ -1836,17 +2060,47 @@ bool PumpHandshake(bool bothReady)
                    event.packet->dataLength == sizeof(SetFormatPacket)) {
             const auto& format = *reinterpret_cast<const SetFormatPacket*>(event.packet->data);
             if (format.firstTo >= 0 && format.firstTo <= lobby::kMaxFirstTo &&
-                (format.rotation == 1 || format.rotation == 2)) {
+                (format.rotation == 1 || format.rotation == 2) && format.rerollMask <= 0x3F) {
                 g_launchFirstTo = format.firstTo;
                 g_launchRotation = static_cast<Rotation>(format.rotation);
+                g_rerollMask = format.rerollMask;
+                g_rerollSeed = format.rerollSeed;
                 HookLog("LobbyFlow: P1 set rules FT%d rotation %d\n", format.firstTo,
                         format.rotation);
             }
+        } else if (type == PACKET_CHARSEL && event.packet->dataLength == sizeof(CharSelPacket)) {
+            CharSelPacket packet;
+            memcpy(&packet, event.packet->data, sizeof(packet));
+            OnCharSelPacket(packet);
         } else if (type == PACKET_LAUNCH_TRAINING &&
                    event.packet->dataLength == sizeof(LaunchTrainingPacket)) {
+            LaunchTrainingPacket packet;
+            memcpy(&packet, event.packet->data, sizeof(packet));
             // Validates the rosters and installs the boot configuration.
-            launch = ApplyTrainingLaunchPacket(
-                *reinterpret_cast<const LaunchTrainingPacket*>(event.packet->data));
+            launch = ApplyTrainingLaunchPacket(packet);
+            // A team picked on the select screen is this player's own: the
+            // launch must carry exactly what they locked in.
+            if (launch && g_charSelUsed && charsel::LocalLockedIn()) {
+                const Team mine = charsel::LocalTeam();
+                const bool p1 = g_pairing.localSide == 0;
+                if (charsel::StageDecided() && packet.stageId != charsel::StageId()) {
+                    HookLog("LobbyFlow: the launch names stage %d, the screen showed %d\n",
+                            packet.stageId, charsel::StageId());
+                    launch = false;
+                }
+                for (int i = 0; i < 3; ++i) {
+                    const int32_t character = p1 ? packet.p1Chars[i] : packet.p2Chars[i];
+                    const int32_t color = p1 ? packet.p1Colors[i] : packet.p2Colors[i];
+                    const int32_t assist = p1 ? packet.p1Assists[i] : packet.p2Assists[i];
+                    if (character != mine.chars[i] || color != mine.colors[i] ||
+                        assist != mine.assists[i]) {
+                        HookLog("LobbyFlow: the launch names a different team for this player "
+                                "(member %d: %d/%d/%d, picked %d/%d/%d)\n", i, character, color,
+                                assist, mine.chars[i], mine.colors[i], mine.assists[i]);
+                        launch = false;
+                    }
+                }
+            }
             if (!launch) {
                 enet_packet_destroy(event.packet);
                 AbortMatchStart("Could not properly sync with the other player.");
@@ -1870,6 +2124,7 @@ void UpdateMatchStart(bool cancelPressed)
         g_matchIsHost = pairing.localSide == 0;
         g_launchSent = false;
         g_launchFirstTo = -1;
+        g_rerollMask = 0;
         if (!SteamRoom_ConnectPeer(pairing.opponentId, g_matchIsHost)) {
             g_service->FinishMatch(false, false);
             g_service->Stand(); // do not retry every frame
@@ -1965,10 +2220,330 @@ void UpdateMatchStart(bool cancelPressed)
     // worked out from it on both sides.
     if (const uint32_t rtt = SteamTransport_GetRTT())
         g_service->SetMeasuredPing(g_pairing.opponentId, static_cast<int>(rtt));
-    if (current.bothReady && !g_bothReadyTick) g_ui->SetBusy("Preparing the battle...");
+    bool bothReady = current.bothReady;
+    if (g_charSelUsed) {
+        // The teams are the ones locked in on the select screen, and nothing
+        // starts before both are.
+        if (charsel::LocalLockedIn()) g_pairing.localTeam = charsel::LocalTeam();
+        if (charsel::RemoteLockedIn()) g_pairing.opponentTeam = charsel::RemoteTeam();
+        // ...and the stage select and the versus sequence have played out
+        // here. Player 1 launches at that point; player 2 boots when its own
+        // sequence is through (CharSelFrame).
+        bothReady = bothReady && charsel::LocalLockedIn() && charsel::RemoteLockedIn() &&
+                    charsel::StageDecided() && charsel::EnterRequested();
+    } else if (g_charSelWanted || g_charSelPeerAsked) {
+        // CHARACTER SELECT, from either player, now that the connection the
+        // screen is shared over is up. Without the screen the team panel
+        // takes over and the prompts go on as before.
+        const bool opened = BeginCharSelect();
+        g_charSelWanted = false;
+        g_charSelPeerAsked = false;
+        if (opened) return;
+    }
+    if (bothReady && !g_bothReadyTick) g_ui->SetBusy("Preparing the battle...");
     // Player 2 always listens: player 1 launches as soon as it sees both
     // ready, which can be a moment before this side's view of the room agrees.
-    if (PumpHandshake(current.bothReady)) BeginLaunch();
+    if (PumpHandshake(bothReady)) BeginLaunch();
+}
+
+// The lobby's own part of the select screen, drawn over it: the preset list
+// (it opens on the button the game's own reserve-unit picker is taken with,
+// Start; slotState246 tests trigger bit 0x8, while the cursor is on the
+// roster, and picking a team there completes the local side at once), and
+// who is picking the stage.
+void CharSelScreenFrame(const Input& input)
+{
+    if (charsel::GetStatus() != charsel::Status::Selecting) return;
+    Canvas* canvas = Native_BeginFrame();
+    const bool offered = canvas && charsel::CanPickPreset();
+    if (g_ui->PresetPickerOpen() && !offered) g_ui->ClosePresetPicker();
+    if (g_ui->PresetPickerOpen()) {
+        Team picked = {};
+        if (g_ui->UpdatePresetPicker(input, &picked)) {
+            // RANDOM ALL members of the preset: drawn here for this game,
+            // and again for each later one.
+            const uint8_t randomMask = RandomAllMask(picked);
+            uint32_t randomState = RandomSeed();
+            ResolveRandomMembers(picked, randomState);
+            if (!charsel::ApplyLocalTeam(picked, randomMask))
+                HookLog("LobbyFlow: the picked preset could not be put on the select screen\n");
+        }
+        if (!g_ui->PresetPickerOpen()) g_presetHoldFrames = 3;
+    } else if (offered && input.menu && !g_presetHoldFrames) {
+        g_ui->OpenPresetPicker();
+    }
+    if (g_presetHoldFrames > 0 && !g_ui->PresetPickerOpen()) --g_presetHoldFrames;
+    charsel::SetPresetListOpen(g_ui->PresetPickerOpen() || g_presetHoldFrames > 0);
+    if (g_ui->TakePrefsDirty()) SavePrefs(g_ui->Prefs());
+    Native_PlaySfx(g_ui->TakeSfx());
+    if (canvas) {
+        if (g_ui->PresetPickerOpen()) {
+            g_ui->DrawPresetPicker(*canvas);
+        } else if (const int picker = charsel::StagePicker(); picker >= 0) {
+            // Who the stage select belongs to: the coin toss is not visible
+            // otherwise, and only that player's pad moves it.
+            const bool mine = picker == g_pairing.localSide;
+            char line[160];
+            snprintf(line, sizeof(line), "PLAYER %d (%.40s) IS SELECTING THE STAGE", picker + 1,
+                     mine ? g_service->LocalName() : g_pairing.opponentName);
+            // Over the stage page, under the screen's clock.
+            canvas->Text(line, 640.0f, kStagePickerTextY, 0.74f, A_MC,
+                         mine ? Color{1.0f, 0.9f, 0.2f, 1.0f} : Color{1.0f, 1.0f, 1.0f, 0.95f});
+        } else if (offered) {
+            canvas->Text("START: TEAM PRESETS", g_pairing.localSide == 0 ? 40.0f : 1240.0f, 700.0f,
+                         0.62f, g_pairing.localSide == 0 ? A_ML : A_MR,
+                         Color{1.0f, 1.0f, 1.0f, 0.9f});
+        }
+        Native_EndFrame();
+    }
+}
+
+// Both sides of a watched select screen as the feed has them, and who is
+// picking the stage.
+void FeedWatchedSelect()
+{
+    for (int team = 0; team < 2; ++team) {
+        CharSelPacket side;
+        uint32_t version = 0;
+        if (!Spectate_GetSelect(team, &side, &version) || version == g_selectSeen[team]) continue;
+        g_selectSeen[team] = version;
+        side.type = PACKET_CHARSEL;
+        charsel::OnTeamPacket(team, side);
+    }
+    if (charsel::GetStatus() != charsel::Status::Selecting) return;
+    if (Canvas* canvas = Native_BeginFrame()) {
+        if (const int picker = charsel::StagePicker(); picker >= 0) {
+            char line[160];
+            snprintf(line, sizeof(line), "PLAYER %d (%.40s) IS SELECTING THE STAGE", picker + 1,
+                     g_watchNames[picker]);
+            canvas->Text(line, 640.0f, kStagePickerTextY, 0.74f, A_MC,
+                         Color{1.0f, 1.0f, 1.0f, 0.95f});
+        }
+        Native_EndFrame();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Watching the select screen a match starts from
+// ---------------------------------------------------------------------------
+// A spectator in the room follows the two players onto their select screen:
+// the same screen in watch mode (both sides from the feed, no pad), left for
+// the battle when the players launch or for the room when they back out.
+void LeaveWatchSelect(const char* notice)
+{
+    charsel::End(false);
+    g_charSelArea = false;
+    g_charSelUsed = false;
+    g_charSelWatchJoin = false;
+    Native_Shutdown();
+    Native_SetDepthBase(0);
+    StopSpectating();
+    using GetInstance = uint64_t(__fastcall*)();
+    if (const uint64_t gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))())
+        *reinterpret_cast<int32_t*>(gameUi + SGAMEUI_BOOT_STATE) = kBootStateTitle;
+    if (!RequestTitleArea()) HookLog("LobbyFlow: sArea is unavailable; cannot return to title\n");
+    g_titleNeedsSetup = true;
+    g_charSelReturn = true;
+    if (notice && notice[0]) snprintf(g_pendingNotice, sizeof(g_pendingNotice), "%s", notice);
+    SetPhase(Phase::Lobby);
+    HookLog("LobbyFlow: left the watched character select for the room\n");
+}
+
+void BeginWatchSelect()
+{
+    charsel::Config config = {};
+    config.watch = true;
+    config.seconds = kCharSelSeconds;
+    config.stageSeconds = kCharSelStageSeconds;
+    Native_Shutdown();
+    if (!charsel::Install() || !charsel::Begin(config)) {
+        // The room stays up; the match is joined when its first game starts.
+        return;
+    }
+    Native_SetDepthBase(kCharSelDepthBase);
+    g_titleNeedsSetup = true;
+    SetBgm(Bgm::None);
+    g_ui->SetBusy(nullptr);
+    g_ui->ClosePresetPicker();
+    g_charSelArea = true;
+    g_charSelWatchJoin = true;
+    g_charSelStartTick = GetTickCount64();
+    g_watchSelectIdleTick = 0;
+    g_selectSeen[0] = g_selectSeen[1] = 0;
+    Spectate_OnPreSelectApplied();
+    UpdateWatchText();
+    HookLog("LobbyFlow: watching setup %d's character select\n", Spectate_Slot() + 1);
+}
+
+void WatchSelectFrame()
+{
+    g_service->Pump();
+    PumpSpectate();
+    const ULONGLONG now = GetTickCount64();
+
+    if (g_phase == Phase::Launching) {
+        // The players launched: the first game is booted from here, where
+        // this screen's own versus sequence ends (or soon after, should it
+        // have fallen behind theirs).
+        if (TrainingBoot_HasNetworkFailed()) {
+            TrainingBoot_RestoreLocalBindings();
+            FrameStepper_EndNetplaySession();
+            SetNetworkHandles(nullptr, nullptr);
+            TrainingBoot_PrepareNextBoot(false);
+            LeaveWatchSelect("Could not join the match as a spectator.");
+            return;
+        }
+        if (!charsel::EnterRequested() && now - g_phaseStartTick < 12000) {
+            FeedWatchedSelect();
+            return;
+        }
+        BootIntoTraining();
+        if (TrainingBoot_HasBooted()) {
+            charsel::End(true);
+            g_charSelArea = false;
+            g_charSelUsed = false;
+            g_charSelWatchJoin = false;
+            Native_SetDepthBase(0);
+            LobbyFlow_OnBattleBootCommitted();
+        }
+        return;
+    }
+
+    // Seated by a queue, stopped watching, or the screen did not come up.
+    const Member* local = LocalRoomMember();
+    const RoomState& room = g_service->Room();
+    const int slot = Spectate_Slot();
+    Input input = {};
+    Native_ReadInput(input, false);
+    if (input.cancel) g_service->SetWatchIntent(-1); // not this match again by itself
+    if (input.cancel || !local || !room.inRoom || local->watchSlot != slot || slot < 0 ||
+        charsel::GetStatus() == charsel::Status::Failed ||
+        charsel::GetStatus() == charsel::Status::RemoteLeft || Spectate_PreSelectEnded()) {
+        LeaveWatchSelect("");
+        return;
+    }
+    // The slot is no longer on its way to a match (someone stood up).
+    if (room.slots[slot] >= SlotState::Starting) g_watchSelectIdleTick = 0;
+    else if (!g_watchSelectIdleTick) g_watchSelectIdleTick = now;
+    else if (now - g_watchSelectIdleTick > 4000) {
+        LeaveWatchSelect("");
+        return;
+    }
+    if (now - g_charSelStartTick >
+        static_cast<ULONGLONG>(kCharSelSeconds + kCharSelStageSeconds) * 1000 + kCharSelGraceMs) {
+        LeaveWatchSelect("");
+        return;
+    }
+
+    TrainingBootConfig config;
+    int cpuMode = 0;
+    bool fiveBars = false;
+    if (Spectate_TakeLaunch(&config, &cpuMode, &fiveBars)) {
+        // The boot reads the control-type setting and writes the pad table.
+        charsel::ReleaseSettings();
+        BeginSpectateLaunch(config, cpuMode, fiveBars);
+        g_ui->SetBusy(nullptr);
+        return;
+    }
+    FeedWatchedSelect();
+}
+
+// One game tick with the select screen's area up: the room, the match
+// connection and the pairing are kept going from here, since no title area
+// is running to do it.
+void CharSelFrame()
+{
+    if (g_charSelWatchJoin) {
+        WatchSelectFrame();
+        return;
+    }
+    g_service->Pump();
+    // The feed for anyone watching this screen from the room.
+    if (g_phase != Phase::Launching) PumpSpectate();
+
+    if (g_phase == Phase::Launching) {
+        // What the title area's hook does for a match started from the room.
+        if (TrainingBoot_HasNetworkFailed()) {
+            HookLog("LobbyFlow: battle boot failed from the character select; back to the room\n");
+            TrainingBoot_RestoreLocalBindings();
+            FrameStepper_EndNetplaySession();
+            SetNetworkHandles(nullptr, nullptr);
+            TrainingBoot_PrepareNextBoot(false);
+            g_service->FinishMatch(false, false);
+            SetPhase(Phase::Lobby);
+            LeaveCharSelect();
+            return;
+        }
+        PumpSpectate();
+        // The battle is entered where the game would have entered it: when
+        // the screen's versus sequence is through on this client.
+        if (!charsel::EnterRequested()) {
+            // (Well inside the 30 s the other side's boot waits for this one.)
+            if (GetTickCount64() - g_phaseStartTick > 15000) {
+                HookLog("LobbyFlow: the versus sequence did not finish; booting anyway\n");
+            } else {
+                return;
+            }
+        }
+        BootIntoTraining();
+        if (TrainingBoot_HasBooted()) {
+            charsel::End(true);
+            g_charSelArea = false;
+            g_charSelUsed = false;
+            Native_SetDepthBase(0);
+            LobbyFlow_OnBattleBootCommitted();
+        }
+        return;
+    }
+
+    Input input = {};
+    Native_ReadInput(input, false);
+    UpdateMatchStart(false);
+    if (g_phase == Phase::Launching) return; // the boot starts on the next tick
+    if (g_phase != Phase::Handshake) {
+        // The pairing is gone (the opponent stood up, the connection dropped).
+        LeaveCharSelect();
+        return;
+    }
+
+    switch (charsel::GetStatus()) {
+    case charsel::Status::Failed:
+        AbortMatchStart("The character select could not be opened.");
+        LeaveCharSelect();
+        return;
+    case charsel::Status::LocalLeft: {
+        // Backing out of the screen is giving the seat up, as in the prompts.
+        CharSelPacket left = {};
+        left.type = PACKET_CHARSEL;
+        left.flags = CHARSEL_LEFT;
+        SendCharSelPacket(left);
+        g_service->Stand();
+        AbortMatchStart(nullptr);
+        LeaveCharSelect();
+        return;
+    }
+    case charsel::Status::RemoteLeft:
+        AbortMatchStart(nullptr);
+        LeaveCharSelect();
+        return;
+    default:
+        break;
+    }
+    if (GetTickCount64() - g_charSelStartTick >
+        static_cast<ULONGLONG>(kCharSelSeconds + kCharSelStageSeconds) * 1000 + kCharSelGraceMs) {
+        AbortMatchStart("Could not properly sync with the other player.");
+        LeaveCharSelect();
+        return;
+    }
+
+    CharSelPacket out;
+    if (charsel::TakeOutbound(&out)) SendCharSelPacket(out);
+    if (charsel::LocalLockedIn()) {
+        const Member* local = LocalRoomMember();
+        if (local && !local->ready) g_service->SetReady(true);
+    }
+
+    CharSelScreenFrame(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -1990,7 +2565,14 @@ void EnsureObjects()
             }
         }
     }
-    if (!g_ui) g_ui.reset(new LobbyUi(*g_service, kRosterSource, LoadPrefs()));
+    if (!g_ui) {
+        g_ui.reset(new LobbyUi(*g_service, kRosterSource, LoadPrefs()));
+        // CHARACTER SELECT in the start prompt is the game's own screen when
+        // its hooks went in, the team screen otherwise.
+        g_ui->SetNativeCharSelect(charsel::Install());
+        // The result screen's menu in a room match (native_result.h).
+        resultmenu::Install();
+    }
     // Lobby test build: bring up the second player's game now that this one has
     // finished starting (no-op otherwise, and only ever once).
     LocalLobby_SpawnSecondInstance();
@@ -2133,9 +2715,23 @@ void RunLobbyFrame(uint64_t titleArea)
         return;
     }
 
+    if (g_ui->TakeCharSelectRequested()) {
+        // Opened once the match connection is up (UpdateMatchStart); the
+        // prompt holds still under this until then.
+        g_charSelWanted = true;
+        g_ui->SetBusy("Opening character select...");
+    }
     PumpSpectate();
     UpdateSpectateJoin(input.cancel);
     UpdateMatchStart(input.cancel);
+    // The select screen's area was just asked for: nothing more of the lobby
+    // is drawn in this one.
+    if (g_charSelArea) return;
+    if (g_charSelWanted && g_phase == Phase::Lobby) {
+        // The pairing went away before the screen could open.
+        g_charSelWanted = false;
+        g_ui->SetBusy(nullptr);
+    }
 
     if (Canvas* canvas = Native_BeginFrame()) {
         if (g_entrancePending) {
@@ -2195,7 +2791,7 @@ bool LobbyFlow_IsLobbyVisible()
     // If the native UI never came up, stop claiming the screen so the plugin's
     // own pause menu (and its Exit Game button) is reachable again.
     if (g_nativeWaitFrames.load(std::memory_order_relaxed) >= kNativeFailedFrames) return false;
-    return g_enabled && !g_releasedToMainMenu &&
+    return g_enabled && !g_releasedToMainMenu && !g_charSelArea &&
            (g_phase == Phase::Lobby || g_phase == Phase::WatchJoining ||
             g_phase == Phase::Connecting || g_phase == Phase::Handshake);
 }
@@ -2246,10 +2842,15 @@ void LobbyFlow_DrawOverlay()
             draw->AddText(font, size, ImVec2(at.x + 2.0f, at.y + 2.0f), IM_COL32(0, 0, 0, 220), text);
             draw->AddText(font, size, at, color, text);
         };
+        // (Under the status bar while the players are on the character
+        // select, whose clock has the top centre.)
+        const float top = g_charSelArea ? kSelectScoreY - 0.012f : 0.0f;
         if (overlayShown)
-            centred(line, display.y * 0.03f, display.y * 0.012f, IM_COL32(255, 255, 255, 255));
-        centred(note, display.y * 0.022f, display.y * 0.047f,
-                status.desynced ? IM_COL32(255, 110, 90, 255) : IM_COL32(120, 220, 255, 255));
+            centred(line, display.y * 0.03f, display.y * (top + 0.012f),
+                    IM_COL32(255, 255, 255, 255));
+        if (!g_charSelArea || status.desynced)
+            centred(note, display.y * 0.022f, display.y * (top + 0.047f),
+                    status.desynced ? IM_COL32(255, 110, 90, 255) : IM_COL32(120, 220, 255, 255));
     }
 
     // Set score during a room match, top centre between the health bars.
@@ -2263,7 +2864,10 @@ void LobbyFlow_DrawOverlay()
         ImFont* font = ImGui::GetFont();
         const float size = display.y * 0.03f;
         const ImVec2 extent = font->CalcTextSizeA(size, 100000.0f, 0.0f, score);
-        const ImVec2 at((display.x - extent.x) * 0.5f, display.y * 0.012f);
+        // On the character select the top centre is the screen's clock: the
+        // score goes under its status bar there.
+        const ImVec2 at((display.x - extent.x) * 0.5f,
+                        display.y * (g_charSelArea ? kSelectScoreY : 0.012f));
         ImDrawList* draw = ImGui::GetBackgroundDrawList();
         draw->AddText(font, size, ImVec2(at.x + 2.0f, at.y + 2.0f), IM_COL32(0, 0, 0, 220), score);
         draw->AddText(font, size, at, IM_COL32(255, 255, 255, 255), score);
@@ -2307,6 +2911,8 @@ void LobbyFlow_EnterTitleFromLogo()
 bool LobbyFlow_TitleTick(uint64_t titleArea)
 {
     EnsureFramePacing();
+    // On its way out to the character select: the game tick has the lobby.
+    if (g_charSelArea) return false;
     if (g_phase == Phase::Launching) {
         if (TrainingBoot_HasNetworkFailed()) {
             // The opponent vanished between the handshake and the battle boot.
@@ -2368,6 +2974,13 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
             g_ui->ReturnToRoom();
             g_entrancePending = false; // back from a match: the room is simply there
             SetPhase(Phase::Lobby);
+        }
+        if (g_charSelReturn) {
+            // Back from the character select without a match: the room is
+            // simply there again.
+            g_charSelReturn = false;
+            g_ui->ReturnToRoom();
+            g_entrancePending = false;
         }
         if (g_pendingNotice[0]) {
             g_ui->ShowNotice(g_pendingNotice);
@@ -2559,9 +3172,345 @@ bool LobbyFlow_AllowResultRestart()
     return g_gameCounted && !g_setOver;
 }
 
+// A game of a room set is restarting with `config`: the members a player left
+// to chance for every game are drawn again. Both players make the same draw
+// for themselves, from the seed player 1 sent with the set's rules and the
+// number of the game that is ending, so nothing has to be agreed in between.
+void LobbyFlow_RerollRandomMembers(TrainingBootConfig& config)
+{
+    if (!g_enabled || g_phase != Phase::InMatch || g_spectating || !g_rerollMask) return;
+    uint32_t state = g_rerollSeed ^ (FrameStepper_GetBattleGeneration() * 0x9E3779B9u);
+    state ^= state >> 16;
+    state *= 0x85EBCA6Bu;
+    state ^= state >> 13;
+    if (!state) state = 0x9E3779B9u;
+    for (int side = 0; side < 2; ++side) {
+        const uint32_t mask = (g_rerollMask >> (side * 3)) & 7u;
+        if (!mask) continue;
+        int32_t* chars = side ? config.p2Chars : config.p1Chars;
+        int32_t* colors = side ? config.p2Colors : config.p1Colors;
+        int32_t* assists = side ? config.p2Assists : config.p1Assists;
+        Team team = {};
+        for (int i = 0; i < 3; ++i) {
+            // The character being replaced can come up again.
+            team.chars[i] = (mask >> i) & 1u ? lobby::kCharRandomAll : chars[i];
+            team.colors[i] = colors[i];
+            team.assists[i] = assists[i];
+        }
+        ResolveRandomMembers(team, state, true);
+        for (int i = 0; i < 3; ++i) {
+            if (!((mask >> i) & 1u)) continue;
+            chars[i] = team.chars[i];
+            colors[i] = team.colors[i];
+            assists[i] = team.assists[i];
+            config.voiceLanguage[side][i] = TrainingBoot_GetVoiceLanguage(side, team.chars[i]);
+        }
+        HookLog("LobbyFlow: P%d random members drawn again: %d/%d/%d\n", side + 1, team.chars[0],
+                team.chars[1], team.chars[2]);
+        // The room sees the team now being played.
+        if (side == g_pairing.localSide && g_service) g_service->SetTeam(team);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The result screen and the character select reached from it
+// ---------------------------------------------------------------------------
+// Closes the select screen's session when it was reached from a match.
+static void EndMatchCharSelect(bool startingBattle)
+{
+    charsel::End(startingBattle);
+    g_charSelArea = false;
+    g_charSelUsed = false;
+    g_charSelInMatch = false;
+    g_selectBootTries = 0;
+    if (g_ui) g_ui->ClosePresetPicker();
+    Native_Shutdown();
+    Native_SetDepthBase(0);
+}
+
+// The synchronized restart has reached the frame both players agreed on, and
+// it is one that goes through the character select (RESTART_CHARSEL): the
+// battle's area gives way to the select screen's, with the netplay session,
+// the connection and the set as they are. A spectator follows the same way,
+// with both sides of the screen shown from the feed.
+bool LobbyFlow_BeginMatchCharSelect()
+{
+    if (!g_enabled || g_phase != Phase::InMatch || g_charSelArea || !g_ui) return false;
+    // Only from the result phase. The restart packet that asks for this comes
+    // from the other player: one sent in the middle of a game is not obeyed.
+    {
+        using GetInstance = uint64_t(__fastcall*)();
+        const uint64_t action = reinterpret_cast<GetInstance>(_addr(0x140001A90))();
+        const int32_t step = action ? *reinterpret_cast<int32_t*>(action + 0xD8) : 0;
+        if (step < 8 || step > 11) {
+            HookLog("LobbyFlow: character select asked for outside the result phase (step %d); "
+                    "ignored\n", step);
+            return false;
+        }
+    }
+    charsel::Config config = {};
+    config.seconds = kCharSelSeconds;
+    config.stageSeconds = kCharSelStageSeconds;
+    if (g_spectating) {
+        config.watch = true;
+    } else {
+        // What the clock running out falls back to: the team just played.
+        config.localTeam = MatchLocalTeam();
+        const TrainingBootConfig& boot = TrainingBoot_GetConfig();
+        for (int i = 0; i < 3; ++i) {
+            config.team.chars[i] = config.localTeam == 0 ? boot.p1Chars[i] : boot.p2Chars[i];
+            config.team.colors[i] = config.localTeam == 0 ? boot.p1Colors[i] : boot.p2Colors[i];
+            config.team.assists[i] = config.localTeam == 0 ? boot.p1Assists[i] : boot.p2Assists[i];
+        }
+    }
+    // The result screen goes, as it does when the game leaves it itself.
+    resultmenu::KillScreen();
+    Native_Shutdown();
+    if (!charsel::Install() || !charsel::Begin(config)) {
+        // The other player's game is on its way to the screen regardless:
+        // staying in a battle it has left would only hang both.
+        HookLog("LobbyFlow: the character select could not be opened from the match\n");
+        LobbyFlow_RequestReturnToLobby("The character select could not be opened.");
+        return false;
+    }
+    TrainingBoot_BeginSelectRestart();
+    // What the game's own CHARACTER SELECT does on its way out of a battle.
+    using GetInstance = void*(__fastcall*)();
+    if (void* gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))())
+        *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(gameUi) + SGAMEUI_BOOT_STATE) =
+            kBootStateTitle;
+    if (void* sound = reinterpret_cast<GetInstance>(_addr(GSOUND_GET_INSTANCE))()) {
+        using FadeOut = void(__fastcall*)(void*, int32_t);
+        reinterpret_cast<FadeOut>(_addr(GSOUND_FADE_OUT_BGM))(sound, 2000);
+    }
+    Native_SetDepthBase(kCharSelDepthBase);
+    g_charSelArea = true;
+    g_charSelUsed = true;
+    g_charSelInMatch = true;
+    g_charSelWanted = false;
+    g_charSelPeerAsked = false;
+    g_charSelStartTick = GetTickCount64();
+    g_presetHoldFrames = 0;
+    g_selectBootTries = 0;
+    g_selectSeen[0] = g_selectSeen[1] = 0;
+    g_selectResultTick = 0;
+    g_ui->ClosePresetPicker();
+    if (g_spectating) Spectate_OnSelectApplied();
+    else Spectate_RecSelectBegin();
+    HookLog("LobbyFlow: character select opened from the match (%s, set %d-%d of FT%d)\n",
+            g_spectating ? "watching" : MatchLocalTeam() == 0 ? "P1" : "P2", g_setWins[0],
+            g_setWins[1], g_setFirstTo);
+    return true;
+}
+
+// On the extension channel of the match's session: the other player's side
+// of the result menu, and of the select screen reached from it.
+bool LobbyFlow_HandleExtension(const void* data, size_t size)
+{
+    if (!g_enabled || !data || size < 2 * sizeof(uint32_t)) return false;
+    uint32_t magic = 0;
+    memcpy(&magic, static_cast<const uint8_t*>(data) + sizeof(uint32_t), sizeof(magic));
+    if (magic == kResultMenuMagic) {
+        if (size == sizeof(ResultMenuPacket)) {
+            ResultMenuPacket packet;
+            memcpy(&packet, data, sizeof(packet));
+            resultmenu::OnPeerPacket(packet);
+        }
+        return true;
+    }
+    if (magic == kCharSelExtMagic) {
+        if (size == sizeof(CharSelExtPacket) && g_charSelInMatch && !g_spectating &&
+            charsel::Active()) {
+            CharSelExtPacket packet;
+            memcpy(&packet, data, sizeof(packet));
+            if (packet.generation == FrameStepper_GetBattleGeneration()) {
+                CharSelPacket inner;
+                memcpy(&inner, packet.inner, sizeof(inner));
+                charsel::OnPeerPacket(inner);
+                Spectate_RecSelect(1 - MatchLocalTeam(), inner);
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+// Both players are through the select screen (teams, stage, the versus
+// sequence): the next game of the set is booted from it. Each player gets
+// here on their own; the battle's start-up barrier brings them together.
+static void FinishMatchCharSelect()
+{
+    TrainingBootConfig config = TrainingBoot_GetConfig();
+    const int local = MatchLocalTeam();
+    const Team mine = charsel::LocalTeam(), theirs = charsel::RemoteTeam();
+    const Team& p1 = local == 0 ? mine : theirs;
+    const Team& p2 = local == 0 ? theirs : mine;
+    for (int i = 0; i < 3; ++i) {
+        config.p1Chars[i] = p1.chars[i];
+        config.p1Colors[i] = p1.colors[i];
+        config.p1Assists[i] = p1.assists[i];
+        config.p2Chars[i] = p2.chars[i];
+        config.p2Colors[i] = p2.colors[i];
+        config.p2Assists[i] = p2.assists[i];
+        // Each player's voice choice for the character they now play, as
+        // both know it from the start of the match.
+        config.voiceLanguage[0][i] = TrainingBoot_GetVoiceLanguage(0, p1.chars[i]);
+        config.voiceLanguage[1][i] = TrainingBoot_GetVoiceLanguage(1, p2.chars[i]);
+    }
+    config.stageId = charsel::StageId();
+    // The boot reads the control-type setting and writes the pad table.
+    charsel::ReleaseSettings();
+    FrameStepper_SetRestartSeed(FrameStepper_GetRestartSeed());
+    if (!TrainingBoot_FinishSelectRestart(config)) {
+        if (++g_selectBootTries > 600)
+            LobbyFlow_RequestReturnToLobby("Could not properly sync with the other player.");
+        return;
+    }
+    // Spectators follow with what was picked.
+    Spectate_RecRestart(FrameStepper_GetRestartSeed());
+    // Members left to RANDOM ALL on the screen keep being drawn for each
+    // later game; ones picked by hand are not. Both players work this out
+    // from the same two locked-in teams.
+    g_rerollMask = SelectRerollMask(local);
+    if (g_service) g_service->SetTeam(mine);
+    HookLog("LobbyFlow: next game from the character select: %d/%d/%d vs %d/%d/%d, stage %d\n",
+            p1.chars[0], p1.chars[1], p1.chars[2], p2.chars[0], p2.chars[1], p2.chars[2],
+            config.stageId);
+    EndMatchCharSelect(true);
+    LobbyFlow_OnBattleBootCommitted();
+}
+
+// A spectator's select screen: both sides as the feed has them, and the next
+// game when the players have started it.
+static void SpectatorSelectFrame(ULONGLONG now)
+{
+    TrainingBootConfig config;
+    uint32_t seed = 0;
+    switch (Spectate_SelectResult(&config, &seed)) {
+    case SpectateSelectEnd::Over:
+        LobbyFlow_RequestReturnToLobby("");
+        return;
+    case SpectateSelectEnd::Restart:
+        if (!g_selectResultTick) g_selectResultTick = now;
+        // Booted where this screen's own versus sequence ends; one that fell
+        // behind the players' is not waited on for long.
+        if (charsel::EnterRequested() || now - g_selectResultTick > 12000) {
+            charsel::ReleaseSettings();
+            FrameStepper_SetRestartSeed(seed);
+            if (TrainingBoot_FinishSelectRestart(config)) {
+                HookLog("LobbyFlow: spectator follows the players out of the character select\n");
+                EndMatchCharSelect(true);
+                LobbyFlow_OnBattleBootCommitted();
+                return;
+            }
+            if (++g_selectBootTries > 600) {
+                LobbyFlow_RequestReturnToLobby("");
+                return;
+            }
+        }
+        break;
+    case SpectateSelectEnd::Running:
+        break;
+    }
+    FeedWatchedSelect();
+}
+
+// One game tick with the select screen up in the middle of a match. What a
+// match needs every tick (the room, the feed, a lost connection, the way
+// back to the room) goes on in LobbyFlow_GameTick after this.
+static void MatchCharSelFrame()
+{
+    if (g_returnRequested.load(std::memory_order_relaxed)) return; // on the way out
+    const ULONGLONG now = GetTickCount64();
+    switch (charsel::GetStatus()) {
+    case charsel::Status::Failed:
+        LobbyFlow_RequestReturnToLobby("The character select could not be opened.");
+        return;
+    case charsel::Status::LocalLeft: {
+        // Backing out of the screen is leaving the match.
+        CharSelPacket left = {};
+        left.type = PACKET_CHARSEL;
+        left.flags = CHARSEL_LEFT;
+        SendCharSelPacket(left);
+        LobbyFlow_RequestLeaveMatch();
+        return;
+    }
+    case charsel::Status::RemoteLeft:
+        LobbyFlow_RequestReturnToLobby(g_spectating ? "" : "Your opponent left the match.");
+        return;
+    default:
+        break;
+    }
+    if (now - g_charSelStartTick >
+        static_cast<ULONGLONG>(kCharSelSeconds + kCharSelStageSeconds) * 1000 + kCharSelGraceMs) {
+        LobbyFlow_RequestReturnToLobby(g_spectating ? ""
+            : "Could not properly sync with the other player.");
+        return;
+    }
+    if (g_spectating) {
+        SpectatorSelectFrame(now);
+        return;
+    }
+
+    CharSelPacket out;
+    if (charsel::TakeOutbound(&out)) SendCharSelPacket(out);
+    if (charsel::LocalLockedIn() && charsel::RemoteLockedIn() && charsel::StageDecided() &&
+        charsel::EnterRequested()) {
+        FinishMatchCharSelect();
+        return;
+    }
+    Input input = {};
+    Native_ReadInput(input, false);
+    CharSelScreenFrame(input);
+}
+
+// The result screen's menu, each tick of a room match's battle: the local
+// side goes to the other player, and the two choices are acted on.
+//   - REMATCH from both: the synchronized restart.
+//   - CHARACTER SELECT from either: the restart through the select screen.
+//   - MAIN MENU (confirmed in the game's own pop-up): that player leaves.
+// One player (the host) asks for the first two; the restart packet tells the
+// other. A game that decided the set is followed by neither.
+static void UpdateResultMenu()
+{
+    ResultMenuPacket out;
+    if (resultmenu::TakeOutbound(&out)) Netplay_SendExtensionPacket(&out, sizeof(out), true);
+    const resultmenu::Choice mine = resultmenu::LocalChoice();
+    const resultmenu::Choice theirs = resultmenu::RemoteChoice();
+    if (mine == resultmenu::kMainMenu) {
+        if (!g_returnRequested.load(std::memory_order_relaxed)) {
+            HookLog("LobbyFlow: MAIN MENU chosen on the result screen; leaving the match\n");
+            LobbyFlow_RequestLeaveMatch();
+        }
+        return;
+    }
+    if (!Netplay_IsHost() || !LobbyFlow_AllowResultRestart() ||
+        FrameStepper_IsMatchRestartPending())
+        return;
+    if (mine == resultmenu::kCharSelect || theirs == resultmenu::kCharSelect) {
+        if (FrameStepper_RequestSelectRestart())
+            HookLog("LobbyFlow: CHARACTER SELECT chosen on the result screen (P1 %d, P2 %d)\n",
+                    mine, theirs);
+    } else if (mine == resultmenu::kRematch && theirs == resultmenu::kRematch) {
+        if (FrameStepper_RequestMatchRestart())
+            HookLog("LobbyFlow: both players chose REMATCH\n");
+    }
+}
+
 void LobbyFlow_GameTick()
 {
     if (!g_enabled) return;
+    charsel::Tick();
+    // The select screen reached from a match is part of the match: everything
+    // below goes on under it.
+    const bool matchSelect = g_charSelArea && g_charSelInMatch;
+    // The result screen's menu is the players' while a battle is running.
+    resultmenu::Tick(g_phase == Phase::InMatch && !g_charSelArea && Netplay_IsActive(),
+                     MatchLocalTeam(), g_spectating, FrameStepper_GetBattleGeneration());
+    if (g_charSelArea && !matchSelect) {
+        CharSelFrame();
+        return;
+    }
 
     if (g_phase == Phase::InMatch || g_phase == Phase::Returning) {
         // Keep the room alive (membership, chat backlog) while fighting, at a
@@ -2576,6 +3525,7 @@ void LobbyFlow_GameTick()
         return;
     }
 
+    if (matchSelect) MatchCharSelFrame();
     if (g_spectating) {
         UpdateWatchText();
         const Member* local = LocalRoomMember();
@@ -2593,7 +3543,10 @@ void LobbyFlow_GameTick()
         }
     } else {
         UpdateSet();
-        SampleTeamHealth();
+        if (!g_charSelArea) {
+            SampleTeamHealth();
+            UpdateResultMenu();
+        }
         if (Netplay_TakePeerDisconnected())
             LobbyFlow_RequestReturnToLobby(Netplay_PeerLeftByChoice()
                 ? "Your opponent left the match." : "Connection to opponent has been lost.");
@@ -2618,6 +3571,8 @@ void LobbyFlow_GameTick()
     }
 
     HookLog("LobbyFlow: leaving the match (%s)\n", g_returnReason[0] ? g_returnReason : "requested");
+    // From the select screen between two games: its session goes first.
+    if (g_charSelArea) EndMatchCharSelect(false);
     FrameStepper_EndNetplaySession();
     // Netplay destroyed the ENet host; never leave the launch config pointing at it.
     SetNetworkHandles(nullptr, nullptr);
@@ -2637,6 +3592,11 @@ void LobbyFlow_GameTick()
 bool LobbyFlow_IsSpectating()
 {
     return g_enabled && g_spectating;
+}
+
+bool LobbyFlow_PlayerInCharSelect()
+{
+    return g_enabled && g_charSelArea && !g_spectating && !g_charSelWatchJoin;
 }
 
 bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2)

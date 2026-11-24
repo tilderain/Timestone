@@ -146,11 +146,16 @@ static bool g_skipNativeConfigLoad = false;
 static bool g_restartConfigPending = false;
 static bool g_restartTransitionActive = false;
 static bool g_restartSawActionSetup = false;
+// The restart is waiting on the character select (TrainingBoot_BeginSelectRestart).
+static bool g_restartAwaitingSelect = false;
 static TrainingBootCpuMode g_cpuMode = TRAINING_CPU_NONE;
 static bool g_fiveBarStart = false;
 static bool g_initialSettingsSent = false;
 static bool g_initialSettingsReceived = false;
 static bool g_initialSettingsSynchronized = false;
+// Each team's voice choice for every character (bit N for character id N, set
+// = English), from the initial settings exchange. English until it is known.
+static uint32_t g_voiceMask[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
 static bool g_networkRequired = false;
 static bool g_networkConnected = false;
 static bool g_networkFailed = false;
@@ -222,6 +227,7 @@ void TrainingBoot_PrepareNextBoot(bool networkRequired)
     g_restartConfigPending = false;
     g_restartTransitionActive = false;
     g_restartSawActionSetup = false;
+    g_restartAwaitingSelect = false;
 }
 
 bool TrainingBoot_HasBooted()
@@ -605,6 +611,13 @@ static bool GetConfiguredSimpleMode(uint64_t gameConfig, bool fallback)
     return *(int32_t*)(gameConfig + SGAMECONFIG_CTRL_TYPE) == 1;
 }
 
+uint8_t TrainingBoot_GetVoiceLanguage(int team, int32_t character)
+{
+    if (team < 0 || team > 1 || character < 1 || character > 25)
+        return 1;
+    return (g_voiceMask[team] >> character) & 1u;
+}
+
 static bool SynchronizeInitialPlayerSettings()
 {
     if (!IsBootNetworkReady())
@@ -646,6 +659,15 @@ static bool SynchronizeInitialPlayerSettings()
             return true;
         }
 
+        // Characters this player may yet be given (a member drawn again for
+        // every game) speak as their owner chose too.
+        uint32_t voiceMask = 0;
+        for (int32_t character = 1; character <= 31; ++character)
+            voiceMask |= static_cast<uint32_t>(
+                GetCharacterVoiceLanguage(gameConfig, character)) << character;
+        g_voiceMask[localTeam] = voiceMask;
+        g_voiceMask[1 - localTeam] = 0xFFFFFFFFu;
+
         LaunchTrainingPacket packet = {};
         packet.type = PACKET_LAUNCH_TRAINING;
         packet.autoJump[localTeam] = localEnabled ? 1u : 0u;
@@ -656,7 +678,8 @@ static bool SynchronizeInitialPlayerSettings()
         }
         packet.voiceValidMask = 1u << localTeam;
         packet.simpleMode[localTeam] = g_bootConfig.simpleMode[localTeam] ? 1u : 0u;
-        packet.flags = LAUNCH_TRAINING_SIMPLE_MODE_VALID;
+        packet.voiceMask = voiceMask;
+        packet.flags = LAUNCH_TRAINING_SIMPLE_MODE_VALID | LAUNCH_TRAINING_VOICE_MASK_VALID;
         Netplay_SendLaunchTrainingSettings(packet);
         g_initialSettingsSent = true;
         g_initialSettingsStartTick = GetTickCount64();
@@ -683,6 +706,8 @@ static bool SynchronizeInitialPlayerSettings()
                 packet.autoJump[remoteTeam] != 0;
             if ((packet.flags & LAUNCH_TRAINING_SIMPLE_MODE_VALID) != 0)
                 g_bootConfig.simpleMode[remoteTeam] = packet.simpleMode[remoteTeam] != 0;
+            if ((packet.flags & LAUNCH_TRAINING_VOICE_MASK_VALID) != 0)
+                g_voiceMask[remoteTeam] = packet.voiceMask;
             for (int member = 0; member < 3; ++member) {
                 const int32_t character = remoteTeam == 0
                     ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
@@ -928,9 +953,46 @@ bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg)
     return true;
 }
 
+// A restart that goes through the character select: the battle has given way
+// to the select screen, and the next one is booted from there once the teams
+// and the stage are picked. Until then the restart counts as pending, which
+// is what keeps the netplay start-up barrier from reading the old battle.
+void TrainingBoot_BeginSelectRestart()
+{
+    g_restartTransitionActive = true;
+    g_restartConfigPending = false;
+    g_restartSawActionSetup = false;
+    g_restartAwaitingSelect = true;
+    HookLog("TrainingBoot: restart through the character select begun\n");
+}
+
+bool TrainingBoot_IsSelectRestart()
+{
+    return g_restartAwaitingSelect;
+}
+
+bool TrainingBoot_FinishSelectRestart(const TrainingBootConfig& cfg)
+{
+    if (!g_restartAwaitingSelect)
+        return false;
+    g_bootConfig = cfg;
+    g_hasBooted = false;
+    g_skipNativeConfigLoad = true;
+    BootIntoTraining(true);
+    g_skipNativeConfigLoad = false;
+    if (!g_hasBooted)
+        return false; // not ready this tick; the caller tries again
+    g_restartAwaitingSelect = false;
+    g_restartSawActionSetup = false;
+    HookLog("TrainingBoot: booted the battle picked on the character select\n");
+    return true;
+}
+
 void TrainingBoot_UpdateRestart()
 {
     if (!g_restartTransitionActive)
+        return;
+    if (g_restartAwaitingSelect)
         return;
 
     uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);

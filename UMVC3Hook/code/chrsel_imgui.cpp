@@ -4,6 +4,7 @@
 #include "../imgui/imgui.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include "LaunchMenu.h"
+#include "lobby_flow.h"
 #include "assist_names.h"
 #include "chr_colors.h"
 #include "framestepper.h"
@@ -1068,6 +1069,9 @@ bool ChrSelImGui_ApplyRestart(int32_t targetFrame)
     config.simpleMode[1] = restartRoster.simpleMode[1] != 0;
     config.autoJump[0] = restartRoster.autoJump[0] != 0;
     config.autoJump[1] = restartRoster.autoJump[1] != 0;
+    // A rematch in a room set: members left to chance for every game.
+    if (!g_pendingRoster)
+        LobbyFlow_RerollRandomMembers(config);
     if (!TrainingBoot_RestartWithConfig(config))
         return false;
 

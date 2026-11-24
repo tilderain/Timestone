@@ -94,6 +94,8 @@ public:
     bool FindPairing(MatchPairing& pairing) const;
     // Publishes the local status shown to the room (Fighting while in battle).
     void SetLocalStatus(MemberStatus status);
+    // The local player is on (or has left) the shared character select.
+    void SetSelecting(bool selecting);
     // After a match: clear ready, back to Seated, bump the room record.
     // A set is starting under these rules; they hold until FinishMatch
     // whatever the host does to the room's in the meantime.
@@ -124,6 +126,7 @@ private:
         bool ready = false;
         MemberStatus status = MemberStatus::Idle;
         bool accepted = false;
+        bool selecting = false;
         int delayPick = kDelayPickNone;
         int delayHover = kDelayPickNone;
         Team team = {};

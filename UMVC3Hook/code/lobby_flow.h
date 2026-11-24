@@ -9,6 +9,7 @@
 // aChrSelectBlank transition the launcher flow uses, and leaving a match
 // requests aTitle again so the player lands back in their room.
 
+#include <cstddef>
 #include <cstdint>
 
 // On by default; -launcher or [Launch] NativeLobby=0 opts out. Must be called
@@ -43,6 +44,13 @@ void LobbyFlow_OnBattleBootCommitted();
 
 // Called from the hooked sMvc3Main::move every frame.
 void LobbyFlow_GameTick();
+// The synchronized restart that goes through the character select has come
+// due (framestepper.cpp, RESTART_CHARSEL): asks for the select screen's area
+// in place of the battle's. False if it could not; the match is then left.
+bool LobbyFlow_BeginMatchCharSelect();
+// A packet from the match session's extension channel. True if it was one of
+// the lobby's (the result menu, the select screen reached from a match).
+bool LobbyFlow_HandleExtension(const void* data, size_t size);
 
 // Spectating: who is watching, the setup's queue in order, and who the feed
 // comes from with the room's ping estimate to them (-1 when unknown).
@@ -74,6 +82,10 @@ void LobbyFlow_OnResultPhase(int32_t winTeam);
 // False while a rematch must not be started from the result phase: the game
 // just finished has not been counted yet, or it decided the set.
 bool LobbyFlow_AllowResultRestart();
+// A game of a room set is restarting with this configuration: draws the team
+// members that are random for every game again, the same on both players.
+struct TrainingBootConfig;
+void LobbyFlow_RerollRandomMembers(TrainingBootConfig& config);
 // Ask to leave the current match and return to the room. Safe from the
 // render thread; the transition happens on the next game tick.
 void LobbyFlow_RequestReturnToLobby(const char* reason);
@@ -83,6 +95,9 @@ void LobbyFlow_RequestLeaveMatch();
 
 // True while the local game is watching someone's room match.
 bool LobbyFlow_IsSpectating();
+// The shared character select is up and the local player is one of the two
+// picking on it (not a spectator). Any thread.
+bool LobbyFlow_PlayerInCharSelect();
 // The two players of the match being watched, player 1 first.
 bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2);
 

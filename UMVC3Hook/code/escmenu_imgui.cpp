@@ -158,14 +158,22 @@ void EscMenuImGui_Update()
         g_closeRequested = false;
     }
     wasNetplay = netplay;
-    // Offline the pad belongs to the game until the menu is open.
-    g_available.store(netplay || (offline && g_open), std::memory_order_relaxed);
+    // A player on the character select: Esc and Start are the screen's own
+    // (back out, the preset list), so F3 opens this menu there. A spectator
+    // has nothing to press on that screen and keeps Esc / Start.
+    const bool selecting = LobbyFlow_PlayerInCharSelect();
+    // Offline, and on the select screen, the pad belongs to the game until
+    // the menu is open.
+    g_available.store(selecting ? g_open : netplay || (offline && g_open),
+                      std::memory_order_relaxed);
     if (!netplay && !offline) {
         g_openShared.store(false, std::memory_order_release);
         return;
     }
 
-    const bool toggle = netplay ? (KeyPressed(VK_ESCAPE) || padToggle)
+    const bool toggle = selecting
+        ? KeyPressed(VK_F3) || (g_open && (KeyPressed(VK_ESCAPE) || padToggle))
+        : netplay ? (KeyPressed(VK_ESCAPE) || padToggle)
         : (KeyPressed(VK_F3) && !FrameStepper_IsPaused()) ||
           (g_open && padToggle); // not Esc: offline that is the game's own pause
     if (toggle) {

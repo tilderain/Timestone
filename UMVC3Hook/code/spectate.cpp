@@ -1,6 +1,7 @@
 #include "../pch.h"
 #include "spectate.h"
 
+#include "netplay.h"
 #include "steam_lobby.h"
 #include "trainingboot.h"
 
@@ -62,7 +63,13 @@ enum : uint8_t {
     MSG_FRAMES = 4, // run-length encoded input pairs
     MSG_CHECK = 5,  // the players' checksum after a frame
     MSG_FINISH = 6, // restarted (with what) or over
+    MSG_SELECT = 7, // the players are on the character select: one team's side of it
 };
+// MsgSelect::team for "the select screen has opened" (no side to show yet),
+// and for "it closed without a game" (only before a match's first game: later
+// the game's own finish says so).
+constexpr uint8_t kSelectBegun = 2;
+constexpr uint8_t kSelectEnded = 3;
 enum : uint8_t { FINISH_NONE = 0, FINISH_RESTART = 1, FINISH_END = 2 };
 
 #pragma pack(push, 1)
@@ -119,6 +126,12 @@ struct MsgFinish {
     uint8_t kind;
     uint32_t seed;
     WireConfig next;
+};
+struct MsgSelect {
+    uint8_t type;
+    uint32_t game; // the game the select screen follows; 0 before the first
+    uint8_t team;  // 0 / 1, kSelectBegun or kSelectEnded
+    uint8_t state[sizeof(CharSelPacket)];
 };
 #pragma pack(pop)
 
@@ -228,6 +241,26 @@ bool ConfigToBoot(const WireConfig& config, TrainingBootConfig& boot)
     return true;
 }
 
+// The character select between two games: not part of any game's log, just
+// what each team's side of the screen looks like now. Players fill it from
+// their session, spectators from the feed, and both serve it on.
+struct SelectState {
+    uint32_t game = 0;        // the game it follows; 0 for none
+    // The screen a match starts from, before there is any game to follow.
+    bool pre = false;
+    bool ended = false;       // ...and it closed without one (the players backed out)
+    uint32_t begun = 0;       // version of "it has opened"
+    bool have[2] = {};
+    CharSelPacket side[2] = {};
+    uint32_t version[2] = {}; // changes with the side
+};
+SelectState g_select;
+uint32_t g_selectVersions = 0;
+// A spectator's own screen: the game it left for the select, or the screen
+// before a match's first game.
+uint32_t g_selectView = 0;
+bool g_selectPreView = false;
+
 // --- Recording state ---------------------------------------------------------------
 bool g_recording = false;
 
@@ -308,6 +341,8 @@ struct Cursor {
     int32_t nextFrame = 0;
     size_t nextCheck = 0;
     bool sentFinish = false;
+    uint32_t selectBegun = 0;       // versions of the select screen sent
+    uint32_t selectSent[2] = {};
 };
 struct Link {
     uint64_t id = 0;
@@ -317,6 +352,9 @@ struct Link {
     int wait = 0;            // frames since the last live batch went out
     ULONGLONG openedAt = 0;
     ULONGLONG lastWanted = 0;
+    uint32_t preBegun = 0;   // versions of the pre-game select screen sent
+    uint32_t preSent[2] = {};
+    bool preEnded = false;
 };
 Link g_links[kMaxLinks];
 uint64_t g_upstream = 0;
@@ -401,7 +439,32 @@ bool Send(uint64_t to, const T& message)
 // Sends what this child is missing, oldest first, within `budget` bytes.
 void PumpChild(Link& link, int budget)
 {
-    if (!link.subscribed || g_games.empty()) return;
+    if (!link.subscribed) return;
+    if (g_games.empty()) {
+        // No game yet: the select screen the match is being started from.
+        if (!g_select.pre) return;
+        MsgSelect message = {MSG_SELECT, 0, kSelectBegun, {}};
+        if (link.preBegun != g_select.begun) {
+            if (!Send(link.id, message)) return;
+            link.preBegun = g_select.begun;
+            link.preSent[0] = link.preSent[1] = 0;
+            link.preEnded = false;
+        }
+        for (uint8_t team = 0; team < 2; ++team) {
+            if (!g_select.have[team] || link.preSent[team] == g_select.version[team]) continue;
+            message.team = team;
+            memcpy(message.state, &g_select.side[team], sizeof(message.state));
+            if (!Send(link.id, message)) return;
+            link.preSent[team] = g_select.version[team];
+        }
+        if (g_select.ended && !link.preEnded) {
+            message.team = kSelectEnded;
+            memset(message.state, 0, sizeof(message.state));
+            if (!Send(link.id, message)) return;
+            link.preEnded = true;
+        }
+        return;
+    }
     Cursor& cursor = link.cursor;
     Game* game = FindGame(cursor.game);
     if (!game) {
@@ -460,6 +523,25 @@ void PumpChild(Link& link, int budget)
             memcpy(message.rng, check.rng, sizeof(message.rng));
             if (!Send(link.id, message)) return;
             ++cursor.nextCheck;
+        }
+        if (game->finish == FINISH_NONE && cursor.nextFrame >= frames &&
+            g_select.game == game->id) {
+            // Everything of the game has gone out and the players are on the
+            // character select: what the screen shows now, each side when it
+            // changes.
+            MsgSelect message = {MSG_SELECT, game->id, kSelectBegun, {}};
+            if (cursor.selectBegun != g_select.begun) {
+                if (!Send(link.id, message)) return;
+                cursor.selectBegun = g_select.begun;
+            }
+            for (uint8_t team = 0; team < 2; ++team) {
+                if (!g_select.have[team] || cursor.selectSent[team] == g_select.version[team])
+                    continue;
+                message.team = team;
+                memcpy(message.state, &g_select.side[team], sizeof(message.state));
+                if (!Send(link.id, message)) return;
+                cursor.selectSent[team] = g_select.version[team];
+            }
         }
         if (game->finish == FINISH_NONE || cursor.nextFrame < frames) return;
         if (!cursor.sentFinish) {
@@ -576,6 +658,46 @@ void OnFeed(const uint8_t* data, int size)
         }
         return;
     }
+    if (type == MSG_SELECT && size == sizeof(MsgSelect)) {
+        MsgSelect message;
+        memcpy(&message, data, sizeof(message));
+        if (message.team > kSelectEnded) return;
+        if (message.game == 0) {
+            // Before the match's first game. Once a game is here it is over.
+            if (!g_games.empty()) return;
+            if (!g_select.pre || message.team == kSelectBegun) {
+                if (!g_select.pre || g_select.ended) {
+                    g_select = SelectState{};
+                    g_select.pre = true;
+                    HookLog("Spectate: the players are on the character select\n");
+                }
+                g_select.begun = ++g_selectVersions;
+            }
+            if (message.team == kSelectEnded) {
+                g_select.ended = true;
+            } else if (message.team < 2) {
+                memcpy(&g_select.side[message.team], message.state, sizeof(CharSelPacket));
+                g_select.have[message.team] = true;
+                g_select.version[message.team] = ++g_selectVersions;
+            }
+            return;
+        }
+        if (!FindGame(message.game) || message.team > kSelectBegun) return;
+        if (g_select.game != message.game) {
+            g_select = SelectState{};
+            g_select.game = message.game;
+            g_select.begun = ++g_selectVersions;
+            HookLog("Spectate: the players went to the character select after game %u\n",
+                    message.game);
+        }
+        if (message.team < 2) {
+            // Checked where it is used (charsel::OnTeamPacket), as a player's is.
+            memcpy(&g_select.side[message.team], message.state, sizeof(CharSelPacket));
+            g_select.have[message.team] = true;
+            g_select.version[message.team] = ++g_selectVersions;
+        }
+        return;
+    }
     if (type == MSG_FINISH && size == sizeof(MsgFinish)) {
         MsgFinish message;
         memcpy(&message, data, sizeof(message));
@@ -629,7 +751,8 @@ uint64_t ChooseUpstream(const SpectateRoom& room, const SpectateRoomMember& self
         if (candidate.id == self.id) return false;
         if (candidate.watchSlot < 0)
             // A player who has just left the fight still holds the end of the log.
-            return candidate.slot == g_slot && (candidate.fighting || current);
+            return candidate.slot == g_slot &&
+                   (candidate.fighting || candidate.selecting || current);
         return candidate.watchSlot == g_slot && Before(candidate, self) &&
                (candidate.upstream != 0 || current);
     };
@@ -667,6 +790,9 @@ uint64_t ChooseUpstream(const SpectateRoom& room, const SpectateRoomMember& self
 
 void ResetViewer()
 {
+    g_select = SelectState{};
+    g_selectView = 0;
+    g_selectPreView = false;
     g_playGame = 0;
     g_lastDone = 0;
     g_buffering = true;
@@ -689,16 +815,32 @@ void ResetViewer()
 // ---------------------------------------------------------------------------
 void Spectate_RecBegin()
 {
+    // Already recording the select screen this match starts from: the log
+    // goes on from it.
+    if (g_recording && g_games.empty() && g_select.pre && !g_select.ended) return;
     if (g_state.load() != SpectateState::Off) Spectate_Stop();
     g_games.clear();
+    g_select = SelectState{};
     g_recording = true;
     HookLog("Spectate: recording this match for spectators\n");
+}
+
+void Spectate_RecPreSelectBegin()
+{
+    Spectate_RecBegin();
+    if (!g_recording || !g_games.empty()) return;
+    g_select = SelectState{};
+    g_select.pre = true;
+    g_select.begun = ++g_selectVersions;
+    HookLog("Spectate: character select before the first game\n");
 }
 
 void Spectate_RecEnd()
 {
     if (!g_recording) return;
     g_recording = false;
+    // Backed out of the select screen before any game: spectators are told.
+    if (g_games.empty() && g_select.pre) g_select.ended = true;
     if (!g_games.empty() && g_games.back().finish == FINISH_NONE) {
         g_games.back().finish = FINISH_END;
         HookLog("Spectate: match over after game %u (%d frames)\n", g_games.back().id,
@@ -763,6 +905,32 @@ void Spectate_RecRestart(uint32_t restartSeed)
     game.finishSeed = restartSeed;
     game.next = ConfigFromBoot();
     HookLog("Spectate: game %u restarted after %d frames\n", game.id, game.Frames());
+}
+
+void Spectate_RecSelectBegin()
+{
+    if (!g_recording || g_games.empty() || g_games.back().finish != FINISH_NONE) return;
+    g_select = SelectState{};
+    g_select.game = g_games.back().id;
+    g_select.begun = ++g_selectVersions;
+    HookLog("Spectate: character select after game %u\n", g_select.game);
+}
+
+void Spectate_RecSelect(int team, const CharSelPacket& packet)
+{
+    if (!g_recording || team < 0 || team > 1) return;
+    if (g_games.empty()) {
+        if (!g_select.pre || g_select.ended) return;
+    } else if (g_select.game != g_games.back().id || g_games.back().finish != FINISH_NONE) {
+        return;
+    }
+    // The sequence number changes with every repeat; the side does not.
+    CharSelPacket side = packet;
+    side.sequence = 0;
+    if (g_select.have[team] && memcmp(&side, &g_select.side[team], sizeof(side)) == 0) return;
+    g_select.side[team] = side;
+    g_select.have[team] = true;
+    g_select.version[team] = ++g_selectVersions;
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +1111,8 @@ SpectateStep Spectate_Next(int32_t frame, int32_t actionStep, int32_t* fastForwa
     if (game->finish == FINISH_RESTART) return restartInto(game->next, game->finishSeed);
     if (game->finish == FINISH_END) return SpectateStep::Leave;
     if (const Game* newer = OldestAfter(game->id)) return restartInto(newer->config, 0);
+    // The game is played out and the players have gone to pick again.
+    if (g_select.game == game->id) return SpectateStep::Select;
     // Nothing left to play: the picture stands until the next frame arrives
     // and goes on at once, without waiting for a reserve to build up. The
     // slow-down above rebuilds it while playing.
@@ -970,6 +1140,72 @@ void Spectate_OnRestartApplied()
     g_statBuffered = 0;
     g_comparisonsLogged = 0;
     HookLog("Spectate: restart applied; waiting for the game after %u\n", g_lastDone);
+}
+
+void Spectate_OnSelectApplied()
+{
+    g_selectPreView = false;
+    g_selectView = g_playGame;
+    if (g_playGame > g_lastDone) g_lastDone = g_playGame;
+    g_playGame = 0;
+    g_buffering = true;
+    g_statBuffered = 0;
+    g_statWaiting = false;
+    g_statCatchingUp = false;
+    g_comparisonsLogged = 0;
+    HookLog("Spectate: following the players to the character select after game %u\n",
+            g_selectView);
+}
+
+bool Spectate_PreSelectOpen()
+{
+    return g_state.load() == SpectateState::Joining && g_games.empty() && g_select.pre &&
+           !g_select.ended;
+}
+
+void Spectate_OnPreSelectApplied()
+{
+    g_selectPreView = true;
+    g_selectView = 0;
+    HookLog("Spectate: following the players onto the character select\n");
+}
+
+bool Spectate_PreSelectEnded()
+{
+    return g_selectPreView && g_select.pre && g_select.ended && g_games.empty();
+}
+
+bool Spectate_GetSelect(int team, CharSelPacket* packet, uint32_t* version)
+{
+    if (team < 0 || team > 1 || !g_select.have[team]) return false;
+    if (g_selectPreView) {
+        if (!g_select.pre) return false;
+    } else if (!Spectate_IsViewing() || !g_selectView || g_select.game != g_selectView) {
+        return false;
+    }
+    if (packet) *packet = g_select.side[team];
+    if (version) *version = g_select.version[team];
+    return true;
+}
+
+SpectateSelectEnd Spectate_SelectResult(TrainingBootConfig* config, uint32_t* restartSeed)
+{
+    if (!Spectate_IsViewing() || !g_selectView) return SpectateSelectEnd::Over;
+    const Game* game = FindGame(g_selectView);
+    const WireConfig* next = nullptr;
+    uint32_t seed = 0;
+    if (game && game->finish == FINISH_END) return SpectateSelectEnd::Over;
+    if (game && game->finish == FINISH_RESTART) {
+        next = &game->next;
+        seed = game->finishSeed;
+    } else if (const Game* newer = OldestAfter(g_selectView)) {
+        // The feed moved on: the game after it says what was picked.
+        next = &newer->config;
+    }
+    if (!next) return SpectateSelectEnd::Running;
+    if (!config || !ConfigToBoot(*next, *config)) return SpectateSelectEnd::Over;
+    if (restartSeed) *restartSeed = seed;
+    return SpectateSelectEnd::Restart;
 }
 
 bool Spectate_WantsChecksum(int32_t frame)

@@ -218,6 +218,7 @@ uint32_t g_textureRetryFrame[TEX_COUNT] = {};
 bool g_textureFailureLogged[TEX_COUNT] = {};
 uint32_t g_frame = 0;
 uint32_t g_stageFrames = 0;
+int g_depthFar = kDepthFar; // where a frame's first sprite goes (Native_SetDepthBase)
 int g_nextDepth = kDepthFar;
 
 void* CloneUnit(Kind kind)
@@ -405,7 +406,9 @@ void* GetTexture(Tex tex)
         // The cards are "typeB" art: one for Japanese, "_other" for the rest.
         using Compose = void(__fastcall*)(int, const char*, char*, char);
         // The stage select's RANDOM icon is "typeC" art (mode 1).
-        const int mode = info.archive == ARC_BANNER ? 2 : info.archive == ARC_STAGE ? 1 : 3;
+        // ...and so are the roster's RANDOM cells, which are loose files.
+        const int mode = info.archive == ARC_BANNER ? 2
+            : info.archive == ARC_STAGE || info.archive == ARC_LOOSE ? 1 : 3;
         Native<Compose>(COMPOSE_LOCALIZED_NAME)(mode, info.path, path, 1);
     } else {
         snprintf(path, sizeof(path), "%s", info.path);
@@ -1013,6 +1016,40 @@ KeyState ReadKeyboard(bool textActive)
     return keys;
 }
 
+// The clipboard's text, as if typed: its first line, without control
+// characters. What the field cannot take (length, glyphs) is left to it.
+void AppendClipboardText(char* out, size_t capacity)
+{
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenClipboard(nullptr)) return;
+    if (HANDLE handle = GetClipboardData(CF_UNICODETEXT)) {
+        if (const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(handle))) {
+            const size_t units = GlobalSize(handle) / sizeof(wchar_t);
+            bool any = false;
+            for (size_t i = 0; i < units && text[i]; ++i) {
+                uint32_t unit = text[i];
+                if (unit == L'\r' || unit == L'\n') {
+                    if (any) break;
+                    continue;
+                }
+                if (unit == L'\t') unit = L' ';
+                if (unit < 0x20 || unit == 0x7F) continue;
+                if (unit >= 0xD800 && unit <= 0xDBFF) {
+                    const uint32_t low = i + 1 < units ? text[i + 1] : 0;
+                    if (low < 0xDC00 || low > 0xDFFF) continue;
+                    unit = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+                    ++i;
+                } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+                    continue;
+                }
+                AppendUtf8(out, capacity, unit);
+                any = true;
+            }
+            GlobalUnlock(handle);
+        }
+    }
+    CloseClipboard();
+}
+
 void CollectTypedText(bool textActive, bool foreground)
 {
     g_typed[0] = '\0';
@@ -1047,6 +1084,16 @@ void CollectTypedText(bool textActive, bool foreground)
         g_textKeysPrimed = true;
         for (int vk = 0; vk < 256; ++vk) g_previousKeys[vk] = IsKeyHeld(vk);
         g_typed[0] = '\0';
+        return;
+    }
+    // Ctrl+V or Shift+Insert pastes. Ctrl with Alt is AltGr, which types.
+    const bool control = IsKeyHeld(VK_CONTROL) && !IsKeyHeld(VK_MENU);
+    const bool paste = (control && IsKeyHeld('V') && !g_previousKeys['V']) ||
+                       (IsKeyHeld(VK_SHIFT) && !control && IsKeyHeld(VK_INSERT) &&
+                        !g_previousKeys[VK_INSERT]);
+    if (paste && !Ime_Composing()) {
+        AppendClipboardText(g_typed, sizeof(g_typed));
+        for (int vk = 0; vk < 256; ++vk) g_previousKeys[vk] = IsKeyHeld(vk);
         return;
     }
     if (g_typed[0]) {
@@ -1184,8 +1231,13 @@ Canvas* Native_BeginFrame()
 
     HideSchedulerUnits();
     for (Pool& pool : g_pools) pool.used = 0;
-    g_nextDepth = kDepthFar;
+    g_nextDepth = g_depthFar;
     return &g_canvas;
+}
+
+void Native_SetDepthBase(int depth)
+{
+    g_depthFar = depth > 0 ? depth : kDepthFar;
 }
 
 void Native_EndFrame()

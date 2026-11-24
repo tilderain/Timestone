@@ -1,5 +1,6 @@
 //Print thread and current address information when game is frozen for 3.5 seconds
 #include "../pch.h"
+#include "exception.h"
 
 #include "rollback_diagnostics.h"
 #include "netplay.h"
@@ -160,6 +161,47 @@ void Rollback_FreezeWatchdogMaterialImpl(uint64_t model, uint32_t count,
     Rollback_FreezeWatchdogHeartbeatImpl("material-reset", frame);
 }
 
+struct FreezeUnwind {
+    CONTEXT context;
+    uint64_t frames[24];
+    volatile int count;
+};
+
+// Walks the stopped game thread's stack. Run under Exception_RunGuarded.
+static void WalkFrozenThread(void* argument)
+{
+    FreezeUnwind& walk = *static_cast<FreezeUnwind*>(argument);
+    CONTEXT& unwind = walk.context;
+    while (walk.count < 24 && unwind.Rip) {
+        walk.frames[walk.count] = unwind.Rip;
+        walk.count = walk.count + 1;
+        const DWORD64 previousRip = unwind.Rip;
+        const DWORD64 previousRsp = unwind.Rsp;
+        if (unwind.Rsp & 7)
+            break;
+        DWORD64 imageBase = 0;
+        PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(unwind.Rip, &imageBase, nullptr);
+        if (function) {
+            PVOID handlerData = nullptr;
+            DWORD64 establisherFrame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, unwind.Rip, function, &unwind,
+                             &handlerData, &establisherFrame, nullptr);
+        } else {
+            uint64_t returnAddress = 0;
+            SIZE_T returnBytes = 0;
+            if (!ReadProcessMemory(GetCurrentProcess(), (LPCVOID)unwind.Rsp, &returnAddress,
+                                   sizeof(returnAddress), &returnBytes) ||
+                returnBytes != sizeof(returnAddress))
+                break;
+            unwind.Rip = returnAddress;
+            unwind.Rsp += sizeof(returnAddress);
+        }
+        if ((unwind.Rip == previousRip && unwind.Rsp == previousRsp) ||
+            unwind.Rsp <= previousRsp || (unwind.Rip && !IsExecutableAddress(unwind.Rip)))
+            break;
+    }
+}
+
 void Rollback_FreezeWatchdogPollImpl()
 {
     static uint64_t reportedHeartbeat = 0;
@@ -177,6 +219,7 @@ void Rollback_FreezeWatchdogPollImpl()
     uint64_t unwindFrames[24] = {};
     size_t unwindCount = 0;
     bool captured = false;
+    bool walkCutShort = false;
     HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
                                THREAD_QUERY_INFORMATION, FALSE, threadId);
     if (thread) {
@@ -187,41 +230,18 @@ void Rollback_FreezeWatchdogPollImpl()
                 ReadProcessMemory(GetCurrentProcess(), (LPCVOID)context.Rsp,
                                   stack, sizeof(stack), &bytesRead);
 
-                CONTEXT unwind = context;
-                while (unwindCount < sizeof(unwindFrames) / sizeof(unwindFrames[0]) &&
-                       unwind.Rip) {
-                    unwindFrames[unwindCount++] = unwind.Rip;
-                    const DWORD64 previousRip = unwind.Rip;
-                    const DWORD64 previousRsp = unwind.Rsp;
-                    DWORD64 imageBase = 0;
-                    PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(
-                        unwind.Rip, &imageBase, nullptr);
-                    if (function) {
-                        PVOID handlerData = nullptr;
-                        DWORD64 establisherFrame = 0;
-                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, unwind.Rip,
-                                         function, &unwind, &handlerData,
-                                         &establisherFrame, nullptr);
-                    } else {
-                        uint64_t returnAddress = 0;
-                        SIZE_T returnBytes = 0;
-                        if (!ReadProcessMemory(GetCurrentProcess(),
-                                               (LPCVOID)unwind.Rsp,
-                                               &returnAddress,
-                                               sizeof(returnAddress),
-                                               &returnBytes) ||
-                            returnBytes != sizeof(returnAddress)) {
-                            break;
-                        }
-                        unwind.Rip = returnAddress;
-                        unwind.Rsp += sizeof(returnAddress);
-                    }
-                    if ((unwind.Rip == previousRip && unwind.Rsp == previousRsp) ||
-                        unwind.Rsp <= previousRsp ||
-                        (unwind.Rip && !IsExecutableAddress(unwind.Rip))) {
-                        break;
-                    }
-                }
+                // A thread stopped at an arbitrary instruction can hand the
+                // unwinder a frame it faults on inside ntdll (crash of
+                // 2026-11-24, the game thread stopped in a wait): the walk
+                // runs under the fault guard and is simply cut short.
+                FreezeUnwind walk = {};
+                walk.context = context;
+                // (Reported below: nothing is logged while the game thread is
+                // stopped, it may be holding the log's lock.)
+                walkCutShort = !Exception_RunGuarded(WalkFrozenThread, &walk);
+                unwindCount = (size_t)walk.count;
+                for (size_t frame = 0; frame < unwindCount; ++frame)
+                    unwindFrames[frame] = walk.frames[frame];
             }
             ResumeThread(thread);
         }
@@ -249,7 +269,8 @@ void Rollback_FreezeWatchdogPollImpl()
                 "%016llX,%016llX\n",
                 stack[0], stack[1], stack[2], stack[3], stack[4], stack[5],
                 stack[6], stack[7], stack[8], stack[9], stack[10], stack[11]);
-        HookLog("FREEZEWATCH unwindCount=%zu\n", unwindCount);
+        HookLog("FREEZEWATCH unwindCount=%zu%s\n", unwindCount,
+                walkCutShort ? " (walk cut short by a fault)" : "");
         for (size_t frame = 0; frame < unwindCount; ++frame)
             HookLog("FREEZEWATCH unwind[%02zu]=0x%016llX\n",
                     frame, unwindFrames[frame]);

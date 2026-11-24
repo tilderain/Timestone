@@ -88,6 +88,21 @@ public:
     // True while the team screen is open or a match is being agreed.
     bool EditingTeam() const;
 
+    // The game's own character select can be opened for a match (the flow
+    // says so). Without it CHARACTER SELECT in the start prompt opens the
+    // team screen instead.
+    void SetNativeCharSelect(bool available) { nativeCharSel_ = available; }
+    // True once after the player chose CHARACTER SELECT in the start prompt.
+    bool TakeCharSelectRequested();
+    // The preset list on its own, drawn over another screen (the character
+    // select). Update returns true once, with the team that was picked, which
+    // also becomes the team in use; cancel closes it.
+    void OpenPresetPicker();
+    bool PresetPickerOpen() const { return presetPicker_; }
+    void ClosePresetPicker() { presetPicker_ = false; }
+    bool UpdatePresetPicker(const Input& input, Team* picked);
+    void DrawPresetPicker(Canvas& canvas) const;
+
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
     enum class TextTarget : uint8_t { None, RoomName, Chat, PresetName };
@@ -176,6 +191,7 @@ private:
     void StepTeamField(int delta);
     void SetTeamCharacter(int member, int32_t id);
     bool RandomOffered() const;
+    int32_t PickerCharacter(int cell) const;
     void BeginText(TextTarget target, const char* initial);
     void EndText(bool accept);
 
@@ -187,11 +203,14 @@ private:
     Screen teamReturn_ = Screen::Top;
     uint32_t frame_ = 0;
     uint32_t screenFrame_ = 0; // frames since the current screen was entered
-    uint32_t roomBackdrop_ = 0; // fade of the room's own backdrop, 0..kRoomBackdropFrames
+    uint32_t roomBackdrop_ = 0; // fade of the space backdrop (room, team setup), 0..kRoomBackdropFrames
     uint32_t entranceDelay_ = 0;
     uint32_t sfx_ = 0;
     bool prefsDirty_ = false;
     bool mainMenuRequested_ = false;
+    bool nativeCharSel_ = false;
+    bool charSelRequested_ = false;
+    bool presetPicker_ = false; // the preset list is up on its own
     bool wasInRoom_ = false;
     bool leftByChoice_ = false;
     bool usingKeyboard_ = false;

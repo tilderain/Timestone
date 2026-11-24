@@ -150,3 +150,37 @@ confirm the queued-step cancellation and separate opening/intro barriers.
 Detailed normal/alternate timeline offsets above retain historical static
 evidence and were not exhaustively rechecked. This was a read-only review,
 not a runtime intro/skip test.
+
+## Skip from the input timeline (2026-11-24, built, not run)
+
+The netplay override above no longer jumps to step 3 once the barrier is
+released (it still does for the autotest). The native intro runs, and its
+skip test is answered from the input timeline: while `oStepIntro` runs,
+`hkPadRawInput` returns `0xF000` if either player's timeline input shows a
+face button newly pressed on the frame before the current one, and 0
+otherwise (`TimelineSkipPressed`, `controller.cpp`). Both players, a replay
+after a rollback and a spectator read the same press, so all leave the intro
+on the same frame. The local buttons are added to the pending local input in
+the hook, since the timeline's local side is otherwise only captured where a
+character reads its pad. **Unverified:** the native intro itself has not run
+under rollback before this (it was always skipped).
+
+### Crash on the first run, and what was changed (2026-11-24, built, not run)
+
+A rollback just after the intro crashed in `sCamera__move` (`0x14053307C`,
+`call [vtable+0x98]` on viewport 0's camera, which had become a
+`uBattleUiHit`). The snapshot holds `sCamera` whole (`0xD80` bytes), with
+each viewport's camera pointer; the intro's camera is not a unit a rollback
+restores, and it is destroyed when the intro ends. Going back to a snapshot
+taken in the intro handed the viewport that dead camera.
+
+- The skip is read `SKIP_INPUT_LAG` (16) frames back, from inputs that are
+  confirmed on both sides (`ConfirmedInputs`). The frame the intro or the
+  outro ends on is then the same live and in a replay.
+- Through the intro and `INTRO_QUIET_FRAMES` (20) after it the characters are
+  given neutral input (`ResolveTimelineInput`), so a mispredicted input there
+  changes nothing.
+- No replay starts in that stretch (`Controller_FirstRollbackFrame`, applied
+  in `rollback_hooks.cpp` where a replay is begun).
+- Restoring `sCamera` keeps a viewport's live camera when the snapshot's is
+  no longer a live unit with both matrix getters (`rollback_restore.cpp`).

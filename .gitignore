@@ -370,7 +370,8 @@ UMVC3Hook.asi
 UMVC3Hook.map
 Timestone.asi
 Timestone-unstripped.asi
-TimestoneUpdater.exe
+TimestoneInstall.exe
+/TimestoneInstall.sh
 Timestone.map
 all.txt
 

@@ -78,3 +78,13 @@ table and the fade-mask note retain earlier evidence; the result bodies and
 fade hook were not re-decompiled/re-audited in this pass. Live native review
 used Ghidra 8193, `umvc3.exe.unpacked.exe`; no runtime results
 are claimed.
+
+## 2026-11-24: room matches (built, not run)
+
+In a room match the two hooks no longer restart on a confirm; what follows a
+game is chosen on the native result menu (`native_result.cpp`,
+`doc/native_character_select.md`). The outro's own skip is answered from the
+input timeline as the intro's is (`doc/intro.md`): while `oStepResult8` runs,
+the raw pad read returns the confirm mask (`sPad+0xBD8`) on a face button
+newly pressed by either player, else 0. A spectator runs the same path.
+Netplay outside a room keeps the behaviour described above.

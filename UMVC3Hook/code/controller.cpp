@@ -289,6 +289,8 @@ static int32_t   g_processedRemoteFrame[RING_SIZE];
 
 // Executed local input for diagnostics and resimulation fallback.
 static uint32_t  g_recordedLocalInput[RING_SIZE];
+// Last frame the intro ran on in this game, -1 before it (see IsIntroQuietFrame).
+static int32_t   g_introLastFrame = -1;
 
 // Shared logical frame, read from the native sReplay cursor.
 static int32_t   g_netFrameCount   = -1;
@@ -521,6 +523,7 @@ extern "C" void Controller_ResetFrameEpoch()
     g_gameFrameBase = 0;
     g_netFrameCount = 0;
     g_fightFrameBase = -1;
+    g_introLastFrame = -1;
 }
 
 extern "C" void Controller_ResetFightTimer(uint64_t sAction)
@@ -1040,6 +1043,36 @@ extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
     return true;
 }
 
+// The intro under rollback. Its cameras and cut-in are units a rollback
+// neither restores nor replays, so a snapshot taken in the intro cannot be
+// gone back to once they are gone (crash of 2026-11-24: sCamera::move called
+// through a viewport camera that had become a uBattleUiHit). Nothing in the
+// intro needs a rollback either, given two things:
+//   - the characters are given neutral input through the intro and for
+//     INTRO_QUIET_FRAMES after it, so a mispredicted input there changes
+//     nothing (the skip is read from confirmed frames, see hkStepIntro);
+//   - no replay starts before the end of that stretch
+//     (Controller_FirstRollbackFrame, used where a replay is begun).
+// The quiet frames after the intro are the start of the countdown, where no
+// character can act yet; they are there so the first snapshot gone back to
+// is one taken with the intro's objects already gone.
+static constexpr int32_t INTRO_QUIET_FRAMES = 20;
+
+static bool IsIntroQuietFrame(int32_t frame)
+{
+    return g_introLastFrame >= 0 && frame <= g_introLastFrame + INTRO_QUIET_FRAMES;
+}
+
+extern "C" int32_t Controller_FirstRollbackFrame()
+{
+    return g_introLastFrame >= 0 ? g_introLastFrame + INTRO_QUIET_FRAMES + 1 : 0;
+}
+
+// A bit of the timeline's input word that no logical action uses: "an attack
+// is held", for the intro and outro skip. It travels with the inputs (packets,
+// snapshots, the spectator log) and is stripped before a character sees them.
+static constexpr uint32_t TIMELINE_SKIP_FLAG = 0x80000000u;
+
 struct FrameInputRemapContext {
     uint32_t ownerTeam;
     uint32_t timelineTeam;
@@ -1084,6 +1117,13 @@ static uint32_t ResolveTimelineInput(FrameInputRemapContext* context,
             ? g_scheduledLocalInput[idx]
             : (g_delayFrames == 0 ? currentInput : 0);
     }
+
+    // Not an input: the intro / outro skip's own bit (see TimelineSkipPressed).
+    resolved &= ~TIMELINE_SKIP_FLAG;
+    // Through the intro the characters are given nothing (see above); what
+    // was pressed is still captured and sent, which is what the skip reads.
+    if (IsIntroQuietFrame(context->frame))
+        resolved = 0;
 
     context->timelineInput = resolved;
     context->timelineResolved = true;
@@ -1248,7 +1288,9 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
     return raw;
 }
 
-extern "C" uint32_t Controller_CaptureOpeningMember()
+// The local player's buttons as the characters would be given them, read
+// outside any character's input processing.
+static uint32_t ReadLocalLogicalInput()
 {
     if (!Netplay_IsActive() || !obuttonRemap || !oGetsCurrentInput_withSOCD)
         return 0;
@@ -1278,13 +1320,100 @@ extern "C" uint32_t Controller_CaptureOpeningMember()
 
     if (!Netplay_IsHost() && team == 1 && IsGameProcessForeground())
         logicalInput |= obuttonRemap(0, 0, alternateMap);
+    return logicalInput;
+}
 
+extern "C" uint32_t Controller_CaptureOpeningMember()
+{
+    const uint32_t logicalInput = ReadLocalLogicalInput();
     if (logicalInput & IN_RB)
         return 2;
     if (logicalInput & IN_LB)
         return 1;
     return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Skipping the intro and the winner's outro
+// ---------------------------------------------------------------------------
+// Natively both end early on a button read straight from a pad. In netplay
+// that read is outside the synchronized inputs: each machine would leave the
+// intro or the outro on a frame of its own. The read is answered from the
+// input timeline instead, the one both players (and their spectators)
+// simulate from: a face button from either player.
+//
+// The frame looked at is SKIP_INPUT_LAG behind the current one. That is at
+// least the rollback window, so both players' inputs for it are confirmed by
+// the time it is read: the answer is the same live and in any replay, and no
+// rollback can move the frame the intro or the outro ends on. Only a press
+// counts, not a button held since the loading.
+// What is read there is a bit of its own (TIMELINE_SKIP_FLAG, declared with
+// the timeline), set while the local player holds an attack and never given
+// to a character. The attacks themselves must not be added to the timeline
+// here: with no input delay the local characters are simulated from what
+// their own input hook read, before anything added here, while the other
+// peer and every replay would get the added bits (the outro desync of
+// 2026-11-24, where the winner acted on them on one side only).
+// The four attacks are 0xF0 in the logical layout cChrInput__buttonRemap
+// produces. The pad read the native skip makes is answered in the pad's
+// layout, where it tests the face buttons, 0xF000.
+static constexpr uint32_t SKIP_ACTIONS = 0xF0;
+static constexpr uint32_t SKIP_PAD_BUTTONS = IN_X | IN_Y | IN_A | IN_B;
+static constexpr int32_t SKIP_INPUT_LAG = 16; // the largest rollback window there is
+
+static uint32_t ConfirmedInputs(int32_t frame)
+{
+    if (frame < 0)
+        return 0;
+    if (Spectate_IsViewing())
+        return Spectate_GetInput(0, frame) | Spectate_GetInput(1, frame);
+    // Both sides start on neutral input.
+    if (frame <= g_delayFrames + g_rollbackFrames)
+        return 0;
+    const uint32_t idx = (uint32_t)frame % RING_SIZE;
+    const uint32_t remote = IsFrameConfirmed(frame) ? g_receivedInput[idx] : 0;
+    return g_recordedLocalInput[idx] | remote;
+}
+
+static bool TimelineSkipPressed()
+{
+    const int32_t frame =
+        (g_isResimulating ? g_resimulateCurrentFrame : GetGameFrameCount()) - SKIP_INPUT_LAG;
+    if (frame < 1)
+        return false;
+    return (ConfirmedInputs(frame) & TIMELINE_SKIP_FLAG) != 0 &&
+           (ConfirmedInputs(frame - 1) & TIMELINE_SKIP_FLAG) == 0;
+}
+
+// Characters do not necessarily read their pads during the intro or the
+// outro, and the local side of the timeline is captured where they do. The
+// local buttons are added here so a press reaches the timeline regardless.
+static void CaptureLocalSkipInput()
+{
+    if (g_isResimulating || Spectate_IsViewing())
+        return;
+    if (ReadLocalLogicalInput() & SKIP_ACTIONS)
+        g_localPending |= TIMELINE_SKIP_FLAG;
+}
+
+// The same two for the result screen (native_result.cpp), whose own skips
+// (the winner's quote, the score board's count-up) are taken from the
+// timeline as well so that both players' screens move on together.
+extern "C" bool Controller_TimelineSkipPressed()
+{
+    return Netplay_IsActive() && FrameStepper_IsBattleSynchronized() && TimelineSkipPressed();
+}
+
+extern "C" void Controller_CaptureSkipInput()
+{
+    if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized())
+        CaptureLocalSkipInput();
+}
+
+// While set, the raw pad read answers with this in place of any pad: the
+// native skip test sees the timeline's press or nothing.
+static bool g_padReadOverridden = false;
+static uint32_t g_padReadValue = 0;
 
 extern "C" void Controller_SetOpeningMembers(uint32_t team0Member,
                                                uint32_t team1Member)
@@ -1324,7 +1453,19 @@ static void __fastcall hkStepIntro(uint64_t param_1)
 
     auto setNextStep = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
     if (FrameStepper_IsBattleSynchronized()) {
-        setNextStep(param_1, 3);
+        if (AutoTest_IsActive()) {
+            setNextStep(param_1, 3);
+            return;
+        }
+        // The intro plays, and the game's own skip is taken on a face button
+        // from either player, read from confirmed frames of the timeline.
+        if (!g_isResimulating)
+            g_introLastFrame = GetGameFrameCount();
+        CaptureLocalSkipInput();
+        g_padReadOverridden = true;
+        g_padReadValue = TimelineSkipPressed() ? SKIP_PAD_BUTTONS : 0;
+        oStepIntro(param_1);
+        g_padReadOverridden = false;
         return;
     }
 
@@ -1401,16 +1542,35 @@ static bool IsEitherPlayerResultContinuePressed()
     return false;
 }
 
+
 static void __fastcall hkStepResult8(uint64_t sAction)
 {
-    if (Netplay_IsActive() && Spectate_IsViewing()) {
-        // The winner's outro plays; what follows is the players' call.
+    if (Netplay_IsActive() && (LobbyFlow_InRoomMatch() || Spectate_IsViewing())) {
+        // Room matches are sets: the lobby counts this game, and what follows
+        // it is chosen by both players on the game's own result menu
+        // (native_result.h). Nothing restarts from a button here. A spectator
+        // runs the same outro from the same inputs.
+        if (!Spectate_IsViewing()) {
+            LobbyFlow_OnResultPhase(*(int32_t*)(sAction + 0x114));
+            if (FrameStepper_IsMatchRestartPending())
+                return;
+        }
+        // The outro's own skip, on a face button from either player read
+        // from the input timeline (the game tests its confirm mask).
+        CaptureLocalSkipInput();
+        g_padReadOverridden = true;
+        g_padReadValue = 0;
+        if (FrameStepper_IsBattleSynchronized() && TimelineSkipPressed()) {
+            using GetInstanceFn = uint64_t(__fastcall*)();
+            using GetMaskFn = uint32_t(__fastcall*)(uint64_t);
+            const uint64_t pad = ((GetInstanceFn)_addr(ADDR_PAD_GET_INSTANCE))();
+            g_padReadValue = pad ? ((GetMaskFn)_addr(ADDR_PAD_UNIT_FLAGS))(pad) : 0;
+        }
         oStepResult8(sAction);
+        g_padReadOverridden = false;
         return;
     }
     if (Netplay_IsActive()) {
-        // Room matches are sets: the lobby counts this game and decides
-        // whether another one may follow.
         LobbyFlow_OnResultPhase(*(int32_t*)(sAction + 0x114));
         if (!FrameStepper_IsMatchRestartPending() && LobbyFlow_AllowResultRestart() &&
             IsEitherPlayerResultContinuePressed()) {
@@ -1429,9 +1589,17 @@ static void __fastcall hkStepResult9_10_11(uint64_t sAction)
     // the restart or the end of the match arrives with the feed.
     if (Netplay_IsActive() && Spectate_IsViewing())
         return;
-    if (Netplay_IsActive()) {
-        // Room matches are sets: the lobby counts this game and decides
-        // whether another one may follow.
+    if (Netplay_IsActive() && LobbyFlow_InRoomMatch()) {
+        // The result menu is up: the rematch waits for both players' choice
+        // there (LobbyFlow_GameTick acts on it) and is then the synchronized
+        // restart. The native handler is never run: in versus all it does is
+        // restart the match by itself (restart mode 1, step 12) once it is
+        // let through, and what holds it back while the menu is up is not
+        // part of a rollback. A replay of these frames ran it, and that peer
+        // alone went back into the intro (desync of 2026-11-24).
+        LobbyFlow_OnResultPhase(*(int32_t*)(sAction + 0x114));
+        return;
+    } else if (Netplay_IsActive()) {
         LobbyFlow_OnResultPhase(*(int32_t*)(sAction + 0x114));
         if (!FrameStepper_IsMatchRestartPending() && LobbyFlow_AllowResultRestart() &&
             IsEitherPlayerResultContinuePressed()) {
@@ -2440,6 +2608,10 @@ static PadRawInput_t oPadRawInput = nullptr;
 
 static uint32_t __fastcall hkPadRawInput(uint64_t sPad, uint32_t padIndex)
 {
+    // The intro's and the outro's skip test, answered from the timeline (for
+    // a spectator too: it must leave them on the frame the players did).
+    if (g_padReadOverridden)
+        return g_padReadValue;
     if (Spectate_IsViewing() && Netplay_IsActive())
         return 0;
     return oPadRawInput(sPad, padIndex);

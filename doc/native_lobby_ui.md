@@ -360,6 +360,26 @@ The press-start screen is skipped, so `ReleaseToMainMenu` applies what
 (`sMvc3Manager+0x140`), `sGameUi+0x5C40` and `+0x5EA8`, plus the `sPad`
 keyboard-block bytes. Without this the keyboard did nothing on the main menu.
 
+It also leaves the pad table (`sMvc3Manager::mPadId[4]`, `+0x140`) as that
+screen does: `uMenuTitle__setup` empties it (`sMvc3Manager__resetPadIds`
+`0x14025B070`) and Start gives player 1 a pad, so players 2 to 4 have none.
+`ApplyPressStartState` keeps player 1's slot and clears the others, both when
+the lobby takes the title area and when it hands the main menu back. A netplay
+match maps slots 0 and 1 to both players (`SetupPadToPlayerMapping`), and
+offline the game reads "player 2 has a pad"
+(`sMvc3Manager__isPadAssigned` `0x14025AD10`) as a second local player:
+`u2PCtrlSelect__setup` `0x140311A60` skips the 2P controller prompt when that
+pad is connected, `cChrInput__processFrameInput` reads it for player 2's
+characters, and training keeps its player 2 option
+(`uBattleUiTrainingCheckP2PadAssigned_maybe`, call at `0x1402E57B6`). Left in place, a second device that is only plugged in
+became player 2 after any online match.
+
+On the top level of the main menu player 1 follows whichever pad is pressed
+(`FollowActivePad`), since no Start press chose one. A pad assigned to another
+player is left alone: one paired for local versus by `u2PCtrlSelect__move`
+`0x140311800` stays player 2's, as natively. The Offline menu (`uMenuLocal`)
+and the 2P controller select run unhooked.
+
 "Online" (item 1) is greyed out and skipped natively while
 `isPlatformContextReadyForMatchmaking` `0x14045CEF0` is false, which is always
 the case here because native networking is switched off. Three main-menu
@@ -1048,6 +1068,20 @@ set is one launch (rematches stay in the game), so the draw holds for the
 whole set and is made again for the next one. `BeginLaunch` publishes the
 team actually being played for the match slot's portraits and spectators;
 `LobbyUi::ReturnToRoom` publishes the player's own choice again.
+
+`kCharRandomAll` (-2, "RANDOM ALL", the cell beside RANDOM) is the same but
+drawn again for every game of the set. Its first draw is the one above. For
+the later ones `SetFormatPacket` carries which members are concerned
+(`rerollMask`) and a seed (`rerollSeed`), both from player 1. Every rematch is
+a synchronized full restart (`ChrSelImGui_ApplyRestart`), where each player
+calls `LobbyFlow_RerollRandomMembers` and works the new members out from that
+seed and the battle generation, so no draw is sent and both arrive at the same
+team. These draws keep to the six standard colors, which every install has,
+and take the owner's voice choice for the new character from the mask each
+player sends in the initial settings exchange (`LaunchTrainingPacket::voiceMask`).
+Spectators get the new roster with the restart, as for any roster change. A
+team taken to the game's own character select is drawn once before the screen
+and is not drawn again. **Unverified in game.**
 
 A client from before this (0.6.4) fails `IsPlausibleTeam` on a -1 and shows
 that member as not seated; lobbies are matched by version, so this only
