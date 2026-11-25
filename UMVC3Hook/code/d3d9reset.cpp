@@ -1313,8 +1313,6 @@ bool D3D9Reset_InstallNativeHooks()
         HookLog("D3D9: controller hook installation failed status=%d; rolled back %zu hooks\n",
             (int)status, created);
         return false;
-    } else {
-        HookLog("D3D9: installed presentation controller (%zu native hooks)\n", created);
     }
     return true;
 }
@@ -1369,7 +1367,8 @@ bool InstallDeviceHook(IDirect3DDevice9* device)
             MH_RemoveHook(target);
     }
     ReleaseSRWLockExclusive(&g_deviceLock);
-    HookLog("D3D9: install device Reset hook %p status=%d\n", target, (int)status);
+    if (status != MH_OK)
+        HookLog("D3D9: install device Reset hook %p FAILED status=%d\n", target, (int)status);
     if (status == MH_OK)
         ShaderConstants_Install(device);
     return status == MH_OK;

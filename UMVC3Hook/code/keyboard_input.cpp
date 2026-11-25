@@ -77,7 +77,8 @@ bool KeyboardInput_Initialize()
     MH_STATUS status = MH_CreateHook(target, reinterpret_cast<void*>(&CaptureKeyboardMove),
                                     reinterpret_cast<void**>(&g_originalMove));
     if (status == MH_OK) status = MH_EnableHook(target);
-    HookLog("KeyboardInput: native sKeyboard::move capture status=%d\n", (int)status);
+    if (status != MH_OK)
+        HookLog("KeyboardInput: native sKeyboard::move capture FAILED status=%d\n", (int)status);
     return status == MH_OK;
 }
 

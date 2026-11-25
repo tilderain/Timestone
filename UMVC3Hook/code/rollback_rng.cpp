@@ -493,10 +493,7 @@ void Rollback_InitRngHooks()
                                      (LPVOID*)&oEffectNextRandom);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_EFFECT_NEXT_RANDOM));
-        if (status == MH_OK)
-            HookLog("Rollback: forced effects onto local RNG at 0x%llX\n",
-                    (uint64_t)_addr(FN_EFFECT_NEXT_RANDOM));
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable effect RNG isolation (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook effect RNG isolation (%d)\n", status);
@@ -523,10 +520,7 @@ void Rollback_InitRngHooks()
                                       (LPVOID*)&oRngNext);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_NEXT));
-        if (status == MH_OK)
-            HookLog("Rollback: hooked MtXorShift next-state trace at 0x%llX\n",
-                    (uint64_t)_addr(FN_RNG_NEXT));
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable next-state RNG trace (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook next-state RNG trace (%d)\n", status);
@@ -537,10 +531,7 @@ void Rollback_InitRngHooks()
                            (LPVOID*)&oRngNextImpl);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_NEXT_IMPL));
-        if (status == MH_OK)
-            HookLog("Rollback: hooked MtXorShift implementation trace at 0x%llX\n",
-                    (uint64_t)_addr(FN_RNG_NEXT_IMPL));
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable implementation RNG trace (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook implementation RNG trace (%d)\n", status);
@@ -551,9 +542,7 @@ void Rollback_InitRngHooks()
                            (LPVOID*)&oRngNextFloat);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_NEXT_FLOAT));
-        if (status == MH_OK)
-            HookLog("Rollback: isolated stage RNG float consumers\n");
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable stage RNG float isolation (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook stage RNG float consumers (%d)\n", status);
@@ -564,9 +553,7 @@ void Rollback_InitRngHooks()
                            (LPVOID*)&oRngFloatInRange);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_FLOAT_IN_RANGE));
-        if (status == MH_OK)
-            HookLog("Rollback: isolated stage float ranges\n");
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable stage float-range isolation (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook stage float ranges (%d)\n", status);
@@ -577,9 +564,7 @@ void Rollback_InitRngHooks()
                            (LPVOID*)&oRngIntInRange);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_INT_IN_RANGE));
-        if (status == MH_OK)
-            HookLog("Rollback: isolated stage integer ranges\n");
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable stage integer-range isolation (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook stage integer ranges (%d)\n", status);
@@ -590,10 +575,7 @@ void Rollback_InitRngHooks()
                                      (LPVOID*)&oRngAdvance);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_ADVANCE));
-        if (status == MH_OK)
-            HookLog("Rollback: hooked shared MtXorShift advancement trace at 0x%llX\n",
-                    (uint64_t)_addr(FN_RNG_ADVANCE));
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable shared RNG trace (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook shared RNG trace (%d)\n", status);
@@ -604,10 +586,7 @@ void Rollback_InitRngHooks()
                            (LPVOID*)&oRngLerpRandom);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_LERP_RANDOM));
-        if (status == MH_OK)
-            HookLog("Rollback: isolated presentation lerp RNG at 0x%llX\n",
-                    (uint64_t)_addr(FN_RNG_LERP_RANDOM));
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable lerp RNG isolation (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook lerp RNG isolation (%d)\n", status);
@@ -618,9 +597,7 @@ void Rollback_InitRngHooks()
                                       (LPVOID*)&oRChrCpuRngModN);
     if (status == MH_OK) {
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N));
-        if (status == MH_OK)
-            HookLog("Rollback: disabled CPU global RNG advancement during netplay\n");
-        else
+        if (status != MH_OK)
             HookLog("Rollback: failed to enable CPU RNG hook (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook CPU RNG dispatch (%d)\n", status);
@@ -629,33 +606,24 @@ void Rollback_InitRngHooks()
     status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_RANDOM_INT),
                                      (LPVOID)&hkRandomIntRange,
                                      (LPVOID*)&oRandomIntRange);
-    if (status == MH_OK) {
-        // Intentionally left disabled; this hook is diagnostic-only.
-        HookLog("Rollback: hooked Ankihou RNG trace at 0x%llX\n",
-                (uint64_t)_addr(FN_RNG_RANDOM_INT));
-    } else {
+    // Intentionally left disabled; this hook is diagnostic-only.
+    if (status != MH_OK) {
         HookLog("Rollback: failed to hook Ankihou RNG trace (%d)\n", status);
     }
 
     status = GameplayHooks_Create((LPVOID)_addr(FN_HSIENKO_SELECT_ANKI),
                            (LPVOID)&hkHsienKoSelectAnki,
                            (LPVOID*)&oHsienKoSelectAnki);
-    if (status == MH_OK) {
-        // Intentionally left disabled; this hook is diagnostic-only.
-        HookLog("Rollback: hooked Hsien-Ko Anki selector trace at 0x%llX\n",
-                (uint64_t)_addr(FN_HSIENKO_SELECT_ANKI));
-    } else {
+    // Intentionally left disabled; this hook is diagnostic-only.
+    if (status != MH_OK) {
         HookLog("Rollback: failed to hook Hsien-Ko Anki selector trace (%d)\n", status);
     }
 
     status = GameplayHooks_Create((LPVOID)_addr(FN_SET_RESERVED_ANKI),
                            (LPVOID)&hkSetReservedAnki,
                            (LPVOID*)&oSetReservedAnki);
-    if (status == MH_OK) {
-        // Intentionally left disabled; this hook is diagnostic-only.
-        HookLog("Rollback: hooked Hsien-Ko Anki reserve trace at 0x%llX\n",
-                (uint64_t)_addr(FN_SET_RESERVED_ANKI));
-    } else {
+    // Intentionally left disabled; this hook is diagnostic-only.
+    if (status != MH_OK) {
         HookLog("Rollback: failed to hook Hsien-Ko Anki reserve trace (%d)\n", status);
     }
 }

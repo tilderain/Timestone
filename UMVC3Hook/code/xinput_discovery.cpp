@@ -229,7 +229,6 @@ void XInputDiscovery_Init()
     }
     CloseHandle(thread);
     // Event storage is process-lifetime, including after a nonblocking Stop.
-    HookLog("XInput discovery: asynchronous probes enabled; active input stays live\n");
 }
 
 void XInputDiscovery_Stop()

@@ -282,7 +282,6 @@ static void WriteCharacterId(uint64_t battleSetting, int team, int slot, int32_t
 {
     uintptr_t offset = CHAR_ID_ARRAY_OFFSET + ((slot % 3) + (team & 0xf) * 3) * 4;
     *(int32_t*)(battleSetting + offset) = charId;
-    HookLog("TrainingBoot: Set team=%d slot=%d charId=%d\n", team, slot, charId);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,9 +299,6 @@ static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId,
     ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_DRAW_MODE))(entry, color);
     ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_ASSIST_TYPE))(entry, assist);
     *(uint32_t*)(entry + 0x44) = voiceLanguage;
-    HookLog("TrainingBoot: Native slot entry %d: team=%d charId=%d dti=%d color=%d assist=%d voice=%u\n",
-            index, teamId, charId, *(int32_t*)(entry + 0x10), color, assist,
-            voiceLanguage);
 }
 
 static void ConfigureTrainingMatchDefaults(uint64_t bs)
@@ -319,8 +315,6 @@ static void ConfigureTrainingMatchDefaults(uint64_t bs)
     // Zero is the normal HP-drain behavior used by the native training path.
     *(int32_t*)(bs + BS_HP_DRAIN_MODE_OFFSET) = 0;
 
-    HookLog("TrainingBoot: Defaults set (CPU=Very Hard, meter P1/P2=%d, HP drain=normal)\n",
-            startingMeter);
 
     for (int team = 0; team < 2; ++team) {
         const int32_t cpuControl =
@@ -333,7 +327,6 @@ static void ConfigureTrainingMatchDefaults(uint64_t bs)
                         SLOT_CPU_CONTROL_OFFSET) = cpuControl;
         }
     }
-    HookLog("TrainingBoot: CPU control mode=%d\n", (int)g_cpuMode);
 }
 
 static void ApplySimpleModes()
@@ -353,8 +346,6 @@ static void ApplySimpleModes()
                 chrTeam, g_bootConfig.simpleMode[team]);
         }
     }
-    HookLog("TrainingBoot: Applied Simple Mode P1=%d P2=%d\n",
-            g_bootConfig.simpleMode[0], g_bootConfig.simpleMode[1]);
 }
 
 static void ApplyTeamAutoJump()
@@ -370,8 +361,6 @@ static void ApplyTeamAutoJump()
         ((SetTeamAutoJump_t)_addr(BATTLE_SETTING_SET_TEAM_AUTO_JUMP))(
             battleSetting, team, g_bootConfig.autoJump[team]);
     }
-    HookLog("TrainingBoot: Applied AutoJump P1=%d P2=%d\n",
-            g_bootConfig.autoJump[0], g_bootConfig.autoJump[1]);
 }
 
 // Start/poll native asynchronous config loading without the menu parent unit.
@@ -738,7 +727,6 @@ static void SetupPadToPlayerMapping()
         *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 1 * 4) = 1;
         *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 2 * 4) = -1;
         *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 3 * 4) = -1;
-        HookLog("TrainingBoot: Pad-to-player mapping set (slots 0→P1, 1→P2)\n");
     } else {
         HookLog("TrainingBoot: WARNING - sMvc3Manager not available for pad mapping\n");
     }
@@ -749,8 +737,6 @@ static void SetupPadToPlayerMapping()
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_1) = 0;
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_2) = 0;
 
-        HookLog("TrainingBoot: Keyboard-disable flags cleared (pad+0x%x, pad+0x%x)\n",
-                PAD_KEYBOARD_BLOCKED_1, PAD_KEYBOARD_BLOCKED_2);
 
     } else {
         HookLog("TrainingBoot: WARNING - sPad not available for keyboard flag clear\n");
@@ -798,7 +784,6 @@ void BootIntoTraining(bool queueAreaTransition)
 
     g_hasBooted = true;
 
-    HookLog("TrainingBoot: Starting boot sequence...\n");
 
     typedef uint64_t(__fastcall* GetInstance_t)();
     GetInstance_t getBattleSetting = (GetInstance_t)_addr(BATTLE_SETTING_GET_INSTANCE);
@@ -808,7 +793,6 @@ void BootIntoTraining(bool queueAreaTransition)
         g_hasBooted = false;
         return;
     }
-    HookLog("TrainingBoot: sBattleSetting = 0x%llx\n", bs);
 
     if (queueAreaTransition) {
         // A preloaded host initializes before its dialog-free client. Seed at
@@ -843,7 +827,6 @@ void BootIntoTraining(bool queueAreaTransition)
     *(int32_t*)(bs + BS_BACKUP_STAGE_ID_OFFSET) = g_bootConfig.stageId;
     // Enable backup restoration.
     *(char*)(bs + 0x590) = 1;
-    HookLog("TrainingBoot: Backup flag set\n");
 
     // Use offline versus/default BattleType 0. Despite the boot API/log name,
     // this does not enable native training mode, whose predicate requires 5.
@@ -857,7 +840,6 @@ void BootIntoTraining(bool queueAreaTransition)
     //   8 = Heroes & Heralds
     //   9 = Online (alt)
     ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 0);
-    HookLog("TrainingBoot: Battle type set to training (0)\n");
 
     ConfigureTrainingMatchDefaults(bs);
 
@@ -869,7 +851,6 @@ void BootIntoTraining(bool queueAreaTransition)
     uint64_t agent = getAgentSession();
     typedef void(__fastcall* AgentMethod_t)(uint64_t, uint32_t);
     ((AgentMethod_t)_addr(UUIBASE_METHOD_5560))(agent, 0);
-    HookLog("TrainingBoot: Agent session reset\n");
 
     // The restore writes its backup control type into sGameConfig CtrlType,
     // which is saved. Back up the player's own value so it stays as it is;
@@ -881,7 +862,6 @@ void BootIntoTraining(bool queueAreaTransition)
     // Restore backup roster/settings, then apply team control preferences.
     typedef void(__fastcall* RestoreBackup_t)(uint64_t);
      ((RestoreBackup_t)_addr(BATTLE_SETTING_RESTORE_BACKUP))(bs);
-     HookLog("TrainingBoot: Backup restored\n");
      ApplySimpleModes();
      ApplyTeamAutoJump();
 
@@ -900,8 +880,9 @@ void BootIntoTraining(bool queueAreaTransition)
             }
             const int expected = team == 0
                 ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
-            HookLog("TrainingBoot: Resolved team=%d member=%d charId=%d expected=%d\n",
-                    team, member, found, expected);
+            if (found != expected)
+                HookLog("TrainingBoot: WRONG CHARACTER resolved team=%d member=%d charId=%d "
+                        "expected=%d\n", team, member, found, expected);
         }
     }
 
@@ -910,7 +891,6 @@ void BootIntoTraining(bool queueAreaTransition)
     uint64_t ui = getGameUI();
     typedef void(__fastcall* ChrSelectUtil_t)(uint64_t, uint32_t);
     ((ChrSelectUtil_t)_addr(ACHRSELECT_UTIL_4AC0))(ui, 0);
-    HookLog("TrainingBoot: UI util flag set (ui+0x5b74 = 0)\n");
 
     // Match the native training token used when leaving a training battle.
     ((SetInt_t)_addr(SGAMEUI_SET_BOOT_STATE))(ui, 13);
@@ -930,10 +910,19 @@ void BootIntoTraining(bool queueAreaTransition)
         typedef void(__fastcall* SetArea_t)(uint64_t, void*);
         SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
         setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
-        HookLog("TrainingBoot: Queued aChrSelectBlank battle transition\n");
-    } else {
-        HookLog("TrainingBoot: Reusing active aChrSelectBlank transition\n");
     }
+    // The whole boot in one line: characters, colors and assists per team.
+    const auto& c = g_bootConfig;
+    HookLog("TrainingBoot: booted P1 %d/%d/%d colors %d/%d/%d assists %d/%d/%d | "
+            "P2 %d/%d/%d colors %d/%d/%d assists %d/%d/%d | stage %d timer %d "
+            "simple %d/%d autojump %d/%d cpu %d%s\n",
+            c.p1Chars[0], c.p1Chars[1], c.p1Chars[2], c.p1Colors[0], c.p1Colors[1], c.p1Colors[2],
+            c.p1Assists[0], c.p1Assists[1], c.p1Assists[2],
+            c.p2Chars[0], c.p2Chars[1], c.p2Chars[2], c.p2Colors[0], c.p2Colors[1], c.p2Colors[2],
+            c.p2Assists[0], c.p2Assists[1], c.p2Assists[2],
+            (int)c.stageId, (int)c.timerValue, (int)c.simpleMode[0], (int)c.simpleMode[1],
+            (int)c.autoJump[0], (int)c.autoJump[1], (int)g_cpuMode,
+            queueAreaTransition ? "" : " (restart)");
 }
 
 bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg)
@@ -1152,7 +1141,6 @@ void TrainingBoot_InitHooks()
         (LPVOID*)&oTitleUpdate
     ) == MH_OK) {
         MH_EnableHook((LPVOID)_addr(0x140217200));
-        HookLog("TrainingBoot: Hooked aTitle__update\n");
     }
     else {
         HookLog("TrainingBoot: FAILED to hook aTitle__update\n");
@@ -1164,7 +1152,6 @@ void TrainingBoot_InitHooks()
         (LPVOID*)&oSetTeamAutoJump
     ) == MH_OK) {
         MH_EnableHook((LPVOID)_addr(BATTLE_SETTING_SET_TEAM_AUTO_JUMP));
-        HookLog("TrainingBoot: Hooked team AutoJump setter\n");
     }
     else {
         HookLog("TrainingBoot: FAILED to hook team AutoJump setter\n");
@@ -1176,7 +1163,6 @@ void TrainingBoot_InitHooks()
         (LPVOID*)&oExecuteMatchPhase
     ) == MH_OK) {
         MH_EnableHook((LPVOID)_addr(ACTION_EXECUTE_MATCH_PHASE));
-        HookLog("TrainingBoot: Hooked sAction__executeMatchPhase\n");
     }
     else {
         HookLog("TrainingBoot: FAILED to hook sAction__executeMatchPhase\n");
@@ -1188,7 +1174,6 @@ void TrainingBoot_InitHooks()
         (LPVOID*)&oPackSavePayload
     ) == MH_OK) {
         MH_EnableHook((LPVOID)_addr(SGAMECONFIG_PACK_SAVE_PAYLOAD));
-        HookLog("TrainingBoot: Hooked savedata payload packing\n");
     }
     else {
         HookLog("TrainingBoot: FAILED to hook savedata payload packing\n");

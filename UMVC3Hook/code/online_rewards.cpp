@@ -238,15 +238,13 @@ bool Install(uintptr_t address, void* detour, void** original)
 
 void OnlineRewards_InstallHooks()
 {
-    if (Install(FN_GUIDE_AWARD_ACHIEVEMENT, reinterpret_cast<void*>(&Hook_GuideAwardAchievement),
-                reinterpret_cast<void**>(&g_originalGuideAward)))
-        HookLog("OnlineRewards: Steam achievements are delivered by the plugin\n");
-    else
+    // Steam achievements are delivered by the plugin.
+    if (!Install(FN_GUIDE_AWARD_ACHIEVEMENT, reinterpret_cast<void*>(&Hook_GuideAwardAchievement),
+                 reinterpret_cast<void**>(&g_originalGuideAward)))
         HookLog("OnlineRewards: FAILED to hook achievement delivery\n");
 
-    if (Install(FN_COMMIT_BATTLE_REWARDS, reinterpret_cast<void*>(&Hook_CommitBattleRewards),
-                reinterpret_cast<void**>(&g_originalCommitBattleRewards)))
-        HookLog("OnlineRewards: netplay matches pay native online lobby rewards\n");
-    else
+    // Netplay matches pay the native online lobby rewards.
+    if (!Install(FN_COMMIT_BATTLE_REWARDS, reinterpret_cast<void*>(&Hook_CommitBattleRewards),
+                 reinterpret_cast<void**>(&g_originalCommitBattleRewards)))
         HookLog("OnlineRewards: FAILED to hook the battle reward commit\n");
 }

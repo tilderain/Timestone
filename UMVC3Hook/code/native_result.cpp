@@ -387,7 +387,7 @@ bool Install()
     ok &= Hook(CHOICE_WINDOW_INPUT, &Hook_ChoiceInput, &g_originalChoiceInput,
                "the leave pop-up's input");
     g_installed = ok;
-    HookLog("NativeResult: hooks %s\n", ok ? "installed" : "incomplete; the result menu is the game's own");
+    if (!ok) HookLog("NativeResult: hooks INCOMPLETE; the result menu is the game's own\n");
     return ok;
 }
 

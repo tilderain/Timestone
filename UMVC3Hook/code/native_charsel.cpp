@@ -1146,7 +1146,7 @@ bool Install()
                "stage page confirm");
     ok &= Hook(OPTION_INPUT_MASK, &Hook_OptionMask, &g_originalOptionMask, "stage page rows");
     g_installed = ok;
-    HookLog("NativeCharSel: hooks %s\n", ok ? "installed" : "incomplete; the screen is not offered");
+    if (!ok) HookLog("NativeCharSel: hooks INCOMPLETE; the screen is not offered\n");
     return ok;
 }
 

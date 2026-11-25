@@ -177,8 +177,8 @@ static void EnableHook(uintptr_t address, void* replacement, void** original,
 {
     MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(address), replacement, original);
     if (status == MH_OK) {
+        // Success is silent: `success` only names the hook for the reader here.
         GameplayHooks_QueueEnable((LPVOID)_addr(address));
-        HookLog("%s\n", success);
     } else {
         HookLog(failure, status);
     }
@@ -530,7 +530,6 @@ static void InstallInputCallTiming()
         std::memcpy(patch + 2, &displacement, sizeof(displacement));
         GameplayHooks_RecordPatch(address, site.size);
         std::memcpy(address, patch, site.size);
-        HookLog("Input timing: patched call at 0x%llX\n", (unsigned long long)site.address);
     }
     DWORD ignored;
     const bool restored = VirtualProtect((void*)origin, span, previous, &ignored);
@@ -1203,8 +1202,8 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
     RollbackUnit_Install();
     XInputDiscovery_Init();
-    HookLog("Native network: component/agent/ranking/room frame updates %s\n",
-            DisableNativeNetworkFrameUpdates() ? "disabled (12-byte patch)" : "patch failed");
+    if (!DisableNativeNetworkFrameUpdates())
+        HookLog("Native network: component/agent/ranking/room frame updates patch FAILED\n");
     g_originalMvc3MainMove = originalMove;
     EnableHook(FN_SMVC3MAIN_MOVE, (void*)&hkMvc3MainMove, (void**)originalMove,
                "Rollback: hooked sMvc3Main__move",
@@ -1212,9 +1211,7 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 
     MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(FN_CCHR_SET_POS),
                                      (LPVOID)&hkCChrSetPos, (LPVOID*)&oCChrSetPos);
-    if (status == MH_OK)
-        HookLog("Rollback: hooked cChr__setPos for resim diagnostics\n");
-    else
+    if (status != MH_OK)
         HookLog("Rollback: failed to hook cChr__setPos (%d)\n", status);
 
     EnableHook(0x140258540, (void*)&hkWindowFocus, (void**)&oWindowFocus,

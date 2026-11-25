@@ -2871,5 +2871,4 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook inputAutoRepeatTimerProcess (%d)\n", s);
 
     AutoTest_InitHooks();
-    HookLog("Controller: Init complete - hooks installed\n");
 }

@@ -546,7 +546,8 @@ bool PrepareAdvancedLaunchConfig()
         if (status != MH_OK) MH_RemoveHook(target);
     }
     g_threadingHooksReady = status == MH_OK;
-    HookLog("Advanced Config: live threading hook status=%d\n", (int)status);
+    if (status != MH_OK)
+        HookLog("Advanced Config: live threading hook FAILED status=%d\n", (int)status);
     return g_threadingHooksReady;
 }
 

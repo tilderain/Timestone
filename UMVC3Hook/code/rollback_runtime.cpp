@@ -784,9 +784,7 @@ void Rollback_InitOnlineBattleHook()
     }
 
     status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_IS_ONLINE_BATTLE));
-    if (status == MH_OK)
-        HookLog("Netplay: enabled scoped native online combat behavior\n");
-    else
+    if (status != MH_OK)
         HookLog("Netplay: failed to enable g__isOnlineBattle hook (%d)\n", status);
 }
 
@@ -822,8 +820,7 @@ bool Rollback_PatchGameConfigRefresh()
     const bool patched =
         PatchBytes(0x1402534BD, CHECK_SESSION, SKIP_SESSION) &&
         PatchBytes(0x140253508, LOAD_NAME, SKIP_NAME);
-    HookLog("GameConfig: per-frame session/Steam name refresh %s\n",
-            patched ? "disabled" : "patch failed");
+    if (!patched) HookLog("GameConfig: per-frame session/Steam name refresh patch FAILED\n");
     return patched;
 }
 
@@ -840,8 +837,7 @@ bool Rollback_PatchHitSolverAlwaysInline()
 
     const bool patched = PatchBytes(0x140011A42, SELECT_WORKER_OR_INLINE,
                                     ALWAYS_INLINE);
-    HookLog("Rollback: HitSolver always-inline patch %s\n",
-            patched ? "installed" : "failed");
+    if (!patched) HookLog("Rollback: HitSolver always-inline patch FAILED\n");
     return patched;
 }
 
@@ -912,7 +908,7 @@ bool Rollback_PatchAbilityChecks()
         PatchBytes(0x140024160, COLLECT_FLAGS, COLLECT_FLAGS_INLINE) &&
         PatchBytes(0x1400241B0, COLLECT_ABILITY, COLLECT_ABILITY_INLINE) &&
         PatchBytes(0x140024B10, IS_ACTIVE, IS_ACTIVE_INLINE);
-    HookLog("Rollback: cChrAbility inline patch %s\n", patched ? "installed" : "failed");
+    if (!patched) HookLog("Rollback: cChrAbility inline patch FAILED\n");
     return patched;
 }
 
@@ -947,8 +943,8 @@ void Rollback_PatchBattleUiAllocationFailure()
         PatchBytes(0x1402D2F09, NULL_ROOM_WATCH, SKIP_ROOM_WATCH) &&
         PatchBytes(0x1402D3146, NULL_AMBIENT_LIGHT,
                    RETURN_NO_AMBIENT_LIGHT);
-    HookLog("Rollback: %s null uBattleUi allocation guards\n",
-            battleUi ? "installed" : "partially installed");
+    if (!battleUi)
+        HookLog("Rollback: null uBattleUi allocation guards only PARTIALLY installed\n");
 
     // Skip failed hit-model allocations before native adds/initializes the unit.
     static constexpr uint8_t NULL_HIT_MODEL_FIRST[] = {0x74, 0x0F};
@@ -963,8 +959,9 @@ void Rollback_PatchBattleUiAllocationFailure()
                                    SKIP_NULL_HIT_MODEL_SECOND);
     const bool third = PatchBytes(0x1402D8A42, NULL_HIT_MODEL_THIRD,
                                   SKIP_NULL_HIT_MODEL_THIRD);
-    HookLog("Rollback: %s null uBattleUiHit model allocation guards\n",
-            first && second && third ? "installed" : "partially installed");
+    if (!(first && second && third))
+        HookLog("Rollback: null uBattleUiHit model allocation guards only PARTIALLY installed "
+                "(%d/%d/%d)\n", first, second, third);
 }
 
 void Rollback_InitNativeNullGuards()
@@ -975,8 +972,9 @@ void Rollback_InitNativeNullGuards()
     if (motionDtorStatus == MH_OK) {
         const MH_STATUS enableStatus =
             GameplayHooks_QueueEnable((LPVOID)_addr(FN_UMODEL_MOTION_DTOR));
-        HookLog("Rollback: %s stale uModel::Motion free guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable stale uModel::Motion free guard (%d)\n",
+                    enableStatus);
     } else {
         HookLog("Rollback: failed to hook uModel::Motion destructor (%d)\n",
                 motionDtorStatus);
@@ -988,8 +986,9 @@ void Rollback_InitNativeNullGuards()
     if (modelBoundsStatus == MH_OK) {
         const MH_STATUS enableStatus =
             GameplayHooks_QueueEnable((LPVOID)_addr(0x140568F30));
-        HookLog("Rollback: %s deferred model bounds filter\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable deferred model bounds filter (%d)\n",
+                    enableStatus);
     } else {
         HookLog("Rollback: failed to hook deferred model bounds filter (%d)\n",
                 modelBoundsStatus);
@@ -998,9 +997,9 @@ void Rollback_InitNativeNullGuards()
     const MH_STATUS characterModelStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x1402021E0), (LPVOID)&hkCharacterModelPostMove,
         (LPVOID*)&g_originalCharacterModelPostMove);
-    if (characterModelStatus == MH_OK &&
-        GameplayHooks_QueueEnable((LPVOID)_addr(0x1402021E0)) == MH_OK) {
-        HookLog("Rollback: installed headless character model post-move filter\n");
+    if (!(characterModelStatus == MH_OK &&
+        GameplayHooks_QueueEnable((LPVOID)_addr(0x1402021E0)) == MH_OK)) {
+        HookLog("Rollback: FAILED to install headless character model post-move filter\n");
     }
 
     const MH_STATUS frameIndexStatus = GameplayHooks_Create(
@@ -1008,8 +1007,8 @@ void Rollback_InitNativeNullGuards()
         (LPVOID*)&g_originalMtAnimSetFrameIndex);
     if (frameIndexStatus == MH_OK) {
         const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x1400F3150));
-        HookLog("Rollback: %s null MtAnim frame-index guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable null MtAnim frame-index guard (%d)\n", enableStatus);
     } else {
         HookLog("Rollback: failed to guard null MtAnim frame index (%d)\n",
                 frameIndexStatus);
@@ -1023,8 +1022,8 @@ void Rollback_InitNativeNullGuards()
                 flagStatus);
     } else {
         const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x140002A70));
-        HookLog("Rollback: %s null MtObject flag target guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable null MtObject flag target guard (%d)\n", enableStatus);
     }
 
     const MH_STATUS resetMaterialsStatus = GameplayHooks_Create(
@@ -1032,8 +1031,8 @@ void Rollback_InitNativeNullGuards()
         (LPVOID*)&g_originalResetMaterials);
     if (resetMaterialsStatus == MH_OK) {
         const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x14055FBC0));
-        HookLog("Rollback: %s stale material cache sanitizer\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable stale material cache sanitizer (%d)\n", enableStatus);
     } else {
         HookLog("Rollback: failed to hook material cache reset (%d)\n",
                 resetMaterialsStatus);
@@ -1042,25 +1041,25 @@ void Rollback_InitNativeNullGuards()
     const MH_STATUS renderSetupStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x14055FDC0), (LPVOID)&hkBaseModelRenderSetup,
         (LPVOID*)&g_originalBaseModelRenderSetup);
-    if (renderSetupStatus == MH_OK &&
-        GameplayHooks_QueueEnable((LPVOID)_addr(0x14055FDC0)) == MH_OK) {
-        HookLog("Rollback: installed live material cache repair\n");
+    if (!(renderSetupStatus == MH_OK &&
+        GameplayHooks_QueueEnable((LPVOID)_addr(0x14055FDC0)) == MH_OK)) {
+        HookLog("Rollback: FAILED to install live material cache repair\n");
     }
 
     const MH_STATUS toonMaterialStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140564110), (LPVOID)&hkToonMaterialUpdate,
         (LPVOID*)&g_originalToonMaterialUpdate);
-    if (toonMaterialStatus == MH_OK &&
-        GameplayHooks_QueueEnable((LPVOID)_addr(0x140564110)) == MH_OK) {
-        HookLog("Rollback: installed toon material cache repair\n");
+    if (!(toonMaterialStatus == MH_OK &&
+        GameplayHooks_QueueEnable((LPVOID)_addr(0x140564110)) == MH_OK)) {
+        HookLog("Rollback: FAILED to install toon material cache repair\n");
     }
 
     const MH_STATUS particleModelStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140898730), (LPVOID)&hkParticleGeneratorModelUpdate,
         (LPVOID*)&g_originalParticleGeneratorModelUpdate);
-    if (particleModelStatus == MH_OK &&
-        GameplayHooks_QueueEnable((LPVOID)_addr(0x140898730)) == MH_OK) {
-        HookLog("Rollback: installed headless particle-model update filter\n");
+    if (!(particleModelStatus == MH_OK &&
+        GameplayHooks_QueueEnable((LPVOID)_addr(0x140898730)) == MH_OK)) {
+        HookLog("Rollback: FAILED to install headless particle-model update filter\n");
     }
 
     if (SHARE_POSE_MODE != SharePoseMode::Off) {
@@ -1073,16 +1072,18 @@ void Rollback_InitNativeNullGuards()
         const bool apply = GameplayHooks_Create((LPVOID)_addr(0x14010CE10), (LPVOID)&hkShareApply,
                 (LPVOID*)&g_originalShareApply) == MH_OK &&
             GameplayHooks_QueueEnable((LPVOID)_addr(0x14010CE10)) == MH_OK;
-        HookLog("SharePose: %s mode, apply %s, parent frame %s, world matrix %s\n",
-                SHARE_POSE_MODE == SharePoseMode::Shadow ? "shadow" : "replace",
-                apply ? "hooked" : "FAILED", parent ? "hooked" : "FAILED", world ? "hooked" : "FAILED");
+        if (!(apply && parent && world))
+            HookLog("SharePose: %s mode, apply %s, parent frame %s, world matrix %s\n",
+                    SHARE_POSE_MODE == SharePoseMode::Shadow ? "shadow" : "replace",
+                    apply ? "hooked" : "FAILED", parent ? "hooked" : "FAILED",
+                    world ? "hooked" : "FAILED");
     }
 
     // uFilter's base destructor (0x1405F5780), reached by every filter class.
-    if (GameplayHooks_Create((LPVOID)_addr(0x1405F5780), (LPVOID)&hkFilterDestructor,
+    if (!(GameplayHooks_Create((LPVOID)_addr(0x1405F5780), (LPVOID)&hkFilterDestructor,
                              (LPVOID*)&g_originalFilterDestructor) == MH_OK &&
-        GameplayHooks_QueueEnable((LPVOID)_addr(0x1405F5780)) == MH_OK) {
-        HookLog("Rollback: installed screen filter slot release\n");
+        GameplayHooks_QueueEnable((LPVOID)_addr(0x1405F5780)) == MH_OK)) {
+        HookLog("Rollback: FAILED to install screen filter slot release\n");
     }
 
     MH_STATUS particleFilterStatus = GameplayHooks_Create(
@@ -1091,9 +1092,7 @@ void Rollback_InitNativeNullGuards()
         (LPVOID*)&g_originalParticleGeneratorFilterUpdate);
     if (particleFilterStatus == MH_OK)
         particleFilterStatus = GameplayHooks_QueueEnable((LPVOID)_addr(FN_PARTICLE_FILTER_UPDATE));
-    if (particleFilterStatus == MH_OK) {
-        HookLog("Rollback: installed headless Filter submission skip\n");
-    } else {
+    if (particleFilterStatus != MH_OK) {
         HookLog("Rollback: failed to install effect Filter submission skip (%d)\n",
                 particleFilterStatus);
     }
@@ -1101,9 +1100,9 @@ void Rollback_InitNativeNullGuards()
     const MH_STATUS jointPosStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140549F50), (LPVOID)&hkGetJointPos,
         (LPVOID*)&g_originalGetJointPos);
-    if (jointPosStatus == MH_OK &&
-        GameplayHooks_QueueEnable((LPVOID)_addr(0x140549F50)) == MH_OK) {
-        HookLog("Rollback: installed null model-joint entry guard\n");
+    if (!(jointPosStatus == MH_OK &&
+        GameplayHooks_QueueEnable((LPVOID)_addr(0x140549F50)) == MH_OK)) {
+        HookLog("Rollback: FAILED to install null model-joint entry guard\n");
     }
 
     const MH_STATUS animStatus = GameplayHooks_Create(
@@ -1114,8 +1113,8 @@ void Rollback_InitNativeNullGuards()
                 animStatus);
     } else {
         const MH_STATUS animEnableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x14050EE60));
-        HookLog("Rollback: %s malformed MtAnim table guard\n",
-                animEnableStatus == MH_OK ? "installed" : "failed to install");
+        if (animEnableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable malformed MtAnim table guard (%d)\n", animEnableStatus);
     }
 
     const MH_STATUS cutInAddStatus = GameplayHooks_Create(
@@ -1123,8 +1122,8 @@ void Rollback_InitNativeNullGuards()
         (LPVOID*)&g_originalCutInAddCharacter);
     if (cutInAddStatus == MH_OK) {
         const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x1404490C0));
-        HookLog("Rollback: %s null uCutIn participant guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable null uCutIn participant guard (%d)\n", enableStatus);
     } else {
         HookLog("Rollback: failed to guard null uCutIn participant (%d)\n",
                 cutInAddStatus);
@@ -1135,8 +1134,8 @@ void Rollback_InitNativeNullGuards()
         (LPVOID*)&g_originalCutInSetVariant);
     if (cutInVariantStatus == MH_OK) {
         const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x14044B2D0));
-        HookLog("Rollback: %s null uCutIn camera propagation guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable null uCutIn camera propagation guard (%d)\n", enableStatus);
     } else {
         HookLog("Rollback: failed to guard null uCutIn camera propagation (%d)\n",
                 cutInVariantStatus);
@@ -1147,8 +1146,8 @@ void Rollback_InitNativeNullGuards()
         (LPVOID*)&g_originalCopyCharacterPosition);
     if (copyPositionStatus == MH_OK) {
         const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x1400E3020));
-        HookLog("Rollback: %s null cChr+0x6428 position guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable null cChr+0x6428 position guard (%d)\n", enableStatus);
     } else {
         HookLog("Rollback: failed to guard null cChr+0x6428 position (%d)\n",
                 copyPositionStatus);
@@ -1159,8 +1158,8 @@ void Rollback_InitNativeNullGuards()
         (LPVOID*)&g_originalReplaceActiveStage);
     if (replaceStageStatus == MH_OK) {
         const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x1401F02D0));
-        HookLog("Rollback: %s invalid active-stage replacement guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
+        if (enableStatus != MH_OK)
+            HookLog("Rollback: FAILED to enable invalid active-stage replacement guard (%d)\n", enableStatus);
     } else {
         HookLog("Rollback: failed to guard active-stage replacement (%d)\n",
                 replaceStageStatus);
@@ -1225,8 +1224,6 @@ void Rollback_DisableGameplayParallelism()
         ((SetBoolFn)_addr(0x140207660))(sHitSolver, false);
     if (battleRuntime)
         ((SetBoolFn)_addr(0x140207c30))(battleRuntime, false);
-
-    HookLog("Rollback: disabled native gameplay parallelism\n");
 }
 
 void Rollback_ApplyNetplayDeterminism()

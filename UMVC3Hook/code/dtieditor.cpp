@@ -603,7 +603,6 @@ void DtiEditor_Init()
 {
     g_initialized = false;
     g_propsInitialized = false;
-    HookLog("DTI Editor initialized.\n");
 }
 
 void DtiEditor_InitHooks(Trampoline* tramp)
@@ -615,7 +614,6 @@ void DtiEditor_InitHooks(Trampoline* tramp)
     // Leave the game's createProperty thunk untouched; the capture vector is
     // not safe to mutate from every caller/thread that reaches this function.
     g_propsInitialized = true;
-    HookLog("DTI Editor: property capture hook disabled.\n");
     return;
 
     // cAtkCtrl__TargetInfo__createProperty_BF60 at 0x14000bf60 is a 5-byte
@@ -659,7 +657,6 @@ void DtiEditor_InitHooks(Trampoline* tramp)
     InstallAllocationHook();
 
     g_propsInitialized = true;
-    HookLog("DTI Editor: property hooks installed.\n");
 }
 
 // ---------------------------------------------------------------------------

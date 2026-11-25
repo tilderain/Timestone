@@ -1256,8 +1256,10 @@ void Exception_InstallHandler()
     g_unhandledExceptionFilterInstalled = true;
     g_previousAbortHandler = std::signal(SIGABRT, AbortSignalHandler);
     g_abortHandlerInstalled = g_previousAbortHandler != SIG_ERR;
-    HookLog("UMVC3Hook: crash handlers vectored=%s unhandled=installed abort=%s\n",
-        g_exceptionHandler ? "installed" : "FAILED", g_abortHandlerInstalled ? "installed" : "FAILED");
+    if (!g_exceptionHandler || !g_abortHandlerInstalled)
+        HookLog("UMVC3Hook: crash handlers vectored=%s unhandled=installed abort=%s\n",
+            g_exceptionHandler ? "installed" : "FAILED",
+            g_abortHandlerInstalled ? "installed" : "FAILED");
 }
 
 void Exception_RemoveHandler()

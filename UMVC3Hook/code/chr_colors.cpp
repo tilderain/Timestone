@@ -128,11 +128,10 @@ void ChrColors_InstallUnlock()
     installed = true;
 
     void* target = reinterpret_cast<void*>(_addr(SECRET_GET_OWNED_BIT));
-    if (MH_CreateHook(target, reinterpret_cast<void*>(Hook_getOwnedBit),
-                      reinterpret_cast<void**>(&oGetOwnedBit)) == MH_OK &&
-        MH_EnableHook(target) == MH_OK) {
-        HookLog("ChrColors: every installed character color is selectable\n");
-    } else {
+    // With it, every installed character color is selectable.
+    if (!(MH_CreateHook(target, reinterpret_cast<void*>(Hook_getOwnedBit),
+                        reinterpret_cast<void**>(&oGetOwnedBit)) == MH_OK &&
+          MH_EnableHook(target) == MH_OK)) {
         HookLog("ChrColors: FAILED to hook the color ownership test\n");
     }
 }
