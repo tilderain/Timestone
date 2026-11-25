@@ -1,3 +1,4 @@
+#include <cpuid.h>
 #include "d3d9ex.h"
 #include "d3d9reset.h"
 #include "mk10utils.h"
@@ -1091,6 +1092,27 @@ HRESULT D3D9Ex_Create(UINT adapter, D3DDEVTYPE type, HWND window, DWORD behavior
                 identifier.Description, identifier.Driver, identifier.VendorId, identifier.DeviceId,
                 GetModuleHandleA("d3d9on12.dll") ? 1 : 0, GetModuleHandleA("d3d12.dll") ? 1 : 0,
                 GetModuleHandleA("dxvk_d3d9.dll") || GetModuleHandleA("winevulkan.dll") ? 1 : 0);
+    {
+        // The processor beside it: frame-time reports mean little without it.
+        char brand[49] = {};
+        unsigned regs[4] = {};
+        if (__get_cpuid(0x80000000u, &regs[0], &regs[1], &regs[2], &regs[3]) &&
+            regs[0] >= 0x80000004u) {
+            for (unsigned leaf = 0; leaf < 3; ++leaf) {
+                __get_cpuid(0x80000002u + leaf, &regs[0], &regs[1], &regs[2], &regs[3]);
+                memcpy(brand + leaf * 16, regs, 16);
+            }
+        }
+        const char* name = brand;
+        while (*name == ' ') ++name;
+        MEMORYSTATUSEX memory = {};
+        memory.dwLength = sizeof(memory);
+        GlobalMemoryStatusEx(&memory);
+        HookLog("D3D9Ex: processor \"%s\" logical cores=%lu memory=%llu MB\n",
+                *name ? name : "unknown",
+                GetActiveProcessorCount(ALL_PROCESSOR_GROUPS),
+                static_cast<unsigned long long>(memory.ullTotalPhys >> 20));
+    }
     if (!forced && identified && identifier.VendorId == 0x8086) {
         HookLog("D3D9Ex: Intel adapter; using the ordinary backend "
                 "(set [Graphics] ExperimentalD3D9Ex=2 to use 9Ex anyway)\n");
