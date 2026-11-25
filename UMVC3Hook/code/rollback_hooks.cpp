@@ -2,6 +2,7 @@
 #include "../pch.h"
 
 extern "C" int32_t Controller_FirstRollbackFrame();
+extern "C" void Controller_NoteTickStart(int32_t frame);
 
 #include "rollback_hooks.h"
 
@@ -222,6 +223,8 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         Rollback_ClearPendingReSimulation();
 
     int32_t curFrame = Controller_GetNetFrameCount();
+    // Before anything in the tick runs: is this still an intro tick?
+    if (!g_isResimulating) Controller_NoteTickStart(curFrame);
     Rollback_FreezeWatchdogHeartbeat("main-enter", curFrame);
     int32_t traceFrame = g_isResimulating ? g_resimulateCurrentFrame : curFrame;
     if (TraceLifecycleFrame(traceFrame)) {
@@ -269,9 +272,9 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
             bool shouldResim = Rollback_ConsumeReSimRequest(start, end);
             if (!shouldResim)
                 shouldResim = AutoTest_GetForcedClientResim(curFrame, &start, &end);
-            // No replay begins in the intro or just after it: the frames
-            // there are played on neutral input whatever was predicted, and
-            // their snapshots hold the intro's cameras (controller.cpp).
+            // No replay begins in the intro: its ticks are played on neutral
+            // input whatever was predicted, and their snapshots hold the
+            // intro's camera (controller.cpp).
             if (shouldResim) {
                 const int32_t first = Controller_FirstRollbackFrame();
                 if (start < first) start = first;

@@ -1105,29 +1105,49 @@ extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
     return true;
 }
 
-// The intro under rollback. Its cameras and cut-in are units a rollback
-// neither restores nor replays, so a snapshot taken in the intro cannot be
-// gone back to once they are gone (crash of 2026-11-24: sCamera::move called
-// through a viewport camera that had become a uBattleUiHit). Nothing in the
-// intro needs a rollback either, given two things:
-//   - the characters are given neutral input through the intro and for
-//     INTRO_QUIET_FRAMES after it, so a mispredicted input there changes
-//     nothing (the skip is read from confirmed frames, see hkStepIntro);
-//   - no replay starts before the end of that stretch
-//     (Controller_FirstRollbackFrame, used where a replay is begun).
-// The quiet frames after the intro are the start of the countdown, where no
-// character can act yet; they are there so the first snapshot gone back to
-// is one taken with the intro's objects already gone.
-static constexpr int32_t INTRO_QUIET_FRAMES = 20;
-
+// The intro under rollback. Its camera (sAction+0x1D8, a uMayaMotionCamera
+// that also takes viewport 0) is a unit a rollback neither restores nor
+// replays. It lives until the game enters the countdown: sAction::move runs
+// sAction__executeMatchPhase(3) at the top of the tick after the intro
+// reports it is over, which kills the camera, clears the pointer and gives
+// the viewport back. A snapshot taken while sAction is still in step 2, that
+// tick's included, holds those pointers and cannot be gone back to (crash of
+// 2026-11-24: sCamera::move called through a viewport camera that had become
+// a uBattleUiHit). Nothing in those ticks needs a rollback either:
+//   - the characters are given neutral input in them, so a mispredicted
+//     input changes nothing (the skip is read from confirmed frames, see
+//     hkStepIntro);
+//   - no replay starts in them (Controller_FirstRollbackFrame, used where a
+//     replay is begun).
+// The tick after the last of them is the countdown's second, with live
+// input: the players can move through "READY... FIGHT" as in the game itself.
+// (Until 2026-11-25 twenty more frames were kept neutral as a margin, which
+// took a third of a second of movement off the start of every game.)
+//
+// The step is read at the top of the tick, before anything in it runs, so
+// the frame noted is the one this tick's snapshot and inputs are filed under.
 static bool IsIntroQuietFrame(int32_t frame)
 {
-    return g_introLastFrame >= 0 && frame <= g_introLastFrame + INTRO_QUIET_FRAMES;
+    return g_introLastFrame >= 0 && frame <= g_introLastFrame;
 }
 
 extern "C" int32_t Controller_FirstRollbackFrame()
 {
-    return g_introLastFrame >= 0 ? g_introLastFrame + INTRO_QUIET_FRAMES + 1 : 0;
+    return g_introLastFrame >= 0 ? g_introLastFrame + 1 : 0;
+}
+
+extern "C" bool FrameStepper_IsBattleSynchronized();
+
+extern "C" void Controller_NoteTickStart(int32_t frame)
+{
+    if (frame < 0 || !Netplay_IsActive() || !FrameStepper_IsBattleSynchronized())
+        return;
+    using GetActionFn = uint64_t(__fastcall*)();
+    static GetActionFn getAction = (GetActionFn)_addr(0x140001A90);
+    const uint64_t action = getAction();
+    // mStep: 2 is the intro, 3 and 4 the countdown, 5 the fight.
+    if (action && *(int32_t*)(action + 0xD8) <= 2)
+        g_introLastFrame = frame;
 }
 
 // A bit of the timeline's input word that no logical action uses: "an attack
@@ -1521,8 +1541,6 @@ static void __fastcall hkStepIntro(uint64_t param_1)
         }
         // The intro plays, and the game's own skip is taken on a face button
         // from either player, read from confirmed frames of the timeline.
-        if (!g_isResimulating)
-            g_introLastFrame = GetGameFrameCount();
         CaptureLocalSkipInput();
         g_padReadOverridden = true;
         g_padReadValue = TimelineSkipPressed() ? SKIP_PAD_BUTTONS : 0;
