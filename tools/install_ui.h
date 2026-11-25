@@ -542,6 +542,22 @@ inline bool ListStoredZip(const std::vector<unsigned char>& zip, std::vector<Zip
     return !files.empty();
 }
 
+// Files of the release that are for whoever unpacks it by hand and are not
+// put into the game folder: the notices and the installer itself. An install
+// also takes out the copies earlier installers left there.
+inline const char* const kPackageOnlyFiles[] = {"Timestone-THIRDPARTYNOTICES",
+                                                "TimestoneInstall.exe"};
+
+inline void DropPackageOnlyFiles(std::vector<ZipFile>& files)
+{
+    for (size_t i = files.size(); i-- > 0;)
+        for (const char* name : kPackageOnlyFiles)
+            if (files[i].name == name) {
+                files.erase(files.begin() + i);
+                break;
+            }
+}
+
 // ---------------------------------------------------------------------------
 // GitHub's release description, as far as picking one file out of it needs.
 // ---------------------------------------------------------------------------

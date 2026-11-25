@@ -369,8 +369,9 @@ $(INSTALL_SCRIPT): tools/timestone_install_stub.sh $(INSTALL_LINUX)
 	mv $@.tmp $@
 	@echo "=== Built: $(INSTALL_SCRIPT) ==="
 
-# The notices ship under a Timestone- name so they are identifiable once
-# extracted into the game folder.
+# The notices ship under a Timestone- name so they are identifiable beside
+# whatever else the package is unpacked next to. The installers leave them,
+# and the installer itself, out of the game folder.
 $(PACKAGE_NOTICES): THIRDPARTYNOTICES
 	@mkdir -p $(dir $@)
 	cp $< $@

@@ -142,6 +142,12 @@ void TestZip(const char* realArchive)
     Check(files.size() == 2 && files[1].name == "Timestone.asi" && files[1].size == 12 &&
               memcmp(zip.data() + files[1].offset, "PLUGIN-BYTES", 12) == 0,
           "file bytes located");
+    Check(ListStoredZip(MakeZip({{"dinput8.dll", "L"}, {"Timestone.asi", "P"},
+                  {"TimestoneInstall.exe", "I"}, {"Timestone-THIRDPARTYNOTICES", "N"}}), files),
+          "full package listed");
+    DropPackageOnlyFiles(files);
+    Check(files.size() == 2 && files[0].name == "dinput8.dll" && files[1].name == "Timestone.asi",
+          "installer and notices stay out of the game folder");
     Check(!ListStoredZip(MakeZip({{"../evil.dll", "x"}}), files), "path outside the folder refused");
     Check(!ListStoredZip(MakeZip({{"sub/a.dll", "x"}}), files), "subfolder refused");
     Check(!ListStoredZip(MakeZip({{"a.dll", "x"}, {"a.dll", "y"}}), files), "duplicate refused");

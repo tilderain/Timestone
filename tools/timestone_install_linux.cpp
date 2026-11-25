@@ -490,6 +490,7 @@ void Install()
     std::vector<ZipFile> files;
     const ZipFile* plugin = nullptr;
     if (ListStoredZip(zip, files)) {
+        DropPackageOnlyFiles(files);
         for (const ZipFile& file : files)
             if (file.name == "Timestone.asi") plugin = &file;
     }
@@ -543,6 +544,8 @@ void Install()
     for (const ZipFile& file : files) shipsUpdater |= file.name == "TimestoneUpdater.exe";
     if (!shipsUpdater) unlink((folder + "TimestoneUpdater.exe").c_str());
     unlink((folder + "TimestoneUpdater.exe.new").c_str());
+    // Left by earlier installers.
+    for (const char* name : kPackageOnlyFiles) unlink((folder + name).c_str());
 
     std::string message = "Timestone " + tag + " is installed.";
     switch (EnableProtonLoader(gameDir)) {
@@ -613,7 +616,8 @@ void Uninstall()
     // The plugin first: once it is gone the game starts without Timestone,
     // whatever else is left.
     for (const char* name : {"Timestone.asi", "Timestone.asi.old", "Timestone-THIRDPARTYNOTICES",
-                             "TimestoneUpdater.exe", "TimestoneUpdater.exe.new"})
+                             "TimestoneUpdater.exe", "TimestoneUpdater.exe.new",
+                             "TimestoneInstall.exe"})
         if (!remove(name)) return;
     const bool keepLoader = OtherPluginsPresent(gameDir);
     if (!keepLoader && !remove("dinput8.dll")) return;

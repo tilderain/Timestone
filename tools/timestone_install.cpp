@@ -753,6 +753,7 @@ DWORD WINAPI InstallThread(void*)
     std::vector<install::ZipFile> files;
     const install::ZipFile* plugin = nullptr;
     if (install::ListStoredZip(zip, files)) {
+        install::DropPackageOnlyFiles(files);
         for (const install::ZipFile& file : files)
             if (file.name == "Timestone.asi")
                 plugin = &file;
@@ -818,6 +819,10 @@ DWORD WINAPI InstallThread(void*)
     if (!shipsUpdater)
         DeleteFileW((folder + L"TimestoneUpdater.exe").c_str());
     DeleteFileW((folder + L"TimestoneUpdater.exe.new").c_str());
+    // Left by earlier installers. This one may be that copy of the installer,
+    // running: then it stays.
+    for (const char* name : install::kPackageOnlyFiles)
+        DeleteFileW((folder + Utf8ToWide(name)).c_str());
 
     std::wstring message = L"Timestone " + tag + L" is installed.";
     if (RunningUnderWine()) {
@@ -900,6 +905,9 @@ void Uninstall()
             L"TimestoneUpdater.exe.new"})
         if (!remove(name))
             return;
+    // An earlier installer's copy of itself. It cannot go if it is the one
+    // running, and that is no failure.
+    DeleteFileW((gameDir + L"\\TimestoneInstall.exe").c_str());
     const bool keepLoader = OtherPluginsPresent(gameDir);
     if (!keepLoader && !remove(L"dinput8.dll"))
         return;
