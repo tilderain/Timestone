@@ -109,6 +109,7 @@ constexpr size_t MENU_STAGE_SELECT = 0x2C0; // the team whose "complete" opens t
 // Set by picking the roster's RANDOM ALL cell (slotState246): from the member
 // being picked on, the screen draws each one itself. Cleared by a step back.
 constexpr size_t MENU_RAND_ALL = 0x2C4;     // uint8_t[2]
+constexpr uintptr_t GLOBAL_RNG_STATE = 0x140D765D8; // MtXorShift, uint32_t[4]
 // Frames each team has been "complete". Team 0's handler waits for both to
 // pass 5, and each only counts in its own handler.
 constexpr size_t MENU_WAIT_COUNT = 0x2CC;   // float[2]
@@ -741,10 +742,11 @@ void ReadLocalSide(void* menu)
 
     // RANDOM ALL picked on the roster: it covers the member being picked when
     // the flag went up and every one after it.
-    if (!g.localLocked && state < kStateTeamComplete) {
-        if (!Field<uint8_t>(menu, MENU_RAND_ALL + local)) g.randomFrom = -1;
-        else if (g.randomFrom < 0) g.randomFrom = PickedCount(state);
-    }
+    // Which member that was is noted as the pick is made (Hook_State246):
+    // the same call draws it and moves the state past it.
+    if (!g.localLocked && state < kStateTeamComplete &&
+        !Field<uint8_t>(menu, MENU_RAND_ALL + local))
+        g.randomFrom = -1;
     if (state == kStateTeamComplete && !g.localLocked) {
         if (!g.randomMaskGiven)
             g.localRandomMask = g.randomFrom >= 0 && g.randomFrom < 3
@@ -918,10 +920,53 @@ uint64_t __fastcall Hook_State1(void* menu, uint32_t team)
     return TeamHeld(team) ? 1 : g_originalState1(menu, team);
 }
 
+// The screen draws RANDOM and RANDOM ALL members (character, color, assist)
+// from the game's global generator, which is in the same state on both
+// players after a game they played together: left to it, both get the same
+// team. The local picks are drawn from a generator of this player's own
+// instead, and the global one is left as it was.
+uint32_t g_drawRng[4] = {};
+
+void SeedDrawRng()
+{
+    LARGE_INTEGER counter = {};
+    QueryPerformanceCounter(&counter);
+    uint64_t seed = static_cast<uint64_t>(counter.QuadPart) ^
+                    (GetTickCount64() * 0x9E3779B97F4A7C15ull) ^
+                    (static_cast<uint64_t>(GetCurrentProcessId()) << 32);
+    for (uint32_t& word : g_drawRng) {
+        // splitmix64
+        seed += 0x9E3779B97F4A7C15ull;
+        uint64_t z = seed;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        word = static_cast<uint32_t>((z ^ (z >> 31)) >> 16);
+    }
+    g_drawRng[3] |= 1; // never all zero
+}
+
 uint64_t __fastcall Hook_State246(void* menu, uint32_t team, uint32_t member, uint64_t state,
                                   void* record, void* field)
 {
-    return TeamHeld(team) ? 1 : g_originalState246(menu, team, member, state, record, field);
+    if (TeamHeld(team)) return 1;
+    if (!g.active) return g_originalState246(menu, team, member, state, record, field);
+
+    uint32_t* global = reinterpret_cast<uint32_t*>(_addr(GLOBAL_RNG_STATE));
+    uint32_t savedGlobal[4];
+    if (!(g_drawRng[0] | g_drawRng[1] | g_drawRng[2] | g_drawRng[3])) SeedDrawRng();
+    std::memcpy(savedGlobal, global, sizeof(savedGlobal));
+    std::memcpy(global, g_drawRng, sizeof(g_drawRng));
+    const bool randomAllBefore = Field<uint8_t>(menu, MENU_RAND_ALL + team) != 0;
+
+    const uint64_t result = g_originalState246(menu, team, member, state, record, field);
+
+    std::memcpy(g_drawRng, global, sizeof(g_drawRng));
+    std::memcpy(global, savedGlobal, sizeof(savedGlobal));
+    // RANDOM ALL picked just now: it covers this member and every one after.
+    if (!randomAllBefore && Field<uint8_t>(menu, MENU_RAND_ALL + team) && !g.localLocked &&
+        member < 3)
+        g.randomFrom = static_cast<int>(member);
+    return result;
 }
 
 uint64_t __fastcall Hook_State357(void* menu, uint32_t team, int32_t member, uint64_t r9)
