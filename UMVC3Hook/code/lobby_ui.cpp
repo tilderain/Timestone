@@ -121,12 +121,11 @@ const char* const kSlotMenuItems[] = {"JOIN QUEUE & SPECTATE", "JOIN QUEUE", "SP
 constexpr int kSlotMenuCount = 3;
 // The lobby menu, in order. LOBBY SETTINGS is the host's alone.
 enum RoomMenuAction {
-    ROOM_MENU_TEAM, ROOM_MENU_MUSIC, ROOM_MENU_SETTINGS, ROOM_MENU_INVITE, ROOM_MENU_LINK,
-    ROOM_MENU_LEAVE, ROOM_MENU_ACTIONS
+    ROOM_MENU_LINK, ROOM_MENU_TEAM, ROOM_MENU_MUSIC, ROOM_MENU_SETTINGS, ROOM_MENU_INVITE,
+    ROOM_MENU_ACTIONS
 };
 const char* const kRoomMenuItems[ROOM_MENU_ACTIONS] = {
-    "TEAM SETUP", "LOBBY MUSIC", "LOBBY SETTINGS", "INVITE FRIENDS", "COPY LOBBY LINK",
-    "LEAVE LOBBY"};
+    "COPY LOBBY LINK", "TEAM SETUP", "LOBBY MUSIC", "LOBBY SETTINGS", "INVITE FRIENDS"};
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
 constexpr int kCharGridColumns = 10; // faces across in the team screen's character grid
 constexpr int kColorGridColumns = 8; // faces across in the team screen's color grid
@@ -1583,10 +1582,6 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
         break;
     case ROOM_MENU_LINK:
         service_.CopyLobbyLink();
-        break;
-    default:
-        confirm_ = Confirm::LeaveRoom;
-        confirmCursor_ = 0; // default to "Yes"
         break;
     }
 }
