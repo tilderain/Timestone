@@ -1010,6 +1010,10 @@ static void __fastcall HookedMove(void* sMvc3Main)
         // is "ready" as soon as the feed has delivered the game's seed and
         // opening characters, and it never needs anything from us.
         const bool viewing = Spectate_IsViewing();
+        // Loaded for a game the players then never began: back to the room.
+        if (viewing && !g_battleSynchronized && g_restartTargetFrame < 0 &&
+            Spectate_GameAbandoned())
+            LobbyFlow_RequestReturnToLobby("");
         uint32_t watchedSeed = 0;
         uint32_t watchedOpening[2] = {0, 0};
         const bool watchedStartKnown = viewing && !g_battleSynchronized &&

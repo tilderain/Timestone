@@ -742,7 +742,8 @@ One per game of a set (`Game` in `spectate.cpp`):
 
 - the boot configuration (`TrainingBootConfig`, CPU mode, five bars);
 - the round seed and both opening characters, known when the start-up
-  barrier releases (`Spectate_RecGameStart`, from `HookedMove`);
+  barrier releases (`Spectate_RecGameStart`, from `HookedMove`); a match's
+  first game is in the log before that, from `Spectate_RecGameAnnounce`;
 - one input pair per frame, player 1 first, appended once the frame is final:
   `RecordSpectateFrames` in `controller.cpp` walks forward from the last
   logged frame while `IsFrameConfirmed` holds. The local value is
@@ -838,6 +839,37 @@ Every spectator is a late joiner: it boots only after the first game's
 configuration arrives, so it starts behind by its own loading time and relies
 on the catch-up. A game that was already restarted when the spectator arrived
 is skipped; it boots the roster that follows and waits for the next game.
+
+### Starting level with the players (2026-11-25, built, not run)
+
+A spectator already watching had to catch up at the start of every match,
+and could after a rematch. Two causes, both in when it began to load:
+
+- **First game.** The game entered the log only at the players' start-up
+  barrier (`Spectate_RecGameStart`), so `MSG_GAME` reached a spectator when
+  the players were already playing; it then loaded, and came up as far behind
+  as its load took (288 frames in the one log there is of it). Now
+  `BeginLaunch` calls `Spectate_RecGameAnnounce` once the teams and stage are
+  set: the game goes into the log unstarted, `MSG_GAME` goes out at once, and
+  the spectator boots alongside the players and waits at its own barrier for
+  `MSG_START` (`Spectate_GetGameStart` already waited on `started`). No
+  frames are logged into a game that has not started.
+- **Rematch and the select between games.** The restart and its roster were
+  already sent the moment the players restarted, but a spectator only acted
+  on them after playing out what it had left, the second or so it runs
+  behind. `Spectate_Next` now goes with the players at once when the
+  spectator is on the result screen (`sAction` step 9 or later) and the game
+  is marked restarted, or the players have opened the select after it. A
+  restart during the fight is still played up to.
+
+A game announced and never begun (the players left while it loaded) ends the
+watching: `Spectate_GameAbandoned`, asked at the spectator's barrier. If it
+was restarted there with the same teams, the spectator waits for the game
+after it instead.
+
+A spectator still plays about a second behind the feed by design
+(`kResumeBuffer`), and still catches up if it loads much slower than the
+players do or joins a game in progress.
 
 ### Intro picks (found in the first test, 2026-11-16)
 

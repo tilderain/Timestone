@@ -1966,6 +1966,8 @@ void BeginLaunch()
     TrainingBoot_PrepareNextBoot(true);
     SetNetworkHandles(g_matchHost, g_matchPeer);
     FrameStepper_InitNetplay();
+    // The teams and stage are set: spectators start loading now, with us.
+    Spectate_RecGameAnnounce(FrameStepper_GetBattleGeneration());
     g_matchHost = nullptr; // owned by netplay from here on
     g_matchPeer = nullptr;
     g_leaveSeatOnReturn.store(false, std::memory_order_relaxed);

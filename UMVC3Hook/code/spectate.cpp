@@ -34,6 +34,8 @@ constexpr int kFastForwardStart = 120; // further behind than this: catch up...
 constexpr int kFastForwardTarget = 60; // ...to this
 constexpr int kFastForwardPerTick = 8;
 constexpr int kChecksumInterval = 60;
+// sAction steps 9 to 11 are the result screen (8 is the win pose before it).
+constexpr int32_t kResultStep = 9;
 // How many spectators one member feeds. A fighting player's link competes
 // with their match, so they take one; a spectator has nothing to protect.
 constexpr int kPlayerChildren = 1;
@@ -853,37 +855,52 @@ bool Spectate_IsRecording()
     return g_recording;
 }
 
+void Spectate_RecGameAnnounce(uint32_t gameId)
+{
+    if (!g_recording || !gameId || FindGame(gameId)) return;
+    if (!g_games.empty() && g_games.back().finish == FINISH_NONE) return;
+    PushGame(gameId, ConfigFromBoot());
+    HookLog("Spectate: game %u announced; spectators load it alongside the players\n", gameId);
+}
+
 void Spectate_RecGameStart(uint32_t gameId, uint32_t roundSeed, uint32_t openingP1,
                            uint32_t openingP2)
 {
     if (!g_recording || !gameId) return;
-    const WireConfig config = ConfigFromBoot();
-    if (!g_games.empty() && g_games.back().finish == FINISH_NONE) {
-        // No restart was seen for the game before this one.
-        g_games.back().finish = FINISH_RESTART;
-        g_games.back().next = config;
+    Game* game = FindGame(gameId);
+    if (game && game->started) return;
+    if (!game) {
+        const WireConfig config = ConfigFromBoot();
+        if (!g_games.empty() && g_games.back().finish == FINISH_NONE) {
+            // No restart was seen for the game before this one.
+            g_games.back().finish = FINISH_RESTART;
+            g_games.back().next = config;
+        }
+        game = &PushGame(gameId, config);
     }
-    if (FindGame(gameId)) return;
-    Game& game = PushGame(gameId, config);
-    game.started = true;
-    game.seed = roundSeed;
-    game.opening[0] = static_cast<uint8_t>(openingP1 <= 2 ? openingP1 : 0);
-    game.opening[1] = static_cast<uint8_t>(openingP2 <= 2 ? openingP2 : 0);
-    game.inputs.reserve(2 * 60 * 120);
+    // Else announced when the players began to load it (Spectate_RecGameAnnounce).
+    game->started = true;
+    game->seed = roundSeed;
+    game->opening[0] = static_cast<uint8_t>(openingP1 <= 2 ? openingP1 : 0);
+    game->opening[1] = static_cast<uint8_t>(openingP2 <= 2 ? openingP2 : 0);
+    game->inputs.reserve(2 * 60 * 120);
     HookLog("Spectate: game %u started (seed 0x%08X, opening %u/%u)\n", gameId, roundSeed,
-            game.opening[0], game.opening[1]);
+            game->opening[0], game->opening[1]);
 }
 
 void Spectate_RecFrame(uint32_t p1, uint32_t p2)
 {
-    if (!g_recording || g_games.empty() || g_games.back().finish != FINISH_NONE) return;
+    if (!g_recording || g_games.empty() || g_games.back().finish != FINISH_NONE ||
+        !g_games.back().started)
+        return;
     g_games.back().inputs.push_back(p1);
     g_games.back().inputs.push_back(p2);
 }
 
 int32_t Spectate_RecFrameCount()
 {
-    return g_recording && !g_games.empty() && g_games.back().finish == FINISH_NONE
+    return g_recording && !g_games.empty() && g_games.back().finish == FINISH_NONE &&
+           g_games.back().started
         ? g_games.back().Frames() : -1;
 }
 
@@ -1018,6 +1035,26 @@ bool Spectate_GetGameStart(uint32_t* roundSeed, uint32_t* openingP1, uint32_t* o
     return true;
 }
 
+bool Spectate_GameAbandoned()
+{
+    if (!Spectate_IsViewing() || g_restartPending || !g_playGame) return false;
+    Game* game = FindGame(g_playGame);
+    if (!game || game->started || game->finish == FINISH_NONE) return false;
+    // Restarted while it loaded, with the same teams: the game after it is
+    // the one this boot is for.
+    if (game->finish == FINISH_RESTART &&
+        memcmp(&game->next, &game->config, sizeof(WireConfig)) == 0) {
+        g_lastDone = game->id;
+        g_playGame = 0;
+        HookLog("Spectate: game %u was restarted before it began\n", game->id);
+        return false;
+    }
+    HookLog("Spectate: game %u was given up before it began\n", game->id);
+    g_lastDone = game->id; // said once
+    g_playGame = 0;
+    return true;
+}
+
 uint32_t Spectate_PlayGameId()
 {
     return g_playGame;
@@ -1053,6 +1090,16 @@ SpectateStep Spectate_Next(int32_t frame, int32_t actionStep, int32_t* fastForwa
     }
     const int32_t available = game->Frames() - frame;
     g_statBuffered = available > 0 ? available : 0;
+    // On the result screen with the players already gone from it: go with
+    // them now. Playing out the second or so this side is behind would only
+    // start the next game's loading that much after theirs, and that is what
+    // a spectator then had to catch up on.
+    const bool onResult = actionStep >= kResultStep;
+    if (onResult && available > 0) {
+        if (game->finish == FINISH_RESTART) return restartInto(game->next, game->finishSeed);
+        if (game->finish == FINISH_NONE && g_select.game == game->id)
+            return SpectateStep::Select;
+    }
     if (available > 0) {
         if (g_buffering && available < kResumeBuffer && game->finish == FINISH_NONE) {
             g_statWaiting = true;
