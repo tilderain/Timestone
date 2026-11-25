@@ -321,8 +321,19 @@ static void ScheduleNetplayDelay(int32_t delay)
     Netplay_SendDelay(delay, effectiveFrame);
 }
 
+// The mid-match restart (F11, the pause menu's Restart Match) and the delay
+// keys and buttons. Off in a room match for now: either player could restart
+// or re-time the match on the other at any moment. To come back as a room
+// setting; this is the one place to read it. Outside a room they stay.
+extern "C" bool FrameStepper_MidMatchChangesAllowed()
+{
+    return !LobbyFlow_InRoomMatch();
+}
+
 static void AdjustNetplayDelay(int32_t delta)
 {
+    if (!FrameStepper_MidMatchChangesAllowed())
+        return;
     if (Controller_IsDelayChangePending())
         return;
     ScheduleNetplayDelay(Controller_GetDelayFrames() + delta);
@@ -1820,8 +1831,10 @@ void FrameStepper_Process()
     }
 
     if (IsPastIntroStep() && KeyPressed(VK_F11)) {
+        // The desync screen's restart stays: it is the way out of a desync.
         const bool desyncWait = isPaused && g_desyncDetected;
-        if (RequestMatchRestart() && desyncWait) {
+        if ((desyncWait || FrameStepper_MidMatchChangesAllowed()) &&
+            RequestMatchRestart() && desyncWait) {
             g_desyncDetected = false;
             g_desyncSeen = true;
             UnpauseFrameStepper();
@@ -2241,6 +2254,7 @@ void FrameStepper_Draw()
                     ImGui::TextColored(color, "Frame: %d", currentFrame);
                 ImGui::TextColored(color, "Delay: %d  Rollback: %.0f", curDelay, curRollback);
 
+                if (FrameStepper_MidMatchChangesAllowed()) {
                 const ImGuiStyle& style = ImGui::GetStyle();
                 const float controlsWidth = ImGui::CalcTextSize("D-").x +
                     ImGui::CalcTextSize("D+").x + style.FramePadding.x * 4.0f +
@@ -2268,6 +2282,7 @@ void FrameStepper_Draw()
 
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(4);
+                }
             }
         }
 

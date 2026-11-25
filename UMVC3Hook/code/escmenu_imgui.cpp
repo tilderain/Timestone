@@ -388,10 +388,12 @@ void EscMenuImGui_Draw()
     // Someone watching has no match of their own to restart or re-pick.
     const bool spectating = LobbyFlow_IsSpectating();
     if (!spectating) {
-        if (ImGui::Button("Restart Match (f11)", buttonSize) &&
+        if (FrameStepper_MidMatchChangesAllowed() &&
+            ImGui::Button("Restart Match (f11)", buttonSize) &&
             FrameStepper_RequestMatchRestart())
             g_open = false;
-        if (ImGui::Button("Character Select (f8)", buttonSize) && ChrSelImGui_Open())
+        if (FrameStepper_MidMatchChangesAllowed() &&
+            ImGui::Button("Character Select (f8)", buttonSize) && ChrSelImGui_Open())
             g_open = false;
         const bool steamProfileAvailable = SteamLobby_HasPeerProfile();
         if (!steamProfileAvailable) ImGui::BeginDisabled();

@@ -935,6 +935,12 @@ void ChrSelImGui_Update()
             CommitSelection();
     }
 
+    // Off in a room match with the other mid-match changes: this selector
+    // restarts the match for both players. To be routed to the real character
+    // select as a room option later.
+    if (!FrameStepper_MidMatchChangesAllowed())
+        return;
+
     if (KeyPressed(VK_F8) && !g_open)
         RequestOpen();
 
@@ -1014,6 +1020,8 @@ bool ChrSelImGui_Open()
 {
     if (g_open)
         return true;
+    if (!FrameStepper_MidMatchChangesAllowed())
+        return false;
     if (!CanOpenSelector()) {
         SetStatus("Roster selector is only available during synchronized fighting");
         return false;

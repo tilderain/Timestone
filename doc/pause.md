@@ -123,6 +123,15 @@ boundary. This is independent of native `uBattleUiPause` construction:
   clearing one-frame advance state and releasing the captured pause texture. If
   a desync alert is active, it also dismisses the alert locally and sends
   `DESYNC_UNPAUSE` during netplay.
+- In a room match (`LobbyFlow_InRoomMatch`) the player-driven mid-match changes
+  are off for now: `F11` and the pause menu's Restart Match (except `F11` on the
+  desync wait screen), and the delay keys `[` `]` and the HUD's D-/D+ buttons.
+  The F8 roster selector (key and pause menu button) and F9 randomize-and-restart
+  are off with them; F8 is to be routed to the real character select later.
+  `FrameStepper_MidMatchChangesAllowed` is the one gate; they are to come back
+  as a room setting read there. Only the local triggers are gated: restart and
+  delay packets from the peer are still applied (the result menu's rematch uses
+  the same restart packet).
 - Pressing `F11`, choosing Restart Match, or confirming a result requests a full
   restart at the current frame without a scheduled frame lead. Full-match
   restart currently uses the character-select-blank area teardown/rebuild when
