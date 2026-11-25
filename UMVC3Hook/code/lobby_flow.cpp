@@ -8,6 +8,8 @@
 #include "chr_colors.h"
 #include "connect_roster.h"
 #include "controller.h"
+#include "d3d9reset.h"
+#include "LaunchMenu_settings.h"
 #include "framestepper.h"
 #include "launchmenu_utils.h"
 #include "lobby_ime.h"
@@ -739,6 +741,87 @@ void SavePrefs(const UiPrefs& prefs)
     }
     IniSafe_WriteBatch(entries.data(), entries.size(), path);
 }
+
+// The settings screen's rows that are not the lobby's own preferences. The
+// routing choice is read whenever a connection is made, so it holds from the
+// next lobby on; the top menu is only reachable outside one.
+bool SettingGet(lobby::Setting setting)
+{
+    switch (setting) {
+    case lobby::Setting::Fullscreen: return D3D9Reset_IsFullscreen();
+    case lobby::Setting::Vsync: return IsLaunchVsyncEnabled();
+    case lobby::Setting::RelayOnly: return SteamLobby_IsRelayOnly();
+    default: return false;
+    }
+}
+
+bool SettingSet(lobby::Setting setting, bool on)
+{
+    switch (setting) {
+    case lobby::Setting::Fullscreen: return D3D9Reset_SetFullscreen(on);
+    case lobby::Setting::Vsync: return D3D9Reset_SetVsync(on);
+    case lobby::Setting::RelayOnly: {
+        char path[MAX_PATH] = {};
+        SettingsPath(path, sizeof(path));
+        return IniSafe_WriteString("Network", "SteamRelayOnly", on ? "1" : "0", path);
+    }
+    default: return false;
+    }
+}
+// The display's modes, as the Esc menu lists them (escmenu_imgui.cpp): what
+// sRender__enumerateAdapterModes accepts, one entry per size.
+const std::vector<D3DDISPLAYMODE>& DisplayModes()
+{
+    static std::vector<D3DDISPLAYMODE> modes;
+    static bool loaded = false;
+    if (loaded) return modes;
+    IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION);
+    if (!d3d) return modes;
+    const UINT count = d3d->GetAdapterModeCount(D3DADAPTER_DEFAULT, D3DFMT_X8R8G8B8);
+    for (UINT i = 0; i < count; ++i) {
+        D3DDISPLAYMODE mode = {};
+        if (FAILED(d3d->EnumAdapterModes(D3DADAPTER_DEFAULT, D3DFMT_X8R8G8B8, i, &mode)) ||
+            mode.Width < 640 || mode.Height < 480 || (mode.Width & 7) != 0)
+            continue;
+        if (std::none_of(modes.begin(), modes.end(), [&](const D3DDISPLAYMODE& entry) {
+                return entry.Width == mode.Width && entry.Height == mode.Height;
+            }))
+            modes.push_back(mode);
+    }
+    d3d->Release();
+    loaded = true;
+    return modes;
+}
+
+int ResolutionCount() { return static_cast<int>(DisplayModes().size()); }
+
+bool ResolutionAt(int index, int* width, int* height)
+{
+    if (index < 0) {
+        UINT w = 0, h = 0;
+        if (!D3D9Reset_GetResolution(w, h)) return false;
+        *width = static_cast<int>(w);
+        *height = static_cast<int>(h);
+        return true;
+    }
+    const std::vector<D3DDISPLAYMODE>& modes = DisplayModes();
+    if (index >= static_cast<int>(modes.size())) return false;
+    *width = static_cast<int>(modes[index].Width);
+    *height = static_cast<int>(modes[index].Height);
+    return true;
+}
+
+bool ResolutionSet(int index)
+{
+    const std::vector<D3DDISPLAYMODE>& modes = DisplayModes();
+    if (index < 0 || index >= static_cast<int>(modes.size())) return false;
+    return D3D9Reset_SetResolution(modes[index].Width, modes[index].Height);
+}
+
+constexpr lobby::SettingsSource kSettingsSource = {SettingGet, SettingSet, ResolutionCount,
+                                                   ResolutionAt, ResolutionSet,
+                                                   FrameStepper_GetStatusHudMode,
+                                                   FrameStepper_SetStatusHudMode};
 
 // ---------------------------------------------------------------------------
 // Native helpers
@@ -2572,7 +2655,7 @@ void EnsureObjects()
         }
     }
     if (!g_ui) {
-        g_ui.reset(new LobbyUi(*g_service, kRosterSource, LoadPrefs()));
+        g_ui.reset(new LobbyUi(*g_service, kRosterSource, LoadPrefs(), kSettingsSource));
         // CHARACTER SELECT in the start prompt is the game's own screen when
         // its hooks went in, the team screen otherwise.
         g_ui->SetNativeCharSelect(charsel::Install());

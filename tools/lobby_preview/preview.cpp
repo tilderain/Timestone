@@ -405,6 +405,29 @@ SearchResult MakeResult(uint64_t id, const char* name, const char* host, int mem
     return result;
 }
 
+// Stand-in for the plugin's settings: twelve modes and switches that hold.
+const int kFakeModes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1280, 720}, {1280, 800},
+                             {1360, 768}, {1600, 900}, {1680, 1050}, {1920, 1080}, {1920, 1200},
+                             {2560, 1440}, {3840, 2160}};
+int g_fakeMode = 8;
+bool g_fakeSwitches[static_cast<int>(Setting::Count)] = {};
+int g_fakeNetStats = 1;
+const SettingsSource kFakeSettings = {
+    [](Setting setting) { return g_fakeSwitches[static_cast<int>(setting)]; },
+    [](Setting setting, bool on) { g_fakeSwitches[static_cast<int>(setting)] = on; return true; },
+    []() { return 12; },
+    [](int index, int* width, int* height) {
+        if (index < 0) index = g_fakeMode;
+        if (index >= 12) return false;
+        *width = kFakeModes[index][0];
+        *height = kFakeModes[index][1];
+        return true;
+    },
+    [](int index) { g_fakeMode = index; return true; },
+    []() { return g_fakeNetStats; },
+    [](int mode) { g_fakeNetStats = mode; return true; },
+};
+
 UiPrefs DefaultPrefs()
 {
     UiPrefs prefs = {};
@@ -741,6 +764,35 @@ int main(int argc, char** argv)
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_busy");
         }
+    }
+    {   // Settings.
+        FakeService service;
+        LobbyUi ui(service, kRoster, DefaultPrefs(), kFakeSettings);
+        Settle(ui);
+        for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "top_settings");
+        ui.Update(Press(&Input::confirm));
+        Settle(ui);
+        ok &= Capture(ui, directory, "settings_resolution_row");
+        ui.Update(Press(&Input::confirm)); // the display's modes
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_resolutions");
+        ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::confirm)); // apply the next one
+        for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::right)); // relay only
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings");
+        ui.Update(Press(&Input::down)); // NETWORK STATS, with its preview
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_net_stats_compact");
+        ui.Update(Press(&Input::left));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_net_stats_full");
+        ui.Update(Press(&Input::left));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_net_stats_off");
     }
     {   // Team setup.
         FakeService service;

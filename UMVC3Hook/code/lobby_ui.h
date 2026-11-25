@@ -41,9 +41,31 @@ struct UiPrefs {
     bool muteMusic;  // in someone else's lobby: do not play its music
 };
 
+// What the settings screen changes outside the lobby's own preferences: each
+// is on or off, read when drawn and applied the moment it is changed.
+enum class Setting : uint8_t {
+    Fullscreen,
+    Vsync,
+    RelayOnly, // Steam connections go through Valve's relays only
+    Count
+};
+// Provided by the plugin; the preview tool has a stand-in. The resolutions are
+// the display's modes in its own order; index -1 asks for the one in use.
+struct SettingsSource {
+    bool (*get)(Setting setting);
+    bool (*set)(Setting setting, bool on); // false when it could not be applied
+    int (*resolutionCount)();
+    bool (*resolution)(int index, int* width, int* height);
+    bool (*setResolution)(int index); // false when it could not be applied
+    // The stats readout of a netplay match: 0 off, 1 compact, 2 full.
+    int (*netStats)();
+    bool (*setNetStats)(int mode); // false when it could not be applied
+};
+
 class LobbyUi {
 public:
-    LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs& prefs);
+    LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs& prefs,
+            const SettingsSource& settings = {});
 
     void Update(const Input& input);
     void Draw(Canvas& canvas);
@@ -104,7 +126,7 @@ public:
     void DrawPresetPicker(Canvas& canvas) const;
 
 private:
-    enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
+    enum class Screen : uint8_t { Top, Browse, Create, Room, Team, Settings };
     enum class TextTarget : uint8_t { None, RoomName, Chat, PresetName };
     enum class Confirm : uint8_t { None, LeaveRoom, LeaveSeat, KickMember, Update, DeletePreset };
     // Pre-match steps shown as a modal once both seats of the local player's
@@ -137,6 +159,11 @@ private:
     void UpdateMemberMenu(const Input& input);
     void UpdateChatFocus(const Input& input);
     void UpdateTeam(const Input& input);
+    void UpdateSettings(const Input& input);
+    void UpdateResolutionList(const Input& input);
+    void DrawResolutionList(Canvas& canvas) const;
+    bool SettingOn(Setting setting) const;
+    bool SettingsRowOpensList() const;
     void UpdateCharPicker(const Input& input);
     void UpdateColorPicker(const Input& input);
     // Texture for a player's lobby icon: their Steam picture or a portrait.
@@ -162,6 +189,7 @@ private:
     void DrawRoomChat(Canvas& canvas) const;
     int ChatRowsFrom(int firstMessage) const; // display rows of messages [first, count)
     const char* DrawTeam(Canvas& canvas) const; // returns footer help
+    const char* DrawSettings(Canvas& canvas) const; // returns footer help
     void DrawTeamCard(Canvas& canvas, float x, float y, float w) const;
     void DrawCharPicker(Canvas& canvas) const;
     void DrawColorPicker(Canvas& canvas) const;
@@ -198,6 +226,7 @@ private:
     RoomService& service_;
     RosterSource roster_;
     UiPrefs prefs_;
+    SettingsSource settings_;
 
     Screen screen_ = Screen::Top;
     Screen teamReturn_ = Screen::Top;
@@ -222,6 +251,9 @@ private:
     int seatSlot_ = 0;
     int seatSide_ = 0;
     int teamCursor_ = 0;
+    int settingsCursor_ = 0;
+    bool resolutionOpen_ = false; // the display's modes, on the settings screen's RESOLUTION row
+    int resolutionCursor_ = 0;
     bool charPickerOpen_ = false; // character dropdown on a team member row
     int charPickerCursor_ = 0;    // roster index highlighted in it; the roster's count is RANDOM
     int charPickerColumn_ = 0;    // column the cursor left the roster from, to go back up to

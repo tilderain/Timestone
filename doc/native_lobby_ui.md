@@ -280,6 +280,42 @@ be committed.
 | `lobby_flow.*` | Title-area hold, match start handshake, return to room |
 | `steam_lobby.cpp` | Room mode added beside the existing 1v1 mode |
 
+### Settings screen (2026-11-25, built, not run in game)
+
+SETTINGS on the top menu, between TEAM SETUP and MAIN MENU. RESOLUTION
+opens a list of the display's modes (the same filter as the Esc menu's):
+moving through it changes nothing, confirm applies the one under the cursor
+and closes it. The other rows are each one of two values (NETWORK STATS: three), changed by
+left, right or confirm and applied at once:
+
+| Row | Where it lives | Applied by |
+|---|---|---|
+| RESOLUTION | the game's `config.ini` | `D3D9Reset_SetResolution` |
+| FULLSCREEN | the game's `config.ini` | `D3D9Reset_SetFullscreen` |
+| VSYNC | `[Display] VSYNC_` | `D3D9Reset_SetVsync` |
+| STEAM ROUTING | `[Network] SteamRelayOnly` | read at the next connection (`ConnectionOptions`) |
+| NETWORK STATS | `[FrameStepper] StatusHudMode` (0 off, 1 compact, 2 full) | `FrameStepper_SetStatusHudMode` |
+
+NETWORK STATS is the match's ping / delay / rollback readout, FULL, COMPACT
+or OFF, the same value F3 cycles in a match. Unset, it is COMPACT (it was
+FULL before 2026-11-25); an ini that already holds a value keeps it. While
+the cursor is on the row, a mock-up of the readout for the value shown is
+drawn in the screen's top-left corner, where a match has it, in place of
+the SETTINGS title (`DrawNetStatsPreview`, made-up numbers, the host's
+yellow; OFF draws nothing and the title stays). Its lines are a copy of what `FrameStepper_Draw` prints, so a change
+there needs the same change here.
+
+The screen's code is `lobby_ui_settings.cpp`; what it shares with the other
+screens in `lobby_ui.cpp` (palette, selection animation, `Painter`) is in
+`lobby_ui_internal.h`.
+
+None of them is the lobby's own: `lobby_ui` reaches them through
+`SettingsSource` (function pointers, given by `lobby_flow.cpp`), so the
+screen still has no game dependency and the preview tool runs it with a
+stand-in. The same settings remain in the launch menu's settings window and
+the Esc menu. Muting a joined lobby's music (`[Lobby] MuteMusic`,
+`UiPrefs::muteMusic`) is not here: it is on the lobby menu only.
+
 ### Drawing
 
 Each frame the screens issue draw commands back to front. The backend maps

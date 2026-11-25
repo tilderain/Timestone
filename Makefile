@@ -115,6 +115,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/space_bg.cpp \
 	$(SRCDIR)/code/chr_colors.cpp \
 	$(SRCDIR)/code/lobby_ui.cpp \
+	$(SRCDIR)/code/lobby_ui_settings.cpp \
 	$(SRCDIR)/code/lobby_native.cpp \
 	$(SRCDIR)/code/lobby_ime.cpp \
 	$(SRCDIR)/code/lobby_room.cpp \

@@ -116,7 +116,7 @@ static int32_t g_trainingLastFrame = -1;
 static uint32_t g_trainingLastGeneration = 0;
 static bool g_trainingFrameCountingActive = false;
 static bool g_trainingFrameLimitExitRequested = false;
-static int g_statusHudMode = 2;
+static int g_statusHudMode = 1;
 static float g_statusHudBottom = 0.0f;
 static bool g_opponentDisconnected = false;
 
@@ -1361,23 +1361,35 @@ static void LoadConfig()
     KEY_PAUSE   = GetPrivateProfileIntA("FrameStepper", "PauseKey",   VK_F2, iniPath);
     KEY_ADVANCE = GetPrivateProfileIntA("FrameStepper", "AdvanceKey", VK_F3, iniPath);
     g_statusHudMode = GetPrivateProfileIntA(
-        "FrameStepper", "StatusHudMode", 2, iniPath);
+        "FrameStepper", "StatusHudMode", 1, iniPath);
     if (g_statusHudMode < 0 || g_statusHudMode > 2)
-        g_statusHudMode = 2;
+        g_statusHudMode = 1;
 }
 
-static void SaveStatusHudMode()
+static bool SaveStatusHudMode()
 {
     char iniPath[MAX_PATH];
     GetConfigPath(iniPath, sizeof(iniPath));
     if (!iniPath[0])
-        return;
+        return false;
 
     char value[2] = { (char)('0' + g_statusHudMode), '\0' };
     if (!IniSafe_WriteString(
             "FrameStepper", "StatusHudMode", value, iniPath)) {
         HookLog("FrameStepper: failed to save HUD mode to %s\n", iniPath);
+        return false;
     }
+    return true;
+}
+
+int FrameStepper_GetStatusHudMode() { return g_statusHudMode; }
+
+bool FrameStepper_SetStatusHudMode(int mode)
+{
+    if (mode < 0 || mode > 2)
+        return false;
+    g_statusHudMode = mode;
+    return SaveStatusHudMode();
 }
 
 // ---------------------------------------------------------------------------

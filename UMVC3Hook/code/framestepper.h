@@ -11,6 +11,10 @@ void FrameStepper_InitNetplay();
 void FrameStepper_Process();
 void FrameStepper_Draw();
 float FrameStepper_GetStatusHudBottom();
+// The netplay stats readout of a match: 0 off, 1 compact, 2 full. F3 cycles
+// it in a match; the lobby's settings screen sets it. Saved to the ini.
+int FrameStepper_GetStatusHudMode();
+bool FrameStepper_SetStatusHudMode(int mode);
 // The frame stepper has the game paused (F3 then advances a frame).
 bool FrameStepper_IsPaused();
 void FrameStepper_DrawAutoTest();
