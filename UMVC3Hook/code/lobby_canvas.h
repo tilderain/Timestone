@@ -79,6 +79,7 @@ enum Tex : uint16_t {
     TEX_KEY_GLYPHS,      // mai_hlp04       keyboard key glyphs
     TEX_HP_BAR,          // ga_net_hp_a     life bar: black track above, yellow fill below
     TEX_ROOM_BACKDROP,   // meku_menu_co00  the native lobby's comic plate, 1280x720 (DXT1)
+    TEX_SELECT_ARROW,    // chs_opt_sel_b   stage select arrow (points left): filled, then its glow outline
     // The license card's icon set, ui\lic\lic_user_i000..239: the icons a
     // player can pick, among them one portrait per character. See
     // LicenseIcon and CharacterIcon.
@@ -125,6 +126,7 @@ enum Archive : uint8_t {
     ARC_LOOSE,    // a file of its own on disk, read when first drawn
     ARC_BANNER,   // ui\res\arc\chr\l<id>_<color>, requested when first drawn
     ARC_STAGE,    // ui\mnchsstg, the stage select screen's, requested when first drawn
+    ARC_SELECT,   // ui\mnchs, the character select screen's, requested when first drawn
 };
 
 struct TexInfo {
@@ -193,6 +195,12 @@ public:
     // (x, y) is the anchor point; (w, h) the on-screen size.
     virtual void Sprite(Tex tex, float x, float y, float w, float h, Uv uv,
                         Anchor anchor, Color color) = 0;
+
+    // Sprite centred on (x, y) and turned `radians` about the screen's axis,
+    // the way Line is: a quarter turn takes the art's +x to the screen's +y
+    // (down).
+    virtual void SpriteTurned(Tex tex, float x, float y, float w, float h, Uv uv,
+                              float radians, Color color) = 0;
 
     // (w, h) is the size of the stretched centre, as in the native
     // uUiAnmSpriteFrame: the texture's outer thirds are added around it.

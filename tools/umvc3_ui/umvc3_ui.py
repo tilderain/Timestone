@@ -41,10 +41,11 @@ TYPE_SDL = 0x4C0DB839
 TYPE_FSD = 0x1DB58B09
 UNIT_KINDS = {0x7942324B: 'sprite', 0x4AF926B7: 'frame', 0x518E722D: 'text'}
 # Archives the lobby draws from, relative to nativePCx64/ui.
-LOBBY_ARCHIVES = ('cmn', 'netroom', 'mnmain', 'lic', 'mnchsstg')
-# Of the license archive only the icon set is used (character portraits).
-# and of the stage select archive only the stage icons.
-ARCHIVE_FILTER = {'lic': 'lic_user_i', 'mnchsstg': 'chs_stgm'}
+LOBBY_ARCHIVES = ('cmn', 'netroom', 'mnmain', 'lic', 'mnchsstg', 'mnchs')
+# Of the license archive only the icon set is used (character portraits),
+# of the stage select archive only the stage icons, and of the character
+# select archive only the stage select's arrow.
+ARCHIVE_FILTER = {'lic': 'lic_user_i', 'mnchsstg': 'chs_stgm', 'mnchs': 'chs_opt_sel_b'}
 UNDERLAY = 'meku_menu_co00_BM_NOMIP'
 DEFAULT_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'build', 'ui_cache')
 
@@ -425,8 +426,17 @@ class Renderer:
         texture = self.texture(command['tex'])
         sx, sy = command.get('scale', (1, 1))
         width, height = command['size'][0] * sx, command['size'][1] * sy
+        image = self.crop(texture, command.get('uv', (0, 0, 1, 1)))
+        turn = command.get('turn')
+        if turn and image is not None and width > 0.5 and height > 0.5:
+            # Canvas::SpriteTurned: centred, a positive turn is clockwise on
+            # screen (PIL's is the other way).
+            from PIL import Image
+            image = image.resize((max(1, int(round(width))), max(1, int(round(height)))), Image.BILINEAR)
+            image = image.rotate(-math.degrees(turn), Image.BILINEAR, expand=True)
+            width, height = image.size
         left, top = self.anchor_rect(width, height, command.get('anchor', 4))
-        self.blit(canvas, self.crop(texture, command.get('uv', (0, 0, 1, 1))),
+        self.blit(canvas, image,
                   command['pos'][0] + left, command['pos'][1] + top, width, height, command.get('color'))
 
     def frame(self, canvas, command):

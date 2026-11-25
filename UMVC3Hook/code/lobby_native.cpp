@@ -306,6 +306,9 @@ void* g_licenseArchive = nullptr;
 // about 7 MB in all). It is asked for the first time a stage icon is wanted
 // and given back when the lobby's units are released.
 void* g_stageArchive = nullptr;
+// ui\mnchs is the character select screen's own archive (about 1.6 MB); the
+// select screens' arrow is in it. Asked for and given back like the stage one.
+void* g_selectArchive = nullptr;
 
 // Requests a language-specific UI archive by its base name ("ui\\lic").
 void RequestArchive(void*& handle, const char* name)
@@ -366,6 +369,8 @@ void ReleaseBannerArchives()
     using Release = void(__fastcall*)(void*);
     if (g_stageArchive) Native<Release>(CRESOURCE_RELEASE_REF)(g_stageArchive);
     g_stageArchive = nullptr;
+    if (g_selectArchive) Native<Release>(CRESOURCE_RELEASE_REF)(g_selectArchive);
+    g_selectArchive = nullptr;
     for (void*& archive : g_bannerArchives) {
         if (archive) Native<Release>(CRESOURCE_RELEASE_REF)(archive);
         archive = nullptr;
@@ -386,10 +391,11 @@ void* GetTexture(Tex tex)
     if (info.archive == ARC_LICENSE) RequestLicenseArchive();
     // Asked every frame while it loads: nothing is read from disk here.
     if (info.archive == ARC_BANNER && !BannerArchiveReady(tex)) return nullptr;
-    if (info.archive == ARC_STAGE) {
-        RequestArchive(g_stageArchive, "ui\\mnchsstg");
-        if (!g_stageArchive ||
-            !(Field<uint32_t>(g_stageArchive, CRESOURCE_STATE) & kResourceSettled))
+    if (info.archive == ARC_STAGE || info.archive == ARC_SELECT) {
+        const bool stage = info.archive == ARC_STAGE;
+        void*& archive = stage ? g_stageArchive : g_selectArchive;
+        RequestArchive(archive, stage ? "ui\\mnchsstg" : "ui\\mnchs");
+        if (!archive || !(Field<uint32_t>(archive, CRESOURCE_STATE) & kResourceSettled))
             return nullptr;
     }
     if (info.archive == ARC_LOOSE) {
@@ -719,6 +725,22 @@ public:
         Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
             tex == TEX_ROOM_BACKDROP ? attr & ~SPRITE_PRIMITIVE_ATTR_HQ_ONLY : attr;
         ApplyPlacement(unit, x, y, 1.0f, 1.0f, anchor, color);
+    }
+
+    void SpriteTurned(Tex tex, float x, float y, float w, float h, Uv uv, float radians,
+                      Color color) override
+    {
+        if (color.a <= 0.004f || w <= 0.0f || h <= 0.0f) return;
+        void* texture = GetTexture(tex);
+        if (!texture) return;
+        void* unit = AcquireUnit(KIND_SPRITE);
+        if (!unit) return;
+        ApplyTextured(unit, tex, texture, w, h, uv);
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
+            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        ApplyPlacement(unit, x, y, 1.0f, 1.0f, A_MC, color);
+        Field<float>(unit, UCOORD_QUAT + 8) = std::sin(radians * 0.5f);
+        Field<float>(unit, UCOORD_QUAT + 12) = std::cos(radians * 0.5f);
     }
 
     void Line(float x0, float y0, float x1, float y1, float width, Color color) override

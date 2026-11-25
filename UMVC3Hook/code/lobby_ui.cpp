@@ -215,6 +215,12 @@ public:
         canvas_.Sprite(tex, x + dx_, y, w, h, uv, anchor, WithAlpha(color, alpha_));
     }
 
+    void SpriteTurned(Tex tex, float x, float y, float w, float h, Uv uv, float radians,
+                      Color color = kWhite) const
+    {
+        canvas_.SpriteTurned(tex, x + dx_, y, w, h, uv, radians, WithAlpha(color, alpha_));
+    }
+
     void Fill(float x, float y, float w, float h, Color color) const
     {
         canvas_.Sprite(TEX_WHITE, x + dx_, y, w, h, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
@@ -334,6 +340,36 @@ void DrawValueArrows(const Painter& p, uint32_t frame, float centerX, float y, f
     p.Sprite(TEX_OPT_ARROW, centerX - halfSpan + inset, y, 32.0f, 32.0f, kFullUv, A_MC);
     p.Sprite(TEX_OPT_ARROW, centerX + halfSpan - inset, y, 32.0f, 32.0f,
              Uv{1.0f, 0.0f, 0.0f, 1.0f}, A_MC);
+}
+
+// The stage select page's arrow (ui\chs\chs_sprite\chs_option_sel, units
+// chs_sell_La and chs_sell_Lb), turned from pointing left to pointing down.
+// The texture's right half is a glow outline and its left half the filled
+// arrow inside it, both 32 px at scale 1.5. Their animations are from the
+// shared sprite animation list, on a 59-frame loop:
+//  - 21, the outline: from frame 1 it slides 4 px back from its point over 30
+//    frames (mode 2, u^2), then returns over 30 (mode 1, linear). The filled
+//    arrow is its child and moves with it.
+//  - 20, the filled arrow: from frame 1 a full turn about its own long axis
+//    over 60 frames (linear), which on screen is its width closing to nothing
+//    and opening again, twice a loop. It has a black shadow 3 px down-right.
+void DrawStageArrowDown(const Painter& p, uint32_t frame, float x, float y)
+{
+    constexpr float kSize = 48.0f, kTurn = -1.5707963f;
+    constexpr Uv kOutline{0.5f, 0.0f, 1.0f, 1.0f}, kFilled{0.0f, 0.0f, 0.5f, 1.0f};
+    const uint32_t t = frame % 59u;
+    float slide = 0.0f, across = 1.0f;
+    if (t >= 1u) {
+        const float u = (t - 1u) / 30.0f;
+        slide = t < 30u ? 4.0f * u * u : 4.0f * (1.0f - (t - 30u) / 30.0f);
+        across = std::fabs(std::cos((t - 1u) / 60.0f * 6.2831853f));
+    }
+    y -= slide;
+    p.SpriteTurned(TEX_SELECT_ARROW, x, y, kSize, kSize, kOutline, kTurn);
+    // Turned a quarter, the sprite's height lies across the screen.
+    p.SpriteTurned(TEX_SELECT_ARROW, x + 3.0f, y + 3.0f, kSize, kSize * across, kFilled, kTurn,
+                   Color{0.0f, 0.0f, 0.0f, 1.0f});
+    p.SpriteTurned(TEX_SELECT_ARROW, x, y, kSize, kSize * across, kFilled, kTurn);
 }
 
 void DrawPing(const Painter& p, float x, float y, int pingMs, float scale = 1.0f,
@@ -2656,18 +2692,9 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
             p.Label("Create your own lobby and do battle with all comers.", kScreenW * 0.5f,
                     384.0f, 0.7f, A_MC, kDim);
     } else if (count > kBrowseRows) {
-        // More lobbies under the last row: a chevron pointing down at them,
-        // bobbing in step with the selection arrows. The game's arrow art
-        // only points sideways, so this one is drawn.
-        if (browseScroll_ + kBrowseRows < count) {
-            const float cx = kScreenW * 0.5f, cy = 612.0f + SelectionArrowInset(frame_);
-            for (int pass = 0; pass < 2; ++pass) {
-                const float width = pass ? 4.0f : 8.0f;
-                const Color color = pass ? kYellow : Color{0.0f, 0.0f, 0.0f, 0.7f};
-                p.Line(cx - 16.0f, cy, cx, cy + 11.0f, width, color);
-                p.Line(cx + 16.0f, cy, cx, cy + 11.0f, width, color);
-            }
-        }
+        // More lobbies under the last row: the stage select's arrow, turned
+        // to point down at them.
+        if (browseScroll_ + kBrowseRows < count) DrawStageArrowDown(p, frame_, kScreenW * 0.5f, 623.0f);
         char page[32];
         snprintf(page, sizeof(page), "%d / %d", browseCursor_ + 1, count);
         p.Label(page, kSafeRight, 640.0f, 0.62f, A_MR, kDim);

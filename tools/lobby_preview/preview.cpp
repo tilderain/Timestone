@@ -28,6 +28,15 @@ public:
         Emit("sprite", tex, x, y, w, h, uv, anchor, color);
     }
 
+    void SpriteTurned(Tex tex, float x, float y, float w, float h, Uv uv, float radians,
+                      Color color) override
+    {
+        Emit("sprite", tex, x, y, w, h, uv, A_MC, color);
+        char turn[48];
+        snprintf(turn, sizeof(turn), ",\"turn\":%.5f}", radians);
+        commands_.back().replace(commands_.back().size() - 1, 1, turn);
+    }
+
     void Frame(Tex tex, float x, float y, float w, float h, Uv uv, Anchor anchor,
                Color color) override
     {

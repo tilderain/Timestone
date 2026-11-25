@@ -129,6 +129,7 @@ public:
     }
 
     void Frame(lobby::Tex, float, float, float, float, lobby::Uv, lobby::Anchor, Color) override {}
+    void SpriteTurned(lobby::Tex, float, float, float, float, lobby::Uv, float, Color) override {}
     void Text(const char*, float, float, float, lobby::Anchor, Color, lobby::Font, float,
               lobby::Blend) override
     {

@@ -1105,6 +1105,31 @@ two players' preferred stages picked at random (`PickMatchStage`); a player
 with no preference goes along with the other's, and when neither has one it
 is any stage but the training room. **Unverified in game.**
 
+### The lobby list's "more below" arrow
+
+When the search results run past the last row, an arrow under it points down
+at them (`DrawStageArrowDown`). It is the stage select page's arrow, drawn the
+way that page's layout `ui\chs\chs_sprite\chs_option_sel` draws its left one
+and turned a quarter turn with `Canvas::SpriteTurned`:
+
+- Texture `ui\chs\chs_sprite\chs_opt_sel_b_BM_HQ_NOMIP`, 128x64, pointing
+  left: the filled arrow in the left half, a glow outline in the right.
+- `chs_sell_La` is the outline (UV 0.5..1), 32x32 at scale 1.5, with sprite
+  animation 21. `chs_sell_Lb` is the filled arrow (UV 0..0.5), its child, in
+  front of it, with a black shadow at (3, 3) and sprite animation 20. The
+  right arrow is the mirror image (`chs_sell_Ra`/`Rb`, animations 22 and 20).
+- The animations are in `ui\cmn\anm\sprite_base`, both 59 frames long.
+  21: from frame 1 position x 0 -> 4 over 30 frames (mode 2), from frame 30
+  back to 0 over 30 (mode 1). 20: from frame 1 angle x 0 -> 360 degrees over
+  60 frames (mode 1), the arrow turning about its own long axis. The plugin
+  draws that turn as the sprite's width across the arrow times |cos|.
+- Modes as `uUiAnmSprite__interpolateChannel` `0x1402C7B90`: 1 linear,
+  2 u^2, 5 1-(1-u)^2.
+
+The texture is in `ui\mnchs` (about 1.6 MB; `ui\mnchscmn` has it too),
+requested the first time it is drawn and released with the units, like the
+stage icons' archive. `ui\mnchsstg` has no arrow art. **Unverified in game.**
+
 ### The cards
 
 `ui\res\res_stgm\stgm_p\p_<Name><NN>_BM_HQ_NOMIP_typeB` (Japanese) and
