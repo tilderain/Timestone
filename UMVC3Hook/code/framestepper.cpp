@@ -29,6 +29,7 @@
 #include "keyboard_input.h"
 #include "trainingboot.h"
 #include "lobby_flow.h"
+#include "lobby_local.h"
 #include "spectate.h"
 
 extern void D3D9ResetDiagnostics_NoteGameThread();
@@ -327,7 +328,8 @@ static void ScheduleNetplayDelay(int32_t delay)
 // setting; this is the one place to read it. Outside a room they stay.
 extern "C" bool FrameStepper_MidMatchChangesAllowed()
 {
-    return !LobbyFlow_InRoomMatch();
+    // A lobby test build plays both sides on one machine, so they stay there.
+    return LocalLobby_Enabled() || !LobbyFlow_InRoomMatch();
 }
 
 static void AdjustNetplayDelay(int32_t delta)
@@ -1637,6 +1639,9 @@ bool KeyDown(int vk)
 
 static bool DebugControlsDisabledForNetplay()
 {
+    // A lobby test build plays both sides on one machine: its matches keep
+    // the debug keys, as dual training does.
+    if (LocalLobby_Enabled()) return false;
     return Netplay_IsActive() && GetLaunchOption() != LAUNCH_DUAL_TRAINING;
 }
 
@@ -1972,7 +1977,8 @@ void FrameStepper_Process()
             isPaused = true;
         }
     }
-    if (!IsTrainingMode())
+    // A lobby test build's room match has them whatever mode it runs in.
+    if (!IsTrainingMode() && !(LocalLobby_Enabled() && LobbyFlow_InRoomMatch()))
     {
         // The character graph can disappear briefly while the native pause
         // popup initializes. Do not interpret that transient as an unpause;
