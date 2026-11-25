@@ -72,6 +72,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/d3d9reset.cpp \
 	$(SRCDIR)/code/shader_constants.cpp \
 	$(SRCDIR)/code/d3d9ex.cpp \
+	$(SRCDIR)/code/environment_log.cpp \
 	$(SRCDIR)/code/frame_pacing.cpp \
 	$(SRCDIR)/code/framestepper.cpp \
 	$(SRCDIR)/code/dtieditor.cpp \

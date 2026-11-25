@@ -514,12 +514,15 @@ static int32_t GetGameFrameCount()
     return *(int32_t*)(sReplay + 0x54) - g_gameFrameBase;
 }
 
+static void LogGameNetSummary();
+
 extern "C" void Controller_ResetFrameEpoch()
 {
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
     // Reset both native cursors at the battle barrier so frame labels match.
     if (sReplay)
         *(int32_t*)(sReplay + 0x54) = 0;
+    LogGameNetSummary();
     g_gameFrameBase = 0;
     g_netFrameCount = 0;
     g_fightFrameBase = -1;
@@ -632,8 +635,65 @@ static int32_t  g_rollbackStatDepth[ROLLBACK_STAT_SIZE] = {};
 static uint32_t g_rollbackStatHead = 0;
 static std::atomic<float> g_averageRollbackFrames{0.0f};
 
+// One game's netcode in numbers, for the line written when it ends. Game
+// thread only; a few integer additions per rollback or input wait.
+static struct GameNetStats {
+    uint32_t frames;            // played under netplay
+    uint32_t rollbacks, resimulatedFrames, deepest, atLimit;
+    uint32_t waits, longWaits;  // the game held for the opponent's input
+    int64_t waitQpc, longestWaitQpc;
+    int32_t lowestDelay = INT32_MAX, highestDelay = INT32_MIN;
+} g_gameNetStats;
+
+// A delay the running game was played at: both sides of a change made
+// during it, and the one it ended on.
+static void NoteGameDelay(int32_t delay)
+{
+    GameNetStats& s = g_gameNetStats;
+    if (delay < s.lowestDelay) s.lowestDelay = delay;
+    if (delay > s.highestDelay) s.highestDelay = delay;
+}
+
+static void NoteInputWait(int64_t startQpc)
+{
+    LARGE_INTEGER end;
+    QueryPerformanceCounter(&end);
+    const int64_t waited = end.QuadPart - startQpc;
+    GameNetStats& s = g_gameNetStats;
+    ++s.waits;
+    s.waitQpc += waited;
+    if (waited > s.longestWaitQpc) s.longestWaitQpc = waited;
+    if (waited * 60 > g_qpcFrequency) ++s.longWaits;
+}
+
+// Where every game ends or begins (Controller_ResetFrameEpoch).
+static void LogGameNetSummary()
+{
+    NoteGameDelay(g_delayFrames);
+    const GameNetStats s = g_gameNetStats;
+    g_gameNetStats = GameNetStats{};
+    if (s.frames < 60 || !g_qpcFrequency || Netplay_IsSpectator()) return;
+    const double toMs = 1000.0 / static_cast<double>(g_qpcFrequency);
+    char delay[24];
+    if (s.lowestDelay == s.highestDelay) snprintf(delay, sizeof(delay), "%d", s.highestDelay);
+    else snprintf(delay, sizeof(delay), "%d-%d", s.lowestDelay, s.highestDelay);
+    HookLog("Netplay: game summary: %u frames, delay %s | rollbacks %u (avg %.1f, deepest %u, "
+            "%u at the %d-frame limit, %.1f%% of frames resimulated) | input waits %u "
+            "(%u over a frame, %.0f ms in all, longest %.0f ms)\n",
+            s.frames, delay, s.rollbacks,
+            s.rollbacks ? static_cast<double>(s.resimulatedFrames) / s.rollbacks : 0.0,
+            s.deepest, s.atLimit, g_rollbackFrames,
+            100.0 * s.resimulatedFrames / s.frames, s.waits, s.longWaits,
+            s.waitQpc * toMs, s.longestWaitQpc * toMs);
+}
+
 static void RecordRollbackDepth(int32_t depth)
 {
+    GameNetStats& s = g_gameNetStats;
+    ++s.rollbacks;
+    s.resimulatedFrames += static_cast<uint32_t>(depth);
+    if (static_cast<uint32_t>(depth) > s.deepest) s.deepest = static_cast<uint32_t>(depth);
+    if (depth >= g_rollbackFrames) ++s.atLimit;
     g_rollbackStatTick[g_rollbackStatHead % ROLLBACK_STAT_SIZE] = GetTickCount64();
     g_rollbackStatDepth[g_rollbackStatHead % ROLLBACK_STAT_SIZE] = depth;
     ++g_rollbackStatHead;
@@ -961,6 +1021,7 @@ extern "C" void Controller_SetDelayFrames(int32_t delay)
     if (delay == g_delayFrames)
         return;
 
+    if (g_gameNetStats.frames) NoteGameDelay(g_delayFrames);
     g_delayFrames = delay;
     HookLog("Netplay: delay changed to %d\n", delay);
 }
@@ -1002,6 +1063,7 @@ static void ApplyScheduledDelayIfReady()
         }
     }
 
+    if (g_gameNetStats.frames) NoteGameDelay(g_delayFrames);
     g_delayFrames = newDelay == 0 && g_rollbackFrames == 0 ? 1 : newDelay;
     g_pendingDelayFrames = -1;
     g_pendingDelayEffectiveFrame = -1;
@@ -1746,6 +1808,8 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
 
     LagDiagnosticScope diagnostic(LagMetric::InputWait);
     const int32_t remoteBefore = g_lastRemoteFrame;
+    LARGE_INTEGER waitStart;
+    QueryPerformanceCounter(&waitStart);
     Rollback_FreezeWatchdogHeartbeat(reason, g_netFrameCount);
     //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
     //        frame, reason, g_netFrameCount, g_lastRemoteFrame);
@@ -1759,6 +1823,7 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
     }
     LagDiagnostics_RecordWait(LagMetric::InputWait, frame, remoteBefore, g_lastRemoteFrame,
                               g_delayFrames, g_rollbackFrames);
+    NoteInputWait(waitStart.QuadPart);
     if (!IsFrameConfirmed(frame) && Netplay_HasInboundRestartMatch()) {
         Rollback_FreezeWatchdogHeartbeat("restart pending", g_netFrameCount);
         HookLog("Netplay: interrupted %s wait for pending match restart at frame %d\n",
@@ -1776,6 +1841,8 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
 {
     LagDiagnosticScope diagnostic(LagMetric::PredictionWait);
     const int32_t remoteBefore = g_lastRemoteFrame;
+    LARGE_INTEGER waitStart;
+    QueryPerformanceCounter(&waitStart);
     SetPredictionBudgetExhausted();
     Rollback_FreezeWatchdogHeartbeat("prediction budget exhausted",
                                      g_netFrameCount);
@@ -1794,6 +1861,7 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
 
     LagDiagnostics_RecordWait(LagMetric::PredictionWait, frame, remoteBefore, g_lastRemoteFrame,
                               g_delayFrames, g_rollbackFrames);
+    NoteInputWait(waitStart.QuadPart);
     if (IsFrameConfirmed(frame)) {
         ClearPredictionBudgetExhausted();
         Rollback_FreezeWatchdogHeartbeat("prediction-budget-wait-complete",
@@ -1818,6 +1886,7 @@ extern "C" void Controller_OnFrameStart()
     g_netFrameCount = GetGameFrameCount();
     // If sReplay isn't ready yet, skip packet processing this frame.
     if (g_netFrameCount < 0) return;
+    ++g_gameNetStats.frames;
 
     // Keep the native replay cursor on the shared frame epoch.
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);

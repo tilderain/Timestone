@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include "environment_log.h"
 #include <string>
 #include <vector>
 
@@ -1991,6 +1992,9 @@ void BeginLaunch()
     SetPhase(Phase::Launching);
     HookLog("LobbyFlow: launching match vs %s as P%d\n", g_pairing.opponentName,
             g_pairing.localSide + 1);
+    EnvironmentLog_Modules(); // an overlay may have joined the process since start-up
+    Native_LogPadPaths();
+    EnvironmentLog_Controllers();
 }
 
 // Services the fresh connection until the launch parameters are exchanged.

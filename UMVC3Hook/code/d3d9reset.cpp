@@ -36,6 +36,7 @@ extern bool HookLog_IsGameLoaded();
 extern void PrepareD3D9PresentationParameters(D3DPRESENT_PARAMETERS*, const char*);
 extern void PrepareD3D9NativeCreate(HWND, D3DPRESENT_PARAMETERS*);
 extern void ApplyD3D9BorderlessWindow();
+#include "environment_log.h"
 
 namespace {
 
@@ -91,6 +92,7 @@ thread_local bool g_released = false;
 thread_local void* g_transitionRender = nullptr;
 
 void RecordNativeDevice(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& requested);
+void LogDisplay(const D3DPRESENT_PARAMETERS& p);
 bool InstallDeviceHook(IDirect3DDevice9* device);
 
 // One immutable request, owned until the UI thread publishes Done. Native
@@ -253,6 +255,8 @@ bool CreateRendererDevice(void* app)
         FailTransition(result != D3D_OK ? result : E_UNEXPECTED, "native renderer CreateDevice failed");
     RecordNativeDevice(*parameters->output, requested);
     ApplyD3D9BorderlessWindow();
+    LogDisplay(g_effective);
+    EnvironmentLog_Modules();
     // Publish completion ONLY after ownership and the Reset hook are ready.
     // The original dispatcher still handles its remaining window/cursor work.
     InterlockedExchange(&Field<LONG>(app, 0x2AC4), 0);
@@ -282,6 +286,14 @@ bool SamePresentation(const D3DPRESENT_PARAMETERS& a,
         a.Flags == b.Flags &&
         a.FullScreen_RefreshRateInHz == b.FullScreen_RefreshRateInHz &&
         a.PresentationInterval == b.PresentationInterval;
+}
+
+// Written only when it differs from the line before (environment_log.cpp).
+void LogDisplay(const D3DPRESENT_PARAMETERS& p)
+{
+    EnvironmentLog_Display(p.hDeviceWindow ? p.hDeviceWindow : g_creationFocusWindow,
+        p.BackBufferWidth, p.BackBufferHeight, p.Windowed != FALSE,
+        p.PresentationInterval != D3DPRESENT_INTERVAL_IMMEDIATE);
 }
 
 // Called only on the device thread, after a successful creation/reset. Keep
@@ -907,6 +919,7 @@ void __fastcall HookApplyGraphics(void* render, uintptr_t a2, uintptr_t a3, uint
     HookLog("D3D9: committed graphics generation=%llu bb=%ux%u interval=0x%08X elapsed=%llums\n",
         (unsigned long long)g_generation, g_active.BackBufferWidth, g_active.BackBufferHeight,
         g_active.PresentationInterval, (unsigned long long)(GetTickCount64() - start));
+    LogDisplay(g_active);
 }
 
 void __fastcall HookResultHandler(void* app, int32_t result,

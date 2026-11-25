@@ -52,4 +52,9 @@ void Native_FocusGameWindow();
 // call every frame; needed by the native main menu as well as the lobby.
 void Native_EnsurePadSlotsActive();
 
+// One line for the log at match launch: which sPad slots hold a controller,
+// by which API the game reads each, and whether the lobby has been reading
+// controllers through its own XInput fallback.
+void Native_LogPadPaths();
+
 } // namespace lobby

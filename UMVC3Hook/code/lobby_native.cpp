@@ -990,6 +990,32 @@ void LogPadState(void* pad, const char* why)
 // detection the way sPad::Pad::detect does (flags 0x18: XInput, then
 // DirectInput) until each slot is active; from then on the engine's own poll
 // keeps re-detecting it. The call is rate limited to once a second per slot.
+void Native_LogPadPaths()
+{
+    using GetInstance = void*(__fastcall*)();
+    void* pad = Native<GetInstance>(SPAD_GET_INSTANCE)();
+    if (!pad) {
+        HookLog("Input: sPad is not there; no controller can be read\n");
+        return;
+    }
+    char text[160] = {};
+    size_t used = 0;
+    for (int slot = 0; slot < 4; ++slot) {
+        const uint8_t* slotObject =
+            static_cast<uint8_t*>(pad) + SPAD_SLOT_BASE + slot * SPAD_SLOT_STRIDE;
+        const uint8_t kind = slotObject[SPAD_SLOT_KIND];
+        const char* path = !slotObject[SPAD_SLOT_ACTIVE] ? "inactive"
+            : kind == 0 ? "empty" : kind == 2 ? "DirectInput" : "XInput";
+        const int wrote = snprintf(text + used, sizeof(text) - used, "%s%d=%s", slot ? ", " : "",
+                                   slot, path);
+        if (wrote > 0) used += static_cast<size_t>(wrote);
+        if (used >= sizeof(text)) break;
+    }
+    HookLog("Input: pad slots %s | lobby XInput fallback %s\n", text,
+            g_xinputLogged ? "HAS BEEN USED (the game's own pad reading saw no controller)"
+                           : "not used");
+}
+
 void Native_EnsurePadSlotsActive()
 {
     using GetInstance = void*(__fastcall*)();

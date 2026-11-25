@@ -38,6 +38,7 @@
 #include "code/d3d9ex.h"
 #include "code/frame_pacing.h"
 #include "code/exception.h"
+#include "code/environment_log.h"
 #include "code/mk10utils.h"
 #include <Windows.h>
 #include <atomic>
@@ -2604,6 +2605,7 @@ extern "C" __declspec(dllexport) void InitializeASI()
 	}*/
 
 	Exception_InstallHandler();
+	EnvironmentLog_Boot();
 	BootTimer_Init();
 	BootTimer_Stamp("InitializeASI entry");
 	SettingsMgr->Init();
