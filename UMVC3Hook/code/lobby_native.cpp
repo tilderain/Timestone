@@ -1064,8 +1064,9 @@ KeyState ReadKeyboard(bool textActive)
         keys.y = IsKeyHeld('Y');
         // X is also the quick chat key; in a room that is all it does.
         keys.quickChat = keys.x;
-        // So watching a setup, X on a pad, has its own key: Page Up.
-        keys.spectate = IsKeyHeld(VK_PRIOR);
+        // So watching a setup, X on a pad, has its own key: right Ctrl,
+        // which the game's key sheet has a cap for.
+        keys.spectate = IsKeyHeld(VK_RCONTROL);
     }
     return keys;
 }

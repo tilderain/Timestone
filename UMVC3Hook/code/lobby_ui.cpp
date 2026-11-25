@@ -97,11 +97,18 @@ constexpr uint32_t kRoomBackdropFrames = 90;
 struct GlyphCell { uint8_t col, row; };
 // BTN_QUICK_CHAT is RB on a pad and X on the keyboard.
 enum Button : uint8_t {
-    BTN_CONFIRM, BTN_CANCEL, BTN_X, BTN_Y, BTN_MENU, BTN_DPAD, BTN_QUICK_CHAT, BTN_COUNT
+    BTN_CONFIRM, BTN_CANCEL, BTN_X, BTN_Y, BTN_MENU, BTN_DPAD, BTN_QUICK_CHAT, BTN_SPECTATE,
+    BTN_COUNT
 };
-constexpr GlyphCell kPadGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 2}};
+// BTN_SPECTATE is X on a pad and right Ctrl on the keyboard, where X is the
+// quick chat. The game's key sheet (mai_hlp04) has caps for the arrows, both
+// Alts, Ctrls and Shifts, Backspace, Enter, X, Y, Tab and Esc only, so the
+// key is one of those.
+constexpr GlyphCell kPadGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 2},
+                                             {2, 1}};
 // The game's fixed keyboard menu mapping: Enter, Backspace, X, Y, Esc (Start).
-constexpr GlyphCell kKeyGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 1}};
+constexpr GlyphCell kKeyGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 1},
+                                             {2, 2}};
 
 struct Prompt {
     Button button;
@@ -2498,15 +2505,11 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
             add(BTN_CONFIRM, "Sit");
         else if (!seated)
             add(BTN_CONFIRM, "Join queue");
-        // X on a pad. On the keyboard X is the quick chat and Page Up does
-        // this; the key sheet has no glyph for it, so the label names it.
-        if (!seated) {
-            const bool watching = service_.WatchIntent() == seatSlot_;
-            if (usingKeyboard_)
-                add(BTN_COUNT, watching ? "PgUp: Stop spectating" : "PgUp: Spectate");
-            else
-                add(BTN_X, watching ? "Stop spectating" : "Spectate");
-        }
+        // X on a pad; on the keyboard X is the quick chat and right Ctrl
+        // does this.
+        if (!seated)
+            add(BTN_SPECTATE,
+                service_.WatchIntent() == seatSlot_ ? "Stop spectating" : "Spectate");
         addChat();
         add(BTN_MENU, "Menu");
         add(BTN_CANCEL, seated ? "Leave seat" : queued ? "Leave queue" : "Leave");
@@ -2516,12 +2519,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     for (int i = count - 1; i >= 0; --i) {
         const float labelWidth = TextWidth(prompts[i].label) * 0.72f;
         p.Text(prompts[i].label, x, kFooterY + 22.0f, 0.72f, A_MR, kText);
-        x -= labelWidth;
-        if (prompts[i].button == BTN_COUNT) { // no glyph: the label says the key
-            x -= 18.0f;
-            continue;
-        }
-        x -= 6.0f;
+        x -= labelWidth + 6.0f;
         DrawGlyph(p, prompts[i].button, usingKeyboard_, x, kFooterY + 22.0f, 34.0f);
         x -= 34.0f + 18.0f;
     }

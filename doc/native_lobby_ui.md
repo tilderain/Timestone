@@ -895,7 +895,7 @@ match there as it comes up. It is withdrawn by Stop Watching in the pause
 menu, by cancelling while a match is being joined, by a join that fails, by
 taking a seat (`Sit`), and by leaving the queue it came with. A spectator
 whose queue reaches the front is taken back to the room.
-X on a pad, Page Up on the keyboard (`Input::spectate`), toggles that wish for
+X on a pad, right Ctrl on the keyboard (`Input::spectate`), toggles that wish for
 the setup under the cursor without the menu; it does nothing from a seat, and
 keeps a place in line. Leaving a seat or a queue is the cancel button's alone.
 The setup card shows the WATCH tag and a count.
