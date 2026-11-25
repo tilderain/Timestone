@@ -1042,7 +1042,7 @@ namespace {
 // (sPad__accumulateUnitFlagsFromQuery): arrows, Enter/A, Backspace/B, X, Y,
 // Esc as Start.
 struct KeyState {
-    bool up, down, left, right, confirm, cancel, x, y, menu, quickChat;
+    bool up, down, left, right, confirm, cancel, x, y, menu, quickChat, spectate;
 };
 
 KeyState ReadKeyboard(bool textActive)
@@ -1064,6 +1064,8 @@ KeyState ReadKeyboard(bool textActive)
         keys.y = IsKeyHeld('Y');
         // X is also the quick chat key; in a room that is all it does.
         keys.quickChat = keys.x;
+        // So watching a setup, X on a pad, has its own key: Page Up.
+        keys.spectate = IsKeyHeld(VK_PRIOR);
     }
     return keys;
 }
@@ -1452,6 +1454,7 @@ void Native_ReadInput(Input& input, bool textActive)
     enum : uint32_t {
         H_UP = 1, H_DOWN = 2, H_LEFT = 4, H_RIGHT = 8, H_CONFIRM = 16, H_CANCEL = 32,
         H_X = 64, H_Y = 128, H_MENU = 256, H_LB = 512, H_RB = 1024, H_QUICK_CHAT = 2048,
+        H_SPECTATE = 4096,
     };
     uint32_t fromPad = 0, fromKeys = 0;
     if (padHeld & PAD_UP) fromPad |= H_UP;
@@ -1460,7 +1463,7 @@ void Native_ReadInput(Input& input, bool textActive)
     if (padHeld & PAD_RIGHT) fromPad |= H_RIGHT;
     if (padHeld & decideMask) fromPad |= H_CONFIRM;
     if (padHeld & cancelMask) fromPad |= H_CANCEL;
-    if (padHeld & PAD_X) fromPad |= H_X;
+    if (padHeld & PAD_X) fromPad |= H_X | H_SPECTATE;
     if (padHeld & PAD_Y) fromPad |= H_Y;
     if (padHeld & PAD_START) fromPad |= H_MENU;
     if (padHeld & PAD_LB) fromPad |= H_LB;
@@ -1475,6 +1478,7 @@ void Native_ReadInput(Input& input, bool textActive)
     if (keys.y) fromKeys |= H_Y;
     if (keys.menu) fromKeys |= H_MENU;
     if (keys.quickChat) fromKeys |= H_QUICK_CHAT;
+    if (keys.spectate) fromKeys |= H_SPECTATE;
 
     const uint32_t held = fromPad | fromKeys;
     // A button already down when the lobby (re)appears is not a press: the
@@ -1514,6 +1518,7 @@ void Native_ReadInput(Input& input, bool textActive)
     input.pageLeft = (pressed & H_LB) != 0;
     input.pageRight = (pressed & H_RB) != 0;
     input.quickChat = (pressed & H_QUICK_CHAT) != 0;
+    input.spectate = (pressed & H_SPECTATE) != 0;
     input.usingKeyboard = g_usingKeyboard;
     input.unfocused = !foreground;
 

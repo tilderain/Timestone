@@ -1102,10 +1102,17 @@ void LobbyUi::UpdateRoom(const Input& input)
     const bool onOwnSeat = seated && local->slot == seatSlot_ && local->side == seatSide_;
 
     const bool queued = local && local->queueSlot >= 0;
-    if (input.actionX && (seated || queued)) {
-        if (seated) service_.Stand();
-        else service_.LeaveQueue();
-        Play(SFX_CANCEL);
+    if (input.spectate) {
+        // Watch this setup's matches, or stop: the slot menu's SPECTATE in
+        // one press. Not from a seat (one place at a time); a place in line
+        // is kept.
+        if (seated) {
+            Play(SFX_CANCEL);
+            return;
+        }
+        const bool watching = service_.WatchIntent() == seatSlot_;
+        service_.SetWatchIntent(watching ? -1 : seatSlot_);
+        Play(watching ? SFX_CANCEL : SFX_CONFIRM);
         return;
     }
     if (input.cancel) {
@@ -2491,22 +2498,30 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
             add(BTN_CONFIRM, "Sit");
         else if (!seated)
             add(BTN_CONFIRM, "Join queue");
-        // On the keyboard X is the quick chat; Backspace leaves the seat.
-        if (!usingKeyboard_ && seated) add(BTN_X, "Leave seat");
-        else if (!usingKeyboard_ && queued) add(BTN_X, "Leave queue");
+        // X on a pad. On the keyboard X is the quick chat and Page Up does
+        // this; the key sheet has no glyph for it, so the label names it.
+        if (!seated) {
+            const bool watching = service_.WatchIntent() == seatSlot_;
+            if (usingKeyboard_)
+                add(BTN_COUNT, watching ? "PgUp: Stop spectating" : "PgUp: Spectate");
+            else
+                add(BTN_X, watching ? "Stop spectating" : "Spectate");
+        }
         addChat();
         add(BTN_MENU, "Menu");
-        if (usingKeyboard_ && (seated || queued))
-            add(BTN_CANCEL, seated ? "Leave seat" : "Leave queue");
-        else
-            add(BTN_CANCEL, seated || queued ? "Back" : "Leave");
+        add(BTN_CANCEL, seated ? "Leave seat" : queued ? "Leave queue" : "Leave");
     }
 
     float x = kSafeRight;
     for (int i = count - 1; i >= 0; --i) {
         const float labelWidth = TextWidth(prompts[i].label) * 0.72f;
         p.Text(prompts[i].label, x, kFooterY + 22.0f, 0.72f, A_MR, kText);
-        x -= labelWidth + 6.0f;
+        x -= labelWidth;
+        if (prompts[i].button == BTN_COUNT) { // no glyph: the label says the key
+            x -= 18.0f;
+            continue;
+        }
+        x -= 6.0f;
         DrawGlyph(p, prompts[i].button, usingKeyboard_, x, kFooterY + 22.0f, 34.0f);
         x -= 34.0f + 18.0f;
     }
