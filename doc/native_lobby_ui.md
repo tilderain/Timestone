@@ -304,8 +304,19 @@ cloned sprite. The clone's prototype (`icon_RoomFriend`) has `mPrimitiveAttr`
 (`+0x39C`) `0x1004`, while every native sprite with a plain `_BM_NOMIP`
 texture keeps the constructor's `0x1000` (`uBaseSprite__ctor` `0x1402C33B0`;
 `mPass` defaults to 22). The backend now clears bit 2 for this texture only.
-What that bit selects is not established, and the fix is **unverified in
-game**; if the plate still does not draw, the room looks as it did before.
+The fix is **unverified in game**; if the plate still does not draw, the room
+looks as it did before.
+
+Bit 2 of `mPrimitiveAttr` selects the texture filter.
+`cPrim__changeSpriteSamplerState` (`0x140785BD0`) binds the shader function
+`FPrimitiveSampleBaseMap` when it is set and `FPrimitiveSampleBaseMapLin` when
+it is clear. In `nativePCx64\UserShader\UserShaderPackage.mfx` the two records
+differ only in the sampler paired with `tBaseMap`: `SSWrapPoint` (nearest
+texel) for the first, `SSWrapLinear` (linear) for the second. The prototype
+`icon_RoomFriend` carries `0x1004` (point); the backend clears the bit on
+every sprite it draws (frames keep their prototype's value). The UI
+textures are `_NOMIP`, so neither path has mip levels to fall back on when a
+picture is drawn much smaller than its texture.
 
 ### Rooms
 

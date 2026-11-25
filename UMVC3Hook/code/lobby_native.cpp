@@ -121,9 +121,10 @@ constexpr uint32_t SPRITE_ATTR_GRADIENT = 0x10;
 constexpr size_t SPRITE_CENTER_ATTR = 0x368;
 constexpr size_t SPRITE_BLEND_STATE = 0x398;
 constexpr size_t SPRITE_PRIMITIVE_ATTR = 0x39C;
-// Set on the sprite prototype (0x1004) and on no native sprite that shows a
-// plain DXT1 texture: those all keep the constructor's 0x1000.
-constexpr uint32_t SPRITE_PRIMITIVE_ATTR_HQ_ONLY = 0x4;
+// The texture filter: set, the sprite is point sampled (SSWrapPoint); clear,
+// linear (SSWrapLinear). cPrim__changeSpriteSamplerState 0x140785BD0. Set on
+// the sprite prototype (0x1004); the constructor's value is 0x1000.
+constexpr uint32_t SPRITE_PRIMITIVE_ATTR_POINT_FILTER = 0x4;
 constexpr size_t FRAME_ATTR = 0x540;         // bit 0: tile the centre cell
 constexpr size_t FONT_MSG_INDEX = 0x594;     // -1 while showing a raw string
 constexpr size_t FONT_CACHED_MSG_ID = 0x6F0;
@@ -689,6 +690,16 @@ void ApplyPlacement(void* unit, float x, float y, float scaleX, float scaleY, An
     SetDraw(unit, true);
 }
 
+// The draw state of a lobby sprite: the prototype's, with linear filtering.
+// The layout is 1280x720 stretched to the real resolution, and point
+// sampling made every enlarged picture pixel-sharp. Pooled units are reused,
+// so this is written on every draw.
+uint32_t SpriteDrawAttr()
+{
+    return Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR) &
+           ~SPRITE_PRIMITIVE_ATTR_POINT_FILTER;
+}
+
 void ApplyTextured(void* unit, Tex tex, void* texture, float w, float h, Uv uv)
 {
     if (Field<void*>(unit, SPRITE_TEXTURE) != texture) {
@@ -717,13 +728,7 @@ public:
         void* unit = AcquireUnit(KIND_SPRITE);
         if (!unit) return;
         ApplyTextured(unit, tex, texture, w, h, uv);
-        // Pooled units are reused, so this is set on every draw. The comic
-        // plate is the one plain DXT1 texture drawn here; it gets the draw
-        // state the native lobby's own backdrop sprite (a_lic_bg) has.
-        const uint32_t attr =
-            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
-        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
-            tex == TEX_ROOM_BACKDROP ? attr & ~SPRITE_PRIMITIVE_ATTR_HQ_ONLY : attr;
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) = SpriteDrawAttr();
         ApplyPlacement(unit, x, y, 1.0f, 1.0f, anchor, color);
     }
 
@@ -736,8 +741,7 @@ public:
         void* unit = AcquireUnit(KIND_SPRITE);
         if (!unit) return;
         ApplyTextured(unit, tex, texture, w, h, uv);
-        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
-            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) = SpriteDrawAttr();
         ApplyPlacement(unit, x, y, 1.0f, 1.0f, A_MC, color);
         Field<float>(unit, UCOORD_QUAT + 8) = std::sin(radians * 0.5f);
         Field<float>(unit, UCOORD_QUAT + 12) = std::cos(radians * 0.5f);
@@ -755,8 +759,7 @@ public:
         // A flat quad as long as the line, centred on its middle and turned
         // about the screen's axis (uCoord's rotation, a quaternion).
         ApplyTextured(unit, TEX_WHITE, texture, length, width, Uv{0.25f, 0.25f, 0.75f, 0.75f});
-        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
-            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) = SpriteDrawAttr();
         ApplyPlacement(unit, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 1.0f, 1.0f, A_MC, color);
         const float half = std::atan2(dy, dx) * 0.5f;
         Field<float>(unit, UCOORD_QUAT + 8) = std::sin(half);
@@ -777,8 +780,7 @@ public:
         const float v1 = static_cast<float>(kSpaceLineRow0 + kSpaceLineRows) / kSpaceStarsSize;
         ApplyTextured(unit, TEX_SPACE_STARS, texture, length, static_cast<float>(kSpaceLineRows),
                       Uv{0.25f, v0, 0.75f, v1});
-        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
-            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) = SpriteDrawAttr();
         ApplyPlacement(unit, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 1.0f, 1.0f, A_MC, color);
         const float half = std::atan2(dy, dx) * 0.5f;
         Field<float>(unit, UCOORD_QUAT + 8) = std::sin(half);
