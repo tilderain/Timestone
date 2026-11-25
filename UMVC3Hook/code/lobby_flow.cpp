@@ -282,15 +282,13 @@ constexpr ULONGLONG kCharSelGraceMs = 75000;
 // The select screen's own sprites reach down to depth 16995; the preset list
 // is drawn in front of them.
 constexpr int kCharSelDepthBase = 16900;
-// Where the set score is drawn on the select screen, as a fraction of the
-// height: under the game's status bar (which ends at 667 of 720).
-constexpr float kSelectScoreY = 0.945f;
 // "PLAYER n IS SELECTING THE STAGE", in the lobby canvas's 1280x720: resting
 // on the stage page's window, whose top edge is at y 222 (chs_option_a: root
 // at 640,222 with a 400 x 364 frame hung from its top centre).
 constexpr float kStagePickerTextY = 200.0f;
-// The spectator overlay's first line on a watched select screen (1280x720
-// space, the line's middle): under the screen's status bar.
+// The set score on the character select, a player's or the one a spectator
+// has for a first line (1280x720 space, the line's middle): under the
+// screen's status bar (which ends at 667 of 720).
 constexpr float kSelectOverlayY = 691.0f;
 
 // Frames the lobby has been waiting for the native backend to come up.
@@ -530,6 +528,8 @@ void SettingsPath(char* path, size_t size)
 
 // Spectating: how much is drawn over the match (LobbyFlow_GetSpectatorOverlay).
 std::atomic<int> g_spectatorOverlay{2};
+// Playing: whether the set score is drawn over the match.
+std::atomic<bool> g_scoreDisplay{true};
 
 // A team read from the ini may hold a character twice (teams could before
 // presets existed, and the file can be edited): the later one becomes the
@@ -605,6 +605,8 @@ UiPrefs LoadPrefs()
     SettingsPath(path, sizeof(path));
     // SpectatorOverlay is the on/off this was before it had three values: it
     // is the default, off as none and on as full.
+    g_scoreDisplay.store(GetPrivateProfileIntA("Lobby", "ScoreDisplay", 1, path) != 0,
+                         std::memory_order_relaxed);
     const int overlayDefault = GetPrivateProfileIntA("Lobby", "SpectatorOverlay", 1, path) ? 2 : 0;
     const int overlay = GetPrivateProfileIntA("Lobby", "SpectatorOverlayLevel", overlayDefault, path);
     g_spectatorOverlay.store(overlay >= 0 && overlay <= 2 ? overlay : 2,
@@ -758,6 +760,7 @@ bool SettingGet(lobby::Setting setting)
     case lobby::Setting::Fullscreen: return D3D9Reset_IsFullscreen();
     case lobby::Setting::Vsync: return IsLaunchVsyncEnabled();
     case lobby::Setting::RelayOnly: return SteamLobby_IsRelayOnly();
+    case lobby::Setting::ScoreDisplay: return LobbyFlow_GetScoreDisplay();
     default: return false;
     }
 }
@@ -772,6 +775,7 @@ bool SettingSet(lobby::Setting setting, bool on)
         SettingsPath(path, sizeof(path));
         return IniSafe_WriteString("Network", "SteamRelayOnly", on ? "1" : "0", path);
     }
+    case lobby::Setting::ScoreDisplay: return LobbyFlow_SetScoreDisplay(on);
     default: return false;
     }
 }
@@ -2354,6 +2358,33 @@ void UpdateMatchStart(bool cancelPressed)
     if (PumpHandshake(bothReady)) BeginLaunch();
 }
 
+// A player's set score over a room match in its two parts: the format
+// ("FT3"; empty for a set with no length) and the score ("0 - 0", the local
+// player's wins first). Both empty, and false, when there is none to show
+// (not playing a room match, a first-to-1, or turned off with F4 or the
+// settings screen's SCORE DISPLAY).
+bool ScoreParts(char* format, size_t formatSize, char* score, size_t scoreSize)
+{
+    format[0] = score[0] = '\0';
+    if (g_phase != Phase::InMatch || g_spectating || g_setFirstTo == 1 ||
+        !g_scoreDisplay.load(std::memory_order_relaxed))
+        return false;
+    if (g_setFirstTo > 0) snprintf(format, formatSize, "FT%d", g_setFirstTo);
+    snprintf(score, scoreSize, "%d - %d", g_setWins[g_pairing.localSide == 0 ? 0 : 1],
+             g_setWins[g_pairing.localSide == 0 ? 1 : 0]);
+    return true;
+}
+
+// The two as one line, "FT3    0 - 0": how the character select shows it.
+bool ScoreText(char* out, size_t size)
+{
+    char format[12], score[32];
+    out[0] = '\0';
+    if (!ScoreParts(format, sizeof(format), score, sizeof(score))) return false;
+    snprintf(out, size, "%s%s%s", format, format[0] ? "    " : "", score);
+    return true;
+}
+
 // The lobby's own part of the select screen, drawn over it: the preset list
 // (it opens on the button the game's own reserve-unit picker is taken with,
 // Start; slotState246 tests trigger bit 0x8, while the cursor is on the
@@ -2385,6 +2416,11 @@ void CharSelScreenFrame(const Input& input)
     if (g_ui->TakePrefsDirty()) SavePrefs(g_ui->Prefs());
     Native_PlaySfx(g_ui->TakeSfx());
     if (canvas) {
+        // The set score, under the status bar: the screen's clock has the
+        // top centre. First, so the preset list is in front of it.
+        char score[48];
+        if (ScoreText(score, sizeof(score)))
+            canvas->Text(score, 640.0f, kSelectOverlayY, 0.68f, A_MC, kWhite);
         if (g_ui->PresetPickerOpen()) {
             g_ui->DrawPresetPicker(*canvas);
         } else if (const int picker = charsel::StagePicker(); picker >= 0) {
@@ -2946,6 +2982,15 @@ bool LobbyFlow_IsLobbyVisible()
             g_phase == Phase::Connecting || g_phase == Phase::Handshake);
 }
 
+bool LobbyFlow_GetScoreText(char* format, size_t formatSize, char* score, size_t scoreSize)
+{
+    if (!g_enabled || g_charSelArea) {
+        format[0] = score[0] = '\0';
+        return false;
+    }
+    return ScoreParts(format, formatSize, score, scoreSize);
+}
+
 bool LobbyFlow_GetSpectatorOverlayText(char* line, size_t size, const char** note, bool* desynced)
 {
     return g_enabled && !g_charSelArea && WatchOverlayText(line, size, note, desynced);
@@ -2976,25 +3021,7 @@ void LobbyFlow_DrawOverlay()
 
     // (A spectator's overlay is not drawn here: the battle HUD and the
     // watched select screen draw it in the game's own font.)
-    // Set score during a room match, top centre between the health bars.
-    if (g_phase == Phase::InMatch && !g_spectating && g_setFirstTo != 1) {
-        char score[48], format[12] = "";
-        if (g_setFirstTo > 0) snprintf(format, sizeof(format), "FT%d    ", g_setFirstTo);
-        snprintf(score, sizeof(score), "%s%d - %d", format,
-                 g_setWins[g_pairing.localSide == 0 ? 0 : 1],
-                 g_setWins[g_pairing.localSide == 0 ? 1 : 0]);
-        const ImVec2 display = ImGui::GetIO().DisplaySize;
-        ImFont* font = ImGui::GetFont();
-        const float size = display.y * 0.03f;
-        const ImVec2 extent = font->CalcTextSizeA(size, 100000.0f, 0.0f, score);
-        // On the character select the top centre is the screen's clock: the
-        // score goes under its status bar there.
-        const ImVec2 at((display.x - extent.x) * 0.5f,
-                        display.y * (g_charSelArea ? kSelectScoreY : 0.012f));
-        ImDrawList* draw = ImGui::GetBackgroundDrawList();
-        draw->AddText(font, size, ImVec2(at.x + 2.0f, at.y + 2.0f), IM_COL32(0, 0, 0, 220), score);
-        draw->AddText(font, size, at, IM_COL32(255, 255, 255, 255), score);
-    }
+    // (Nor a player's set score: LobbyFlow_GetScoreText.)
 
     const uint32_t waited = g_nativeWaitFrames.load(std::memory_order_relaxed);
     if (waited < kNativeSlowFrames) return;
@@ -3771,6 +3798,23 @@ bool LobbyFlow_SetSpectatorOverlay(int level)
     const char value[2] = {static_cast<char>('0' + level), '\0'};
     if (!path[0] || !IniSafe_WriteString("Lobby", "SpectatorOverlayLevel", value, path)) {
         HookLog("LobbyFlow: failed to save the spectator overlay setting\n");
+        return false;
+    }
+    return true;
+}
+
+bool LobbyFlow_GetScoreDisplay()
+{
+    return g_scoreDisplay.load(std::memory_order_relaxed);
+}
+
+bool LobbyFlow_SetScoreDisplay(bool shown)
+{
+    g_scoreDisplay.store(shown, std::memory_order_relaxed);
+    char path[MAX_PATH] = {};
+    LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
+    if (!path[0] || !IniSafe_WriteString("Lobby", "ScoreDisplay", shown ? "1" : "0", path)) {
+        HookLog("LobbyFlow: failed to save the score display setting\n");
         return false;
     }
     return true;

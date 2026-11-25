@@ -47,6 +47,7 @@ enum class Setting : uint8_t {
     Fullscreen,
     Vsync,
     RelayOnly, // Steam connections go through Valve's relays only
+    ScoreDisplay, // the set score ("FT3  0 - 0") over a match being played
     Count
 };
 // Settings with three values: 0 off (none), 1 compact, 2 full.

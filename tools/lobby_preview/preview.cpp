@@ -410,7 +410,7 @@ const int kFakeModes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1280, 720}, {
                              {1360, 768}, {1600, 900}, {1680, 1050}, {1920, 1080}, {1920, 1200},
                              {2560, 1440}, {3840, 2160}};
 int g_fakeMode = 8;
-bool g_fakeSwitches[static_cast<int>(Setting::Count)] = {};
+bool g_fakeSwitches[static_cast<int>(Setting::Count)] = {false, false, false, true};
 int g_fakeLevels[static_cast<int>(Level::Count)] = {1, 2};
 const SettingsSource kFakeSettings = {
     [](Setting setting) { return g_fakeSwitches[static_cast<int>(setting)]; },

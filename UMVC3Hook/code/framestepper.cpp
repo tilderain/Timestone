@@ -1905,6 +1905,9 @@ void FrameStepper_Process()
     }
     if (Netplay_IsActive() && !Spectate_IsViewing())
     {
+        // F4 shows or hides the set score of a room match.
+        if (KeyPressed(VK_F4) && LobbyFlow_InRoomMatch())
+            LobbyFlow_SetScoreDisplay(!LobbyFlow_GetScoreDisplay());
         // (On the character select F3 is the pause menu's key.)
         if (KeyPressed(VK_F3) && !LobbyFlow_PlayerInCharSelect())
         {

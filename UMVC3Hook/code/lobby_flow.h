@@ -79,6 +79,14 @@ int LobbyFlow_GetSpectatorOverlay();
 bool LobbyFlow_SetSpectatorOverlay(int level);
 // Full, compact, none, full... (F3 while watching). Game thread.
 void LobbyFlow_CycleSpectatorOverlay();
+// A player's set score for the battle HUD to draw, in its two parts: the
+// format ("FT3"; empty for a set with no length) and the score ("0 - 0").
+// Both empty, and false, when there is none to show. Game thread.
+bool LobbyFlow_GetScoreText(char* format, size_t formatSize, char* score, size_t scoreSize);
+// Whether the set score is drawn over a room match being played. Any thread.
+bool LobbyFlow_GetScoreDisplay();
+// Sets it and saves the choice; false if it could not be saved.
+bool LobbyFlow_SetScoreDisplay(bool shown);
 
 // True from match launch until the player is back in the lobby.
 bool LobbyFlow_InRoomMatch();

@@ -296,6 +296,17 @@ left, right or confirm and applied at once:
 | STEAM ROUTING | `[Network] SteamRelayOnly` | read at the next connection (`ConnectionOptions`) |
 | NETWORK STATS | `[FrameStepper] StatusHudMode` (0 off, 1 compact, 2 full) | `FrameStepper_SetStatusHudMode` |
 | SPECTATOR OVERLAY | `[Lobby] SpectatorOverlayLevel` (0 none, 1 compact, 2 full) | `LobbyFlow_SetSpectatorOverlay` |
+| SCORE DISPLAY | `[Lobby] ScoreDisplay` (on unless 0) | `LobbyFlow_SetScoreDisplay` |
+
+SCORE DISPLAY is the set score a player has at the top centre of a room
+match ("FT3    0 - 0"; a first-to-1 has none). F4 flips it in a match. It is
+drawn as a spectator's score line is (below), not by ImGui any more: by the
+battle HUD in two parts, the score ("0 - 0") at the top centre on
+`Font_Press_1P` and the format ("FT3") in the top right on `Font_Listen`
+(`uBtScore+0x100`; right-aligned, ending at x 1050 as that unit is laid
+out), and by the lobby's canvas on the character select, as one line under
+the status bar. It has no preview on the settings
+screen.
 
 NETWORK STATS is the match's ping / delay / rollback readout, FULL, COMPACT
 or OFF, the same value F3 cycles in a match. Unset, it is COMPACT (it was

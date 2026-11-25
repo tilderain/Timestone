@@ -11,16 +11,16 @@ namespace {
 // Settings-screen rows, all the plugin's own settings (SettingsSource).
 enum SettingsRow {
     SETTINGS_RESOLUTION, SETTINGS_FULLSCREEN, SETTINGS_VSYNC, SETTINGS_ROUTING, SETTINGS_NET_STATS,
-    SETTINGS_SPECTATOR,
+    SETTINGS_SPECTATOR, SETTINGS_SCORE,
     SETTINGS_ROWS
 };
 constexpr Setting kSettingsRowSource[SETTINGS_ROWS] = {
     Setting::Count, Setting::Fullscreen, Setting::Vsync, Setting::RelayOnly, Setting::Count,
-    Setting::Count};
+    Setting::Count, Setting::ScoreDisplay};
 // The rows that are a Level, and what each calls its values (0, 1, 2).
 constexpr Level kSettingsRowLevel[SETTINGS_ROWS] = {
     Level::Count, Level::Count, Level::Count, Level::Count, Level::NetStats,
-    Level::SpectatorOverlay};
+    Level::SpectatorOverlay, Level::Count};
 constexpr const char* kLevelNames[static_cast<int>(Level::Count)][3] = {
     {"OFF", "COMPACT", "FULL"}, {"NONE", "COMPACT", "FULL"}};
 constexpr int kResolutionRows = 9; // modes visible at once in the resolution list
@@ -210,7 +210,7 @@ const char* LobbyUi::DrawSettings(Canvas& canvas) const
 
     const char* const labels[SETTINGS_ROWS] = {"RESOLUTION", "FULLSCREEN", "VSYNC",
                                                "STEAM ROUTING", "NETWORK STATS",
-                                               "SPECTATOR OVERLAY"};
+                                               "SPECTATOR OVERLAY", "SCORE DISPLAY"};
     char resolution[32] = "-";
     int width = 0, height = 0;
     if (settings_.resolution && settings_.resolution(-1, &width, &height))
@@ -247,6 +247,7 @@ const char* LobbyUi::DrawSettings(Canvas& canvas) const
         "Relay only hides your IP from your opponent. Automatic can be faster.",
         "Ping, delay and rollback shown during a match. F3 changes it in a match too.",
         "What is drawn over a match you are watching. F3 changes it while watching too.",
+        "The set score shown at the top while you play. F4 changes it in a match too.",
     };
     return help[settingsCursor_];
 }
