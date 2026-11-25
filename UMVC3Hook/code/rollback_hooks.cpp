@@ -138,6 +138,58 @@ static void SetFightingName(uint64_t widget, const char* name)
     ((void(__fastcall*)(uint64_t, bool))_addr(FN_UI_SET_VISIBLE))(widget, true);
 }
 
+// The spectator overlay's top-centre text, on two of uBtScore's text units
+// that a netplay battle leaves hidden: Font_Press_1P (+0xC0) and
+// Font_Press_2P (+0xE8) of ui\game\ga_sprite\ga_pos05. The game hides all
+// eleven of its units at the top of every update, so one not set here stays
+// hidden. Drawn as the lobby's settings screen previews it: the body font,
+// centred, at the given size (1 = the 32 px cell) with its middle at `y`.
+// Field offsets and the two text-unit quirks (on-screen size goes with
+// mScale squared; a single line hangs from its anchor) as lobby_native.cpp.
+static void SetOverlayLine(uint64_t unit, const char* text, float y, float scale, uint32_t rgba)
+{
+    if (!unit) return;
+    const auto setVisible = (void(__fastcall*)(uint64_t, bool))_addr(FN_UI_SET_VISIBLE);
+    if (!text || !text[0]) {
+        setVisible(unit, false);
+        return;
+    }
+    constexpr uint32_t kMiddleCentre = 4, kAttrShadow = 0x2, kAttrGradient = 0x10;
+    ((void(__fastcall*)(uint64_t, const char*))_addr(FN_UI_FONT_SET_TEXT))(unit, text);
+    // The anchor is baked into the glyph quads: a change needs a relayout.
+    if (*(uint32_t*)(unit + 0x368) != kMiddleCentre)
+        *(int32_t*)(unit + 0x6F0) = *(int32_t*)(unit + 0x594) - 1;
+    *(float*)(unit + 0x50) = 640.0f;
+    *(float*)(unit + 0x54) = y - 16.0f * scale;
+    *(float*)(unit + 0x70) = *(float*)(unit + 0x74) = sqrtf(scale);
+    *(uint32_t*)(unit + 0x368) = kMiddleCentre;
+    *(uint32_t*)(unit + 0x310) = rgba;
+    // One colour, not the layout's shading from mColor to mColor1, and no
+    // shadow (the layout's is dark blue at (2, 3)).
+    *(uint32_t*)(unit + 0x364) &= ~(kAttrGradient | kAttrShadow);
+    *(uint8_t*)(unit + 0x108) = 1;
+    setVisible(unit, true);
+}
+
+static void DrawSpectatorOverlay(uint64_t score)
+{
+    char line[160];
+    const char* note = nullptr;
+    bool desynced = false;
+    // The layout fades its units in over its first 30 frames, writing their
+    // position and colour as it goes: nothing is put on them until the name
+    // plate (never written here) has reached full alpha.
+    const uint64_t namePlate = *(uint64_t*)(score + 0xC8);
+    if (!namePlate || *(uint8_t*)(namePlate + 0x313) != 0xFF) return;
+    if (!LobbyFlow_GetSpectatorOverlayText(line, sizeof(line), &note, &desynced)) {
+        line[0] = '\0';
+        note = nullptr;
+    }
+    constexpr uint32_t kWhite = 0xFFFFFFFF, kCyan = 0xFFFFDC78, kRed = 0xFF5A6EFF; // A B G R
+    SetOverlayLine(*(uint64_t*)(score + 0xC0), line, 20.0f, 0.68f, kWhite);
+    SetOverlayLine(*(uint64_t*)(score + 0xE8), note, 41.0f, 0.5f, desynced ? kRed : kCyan);
+}
+
 static void __fastcall hkBtScoreUpdate(uint64_t score, uint64_t a2,
                                         uint64_t a3, uint64_t a4)
 {
@@ -152,7 +204,15 @@ static void __fastcall hkBtScoreUpdate(uint64_t score, uint64_t a2,
     const bool localIsP1 = Netplay_IsHost();
     const char* p1Name = localIsP1 ? localDisplayName : peerDisplayName;
     const char* p2Name = localIsP1 ? peerDisplayName : localDisplayName;
-    // Watching: the two players' names, not ours.
+    if (LobbyFlow_IsSpectating()) DrawSpectatorOverlay(score);
+    // Watching: the two players' names, not ours, and none at all with the
+    // spectator overlay set to none.
+    if (LobbyFlow_IsSpectating() && LobbyFlow_GetSpectatorOverlay() == 0) {
+        for (const uint64_t offset : {0xC8ull, 0xF0ull})
+            if (const uint64_t widget = *(uint64_t*)(score + offset))
+                ((void(__fastcall*)(uint64_t, bool))_addr(FN_UI_SET_VISIBLE))(widget, false);
+        return;
+    }
     if (LobbyFlow_IsSpectating() && !LobbyFlow_GetWatchedNames(&p1Name, &p2Name)) {
         p1Name = "Player 1";
         p2Name = "Player 2";

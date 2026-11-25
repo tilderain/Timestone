@@ -11,12 +11,18 @@ namespace {
 // Settings-screen rows, all the plugin's own settings (SettingsSource).
 enum SettingsRow {
     SETTINGS_RESOLUTION, SETTINGS_FULLSCREEN, SETTINGS_VSYNC, SETTINGS_ROUTING, SETTINGS_NET_STATS,
+    SETTINGS_SPECTATOR,
     SETTINGS_ROWS
 };
 constexpr Setting kSettingsRowSource[SETTINGS_ROWS] = {
-    Setting::Count, Setting::Fullscreen, Setting::Vsync, Setting::RelayOnly, Setting::Count};
-// SettingsSource::netStats values, by name.
-constexpr const char* kNetStatsNames[3] = {"OFF", "COMPACT", "FULL"};
+    Setting::Count, Setting::Fullscreen, Setting::Vsync, Setting::RelayOnly, Setting::Count,
+    Setting::Count};
+// The rows that are a Level, and what each calls its values (0, 1, 2).
+constexpr Level kSettingsRowLevel[SETTINGS_ROWS] = {
+    Level::Count, Level::Count, Level::Count, Level::Count, Level::NetStats,
+    Level::SpectatorOverlay};
+constexpr const char* kLevelNames[static_cast<int>(Level::Count)][3] = {
+    {"OFF", "COMPACT", "FULL"}, {"NONE", "COMPACT", "FULL"}};
 constexpr int kResolutionRows = 9; // modes visible at once in the resolution list
 
 // What NETWORK STATS shows in a match, with made-up numbers: the readout
@@ -26,7 +32,7 @@ constexpr int kResolutionRows = 9; // modes visible at once in the resolution li
 void DrawNetStatsPreview(const Painter& p, int mode)
 {
     constexpr float kBoxLeft = 12.0f, top = 12.0f; // as the readout's window
-    constexpr float kScale = 0.5f, kLine = 18.0f, kPad = 9.0f;
+    constexpr float kScale = 0.4f, kLine = 14.0f, kPad = 6.0f;
     constexpr Color kHost = Color{1.0f, 0.9f, 0.1f, 1.0f};
     const char* const full[] = {"--HOST--", "Ping: 48ms", "FPS: 60.0", "Loss: 0.0% / 0.0%",
                                 "Jitter: 2ms", "Delay: 2  Rollback: 1"};
@@ -51,7 +57,50 @@ void DrawNetStatsPreview(const Painter& p, int mode)
     }
 }
 
+// What SPECTATOR OVERLAY leaves over a match being watched, with made-up
+// players. Full is what the battle HUD has at the top centre
+// (the set score, SPECTATING under it) and the two name
+// plates under the life bars; compact is the name plates alone; none draws
+// nothing.
+// The name plates are the game's own text units, Font_UserName_1P and _2P of
+// ui\game\ga_sprite\ga_pos05 (uBtScore's layout), and are drawn as that
+// layout has them: the body font at mScale (0.85, 0.9), player 1 at
+// (218, 146) anchored left and player 2 at (1060, 146) anchored right, each
+// with a shadow 2 px down-right at alpha 0.749. A text unit's size on screen
+// goes with mScale squared and a single line hangs from its anchor (see
+// NativeCanvas::Text in lobby_native.cpp), so that is 0.7225 by 0.81 of the
+// 32 px cell with its top at y 146. The game shades each from mColor at
+// the top to mColor1 (1P 1, 0.494, 0; 2P 0.8, 0, 1); the canvas has one
+// colour per text, so this is mColor alone.
+void DrawNamePlate(const Painter& p, const char* name, float x, Anchor anchor, Color color,
+                   Color shadow)
+{
+    constexpr float kScale = 0.85f * 0.85f, kStretch = (0.9f * 0.9f) / kScale;
+    constexpr float kY = 146.0f + 16.0f * 0.9f * 0.9f; // the line's middle
+    p.Text(name, x + 2.0f, kY + 2.0f, kScale, anchor, shadow, FONT_BODY, kStretch);
+    p.Text(name, x, kY, kScale, anchor, color, FONT_BODY, kStretch);
+}
+
+void DrawSpectatorPreview(const Painter& p, int level)
+{
+    if (level <= 0) return;
+    if (level == 2) {
+        p.Text("2 - 1", kScreenW * 0.5f, 20.0f, 0.68f, A_MC);
+        p.Text("SPECTATING", kScreenW * 0.5f, 41.0f, 0.5f, A_MC, Color{0.47f, 0.86f, 1.0f, 1.0f});
+    }
+    DrawNamePlate(p, "Gamer", 218.0f, A_ML, Color{1.0f, 1.0f, 0.2f, 1.0f},
+                  Color{0.2f, 0.094f, 0.0f, 0.749f});
+    DrawNamePlate(p, "Animelover", 1060.0f, A_MR, Color{0.937f, 0.392f, 1.0f, 1.0f},
+                  Color{0.094f, 0.0f, 0.2f, 0.749f});
+}
+
 } // namespace
+
+int LobbyUi::SettingLevel(Level setting) const
+{
+    const int level = settings_.level ? settings_.level(setting) : 1;
+    return level >= 0 && level <= 2 ? level : 1;
+}
 
 // RESOLUTION has too many values to step through: confirm lists them.
 bool LobbyUi::SettingsRowOpensList() const { return settingsCursor_ == SETTINGS_RESOLUTION; }
@@ -119,11 +168,10 @@ void LobbyUi::UpdateSettings(const Input& input)
         return;
     }
     if (!input.left && !input.right && !input.confirm) return;
-    if (settingsCursor_ == SETTINGS_NET_STATS) {
+    if (const Level level = kSettingsRowLevel[settingsCursor_]; level != Level::Count) {
         // Shown as FULL, COMPACT, OFF: right goes down the list, as F3 does.
-        const int mode = settings_.netStats ? settings_.netStats() : 1;
-        const int next = (mode + (input.left ? 1 : 2)) % 3;
-        if (!settings_.setNetStats || !settings_.setNetStats(next)) {
+        const int next = (SettingLevel(level) + (input.left ? 1 : 2)) % 3;
+        if (!settings_.setLevel || !settings_.setLevel(level, next)) {
             Play(SFX_CANCEL);
             ShowNotice("This setting could not be changed.");
             return;
@@ -146,20 +194,23 @@ const char* LobbyUi::DrawSettings(Canvas& canvas) const
     const float t = EaseOut(screenFrame_ / static_cast<float>(kTransitionFrames));
     const Painter p(canvas, t, (1.0f - t) * 36.0f);
 
-    // On NETWORK STATS the readout is previewed in its own corner, where the
-    // title is: the title gives way to it, unless the value is OFF.
-    const int netStats = settings_.netStats ? settings_.netStats() : 1;
-    const bool previewStats =
-        settingsCursor_ == SETTINGS_NET_STATS && !resolutionOpen_ && netStats != 0;
-    if (previewStats) DrawNetStatsPreview(p, netStats);
-    else p.Text("SETTINGS", 76.0f, 70.0f, 0.62f, A_ML, kText, FONT_HEADING);
+    // On NETWORK STATS and SPECTATOR OVERLAY what the value shows in a match
+    // is previewed where a match has it. The top of the screen is the
+    // match's there, so the title is not drawn on those rows, whatever the
+    // value: off and none preview as nothing at all.
+    const Level previewed = kSettingsRowLevel[settingsCursor_];
+    if (previewed == Level::Count)
+        p.Text("SETTINGS", 76.0f, 70.0f, 0.62f, A_ML, kText, FONT_HEADING);
+    else if (previewed == Level::NetStats) DrawNetStatsPreview(p, SettingLevel(previewed));
+    else DrawSpectatorPreview(p, SettingLevel(previewed));
 
     const float panelX = 170.0f, panelY = 180.0f, panelW = 940.0f;
     const float panelH = 104.0f + SETTINGS_ROWS * 46.0f;
     p.Box(TEX_PANEL_DARK, panelX, panelY, panelW, panelH);
 
     const char* const labels[SETTINGS_ROWS] = {"RESOLUTION", "FULLSCREEN", "VSYNC",
-                                               "STEAM ROUTING", "NETWORK STATS"};
+                                               "STEAM ROUTING", "NETWORK STATS",
+                                               "SPECTATOR OVERLAY"};
     char resolution[32] = "-";
     int width = 0, height = 0;
     if (settings_.resolution && settings_.resolution(-1, &width, &height))
@@ -175,8 +226,8 @@ const char* LobbyUi::DrawSettings(Canvas& canvas) const
         if (row == SETTINGS_RESOLUTION) value = resolution;
         else if (row == SETTINGS_ROUTING)
             value = SettingOn(Setting::RelayOnly) ? "RELAY ONLY" : "AUTOMATIC";
-        else if (row == SETTINGS_NET_STATS)
-            value = kNetStatsNames[netStats >= 0 && netStats <= 2 ? netStats : 1];
+        else if (const Level level = kSettingsRowLevel[row]; level != Level::Count)
+            value = kLevelNames[static_cast<int>(level)][SettingLevel(level)];
         else value = SettingOn(kSettingsRowSource[row]) ? "ON" : "OFF";
         const float valueX = panelX + 660.0f;
         p.TextFit(value, valueX, y, 0.86f, kValueTextWidth, A_MC, kText);
@@ -195,6 +246,7 @@ const char* LobbyUi::DrawSettings(Canvas& canvas) const
         "On makes frame pacing consistent in exchange for adding input lag.",
         "Relay only hides your IP from your opponent. Automatic can be faster.",
         "Ping, delay and rollback shown during a match. F3 changes it in a match too.",
+        "What is drawn over a match you are watching. F3 changes it while watching too.",
     };
     return help[settingsCursor_];
 }

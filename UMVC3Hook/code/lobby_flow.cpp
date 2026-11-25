@@ -289,6 +289,9 @@ constexpr float kSelectScoreY = 0.945f;
 // on the stage page's window, whose top edge is at y 222 (chs_option_a: root
 // at 640,222 with a 400 x 364 frame hung from its top centre).
 constexpr float kStagePickerTextY = 200.0f;
+// The spectator overlay's first line on a watched select screen (1280x720
+// space, the line's middle): under the screen's status bar.
+constexpr float kSelectOverlayY = 691.0f;
 
 // Frames the lobby has been waiting for the native backend to come up.
 std::atomic<uint32_t> g_nativeWaitFrames{0};
@@ -525,8 +528,8 @@ void SettingsPath(char* path, size_t size)
     LaunchMenuUtils::GetSettingsPath(path, size);
 }
 
-// Spectating: whether the names and feed state are drawn over the match.
-std::atomic<bool> g_spectatorOverlay{true};
+// Spectating: how much is drawn over the match (LobbyFlow_GetSpectatorOverlay).
+std::atomic<int> g_spectatorOverlay{2};
 
 // A team read from the ini may hold a character twice (teams could before
 // presets existed, and the file can be edited): the later one becomes the
@@ -600,7 +603,11 @@ UiPrefs LoadPrefs()
 {
     char path[MAX_PATH] = {};
     SettingsPath(path, sizeof(path));
-    g_spectatorOverlay.store(GetPrivateProfileIntA("Lobby", "SpectatorOverlay", 1, path) != 0,
+    // SpectatorOverlay is the on/off this was before it had three values: it
+    // is the default, off as none and on as full.
+    const int overlayDefault = GetPrivateProfileIntA("Lobby", "SpectatorOverlay", 1, path) ? 2 : 0;
+    const int overlay = GetPrivateProfileIntA("Lobby", "SpectatorOverlayLevel", overlayDefault, path);
+    g_spectatorOverlay.store(overlay >= 0 && overlay <= 2 ? overlay : 2,
                              std::memory_order_relaxed);
     g_rosterPrefs = ConnectRoster_Load(path, ConnectRoster{});
 
@@ -818,10 +825,21 @@ bool ResolutionSet(int index)
     return D3D9Reset_SetResolution(modes[index].Width, modes[index].Height);
 }
 
+int LevelGet(lobby::Level setting)
+{
+    return setting == lobby::Level::NetStats ? FrameStepper_GetStatusHudMode()
+                                             : LobbyFlow_GetSpectatorOverlay();
+}
+
+bool LevelSet(lobby::Level setting, int level)
+{
+    return setting == lobby::Level::NetStats ? FrameStepper_SetStatusHudMode(level)
+                                             : LobbyFlow_SetSpectatorOverlay(level);
+}
+
 constexpr lobby::SettingsSource kSettingsSource = {SettingGet, SettingSet, ResolutionCount,
-                                                   ResolutionAt, ResolutionSet,
-                                                   FrameStepper_GetStatusHudMode,
-                                                   FrameStepper_SetStatusHudMode};
+                                                   ResolutionAt, ResolutionSet, LevelGet,
+                                                   LevelSet};
 
 // ---------------------------------------------------------------------------
 // Native helpers
@@ -1809,11 +1827,12 @@ void UpdateWatchText()
         snprintf(g_watchNames[side], sizeof(g_watchNames[side]), "%s", players[side]->name);
     char line[sizeof(g_watchLine)];
     const int firstTo = SetFirstTo(*players[0], room.settings.firstTo);
+    // The set score alone: the name plates under the life bars say who is
+    // playing. A first-to-1 has no score to show.
     if (firstTo == 1)
-        snprintf(line, sizeof(line), "%.40s  vs  %.40s", players[0]->name, players[1]->name);
+        line[0] = '\0';
     else
-        snprintf(line, sizeof(line), "%.40s  %d - %d  %.40s", players[0]->name,
-                 players[0]->setWins, players[1]->setWins, players[1]->name);
+        snprintf(line, sizeof(line), "%d - %d", players[0]->setWins, players[1]->setWins);
     memcpy(g_watchLine, line, sizeof(g_watchLine));
 }
 
@@ -2387,6 +2406,35 @@ void CharSelScreenFrame(const Input& input)
     }
 }
 
+// The spectator overlay's two lines at the level chosen: the set score, and
+// under it the state of the feed. Full has both; compact
+// only the feed's state, and only when it is lost or waiting (not catching
+// up: that passes on its own, and often); none neither. The out-of-sync
+// warning is given at every level, the picture being wrong then. `line` is
+// left empty and `note` null for what is not shown; false if nothing is.
+bool WatchOverlayText(char* line, size_t size, const char** note, bool* desynced)
+{
+    line[0] = '\0';
+    *note = nullptr;
+    *desynced = false;
+    if (g_phase != Phase::InMatch || !g_spectating) return false;
+    const int level = g_spectatorOverlay.load(std::memory_order_relaxed);
+    const SpectateStatus status = Spectate_GetStatus();
+    *desynced = status.desynced;
+    if (level == 2) {
+        memcpy(line, g_watchLine, size < sizeof(g_watchLine) ? size : sizeof(g_watchLine));
+        line[size - 1] = '\0';
+    }
+    const bool trouble = status.feedLost || (status.waiting && !status.catchingUp);
+    // (The character select has its own status bar where the note would be.)
+    if (status.desynced || (!g_charSelArea && (level == 2 || (level == 1 && trouble))))
+        *note = status.desynced ? "DESYNCED"
+              : status.feedLost ? "RECONNECTING..."
+              : status.catchingUp ? "CATCHING UP..."
+              : status.waiting ? "WAITING FOR THE MATCH..." : "SPECTATING";
+    return line[0] || *note;
+}
+
 // Both sides of a watched select screen as the feed has them, and who is
 // picking the stage.
 void FeedWatchedSelect()
@@ -2407,6 +2455,19 @@ void FeedWatchedSelect()
                      g_watchNames[picker]);
             canvas->Text(line, 640.0f, kStagePickerTextY, 0.74f, A_MC,
                          Color{1.0f, 1.0f, 1.0f, 0.95f});
+        }
+        // The spectator overlay, as the battle HUD draws it (hkBtScoreUpdate)
+        // but under the status bar: the screen's clock has the top centre.
+        char players[sizeof(g_watchLine)];
+        const char* note = nullptr;
+        bool desynced = false;
+        if (WatchOverlayText(players, sizeof(players), &note, &desynced)) {
+            if (players[0])
+                canvas->Text(players, 640.0f, kSelectOverlayY, 0.68f, A_MC, kWhite);
+            if (note)
+                canvas->Text(note, 640.0f, kSelectOverlayY + 21.0f, 0.5f, A_MC,
+                             desynced ? Color{1.0f, 0.43f, 0.35f, 1.0f}
+                                      : Color{0.47f, 0.86f, 1.0f, 1.0f});
         }
         Native_EndFrame();
     }
@@ -2885,6 +2946,11 @@ bool LobbyFlow_IsLobbyVisible()
             g_phase == Phase::Connecting || g_phase == Phase::Handshake);
 }
 
+bool LobbyFlow_GetSpectatorOverlayText(char* line, size_t size, const char** note, bool* desynced)
+{
+    return g_enabled && !g_charSelArea && WatchOverlayText(line, size, note, desynced);
+}
+
 void LobbyFlow_DrawOverlay()
 {
     if (!g_enabled) return;
@@ -2908,40 +2974,8 @@ void LobbyFlow_DrawOverlay()
             ImVec2(0.0f, 0.0f), ImGui::GetIO().DisplaySize,
             IM_COL32(0, 0, 0, static_cast<int>(black * 255.0f + 0.5f)));
 
-    // Watching: who is playing (and the set score), with the state of the
-    // feed under it when there is something to say.
-    // F3 hides it, except the out-of-sync warning: the picture is wrong then.
-    const bool overlayShown = g_spectatorOverlay.load(std::memory_order_relaxed);
-    if (g_phase == Phase::InMatch && g_spectating &&
-        (overlayShown || Spectate_GetStatus().desynced)) {
-        char line[sizeof(g_watchLine)];
-        memcpy(line, g_watchLine, sizeof(line));
-        line[sizeof(line) - 1] = '\0';
-        const SpectateStatus status = Spectate_GetStatus();
-        const char* note = status.desynced ? "DESYNCED"
-                         : status.feedLost ? "RECONNECTING..."
-                         : status.catchingUp ? "CATCHING UP..."
-                         : status.waiting ? "WAITING FOR THE MATCH..." : "SPECTATING";
-        const ImVec2 display = ImGui::GetIO().DisplaySize;
-        ImFont* font = ImGui::GetFont();
-        ImDrawList* draw = ImGui::GetBackgroundDrawList();
-        const auto centred = [&](const char* text, float size, float y, ImU32 color) {
-            const ImVec2 extent = font->CalcTextSizeA(size, 100000.0f, 0.0f, text);
-            const ImVec2 at((display.x - extent.x) * 0.5f, y);
-            draw->AddText(font, size, ImVec2(at.x + 2.0f, at.y + 2.0f), IM_COL32(0, 0, 0, 220), text);
-            draw->AddText(font, size, at, color, text);
-        };
-        // (Under the status bar while the players are on the character
-        // select, whose clock has the top centre.)
-        const float top = g_charSelArea ? kSelectScoreY - 0.012f : 0.0f;
-        if (overlayShown)
-            centred(line, display.y * 0.03f, display.y * (top + 0.012f),
-                    IM_COL32(255, 255, 255, 255));
-        if (!g_charSelArea || status.desynced)
-            centred(note, display.y * 0.022f, display.y * (top + 0.047f),
-                    status.desynced ? IM_COL32(255, 110, 90, 255) : IM_COL32(120, 220, 255, 255));
-    }
-
+    // (A spectator's overlay is not drawn here: the battle HUD and the
+    // watched select screen draw it in the game's own font.)
     // Set score during a room match, top centre between the health bars.
     if (g_phase == Phase::InMatch && !g_spectating && g_setFirstTo != 1) {
         char score[48], format[12] = "";
@@ -3723,15 +3757,31 @@ bool LobbyFlow_WantsText()
     return LobbyFlow_IsLobbyVisible() && g_ui && g_ui->TextEntryActive();
 }
 
-void LobbyFlow_ToggleSpectatorOverlay()
+int LobbyFlow_GetSpectatorOverlay()
 {
-    const bool shown = !g_spectatorOverlay.load(std::memory_order_relaxed);
-    g_spectatorOverlay.store(shown, std::memory_order_relaxed);
+    return g_spectatorOverlay.load(std::memory_order_relaxed);
+}
+
+bool LobbyFlow_SetSpectatorOverlay(int level)
+{
+    if (level < 0 || level > 2) return false;
+    g_spectatorOverlay.store(level, std::memory_order_relaxed);
     char path[MAX_PATH] = {};
     LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
-    if (!path[0] || !IniSafe_WriteString("Lobby", "SpectatorOverlay", shown ? "1" : "0", path))
+    const char value[2] = {static_cast<char>('0' + level), '\0'};
+    if (!path[0] || !IniSafe_WriteString("Lobby", "SpectatorOverlayLevel", value, path)) {
         HookLog("LobbyFlow: failed to save the spectator overlay setting\n");
-    HookLog("LobbyFlow: spectator overlay %s\n", shown ? "shown" : "hidden");
+        return false;
+    }
+    return true;
+}
+
+void LobbyFlow_CycleSpectatorOverlay()
+{
+    const int level = (LobbyFlow_GetSpectatorOverlay() + 2) % 3;
+    LobbyFlow_SetSpectatorOverlay(level);
+    HookLog("LobbyFlow: spectator overlay %s\n",
+            level == 2 ? "full" : level == 1 ? "compact" : "none");
 }
 
 SpectatorInfo LobbyFlow_GetSpectatorInfo()

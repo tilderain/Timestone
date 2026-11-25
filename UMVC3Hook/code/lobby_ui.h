@@ -49,6 +49,12 @@ enum class Setting : uint8_t {
     RelayOnly, // Steam connections go through Valve's relays only
     Count
 };
+// Settings with three values: 0 off (none), 1 compact, 2 full.
+enum class Level : uint8_t {
+    NetStats,         // the stats readout of a netplay match
+    SpectatorOverlay, // what is drawn over a match being watched
+    Count
+};
 // Provided by the plugin; the preview tool has a stand-in. The resolutions are
 // the display's modes in its own order; index -1 asks for the one in use.
 struct SettingsSource {
@@ -57,9 +63,8 @@ struct SettingsSource {
     int (*resolutionCount)();
     bool (*resolution)(int index, int* width, int* height);
     bool (*setResolution)(int index); // false when it could not be applied
-    // The stats readout of a netplay match: 0 off, 1 compact, 2 full.
-    int (*netStats)();
-    bool (*setNetStats)(int mode); // false when it could not be applied
+    int (*level)(Level setting);
+    bool (*setLevel)(Level setting, int level); // false when it could not be applied
 };
 
 class LobbyUi {
@@ -163,6 +168,7 @@ private:
     void UpdateResolutionList(const Input& input);
     void DrawResolutionList(Canvas& canvas) const;
     bool SettingOn(Setting setting) const;
+    int SettingLevel(Level setting) const; // 0..2
     bool SettingsRowOpensList() const;
     void UpdateCharPicker(const Input& input);
     void UpdateColorPicker(const Input& input);

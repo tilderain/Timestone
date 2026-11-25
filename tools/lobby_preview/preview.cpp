@@ -411,7 +411,7 @@ const int kFakeModes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1280, 720}, {
                              {2560, 1440}, {3840, 2160}};
 int g_fakeMode = 8;
 bool g_fakeSwitches[static_cast<int>(Setting::Count)] = {};
-int g_fakeNetStats = 1;
+int g_fakeLevels[static_cast<int>(Level::Count)] = {1, 2};
 const SettingsSource kFakeSettings = {
     [](Setting setting) { return g_fakeSwitches[static_cast<int>(setting)]; },
     [](Setting setting, bool on) { g_fakeSwitches[static_cast<int>(setting)] = on; return true; },
@@ -424,8 +424,8 @@ const SettingsSource kFakeSettings = {
         return true;
     },
     [](int index) { g_fakeMode = index; return true; },
-    []() { return g_fakeNetStats; },
-    [](int mode) { g_fakeNetStats = mode; return true; },
+    [](Level setting) { return g_fakeLevels[static_cast<int>(setting)]; },
+    [](Level setting, int level) { g_fakeLevels[static_cast<int>(setting)] = level; return true; },
 };
 
 UiPrefs DefaultPrefs()
@@ -793,6 +793,15 @@ int main(int argc, char** argv)
         ui.Update(Press(&Input::left));
         Settle(ui, 2);
         ok &= Capture(ui, directory, "settings_net_stats_off");
+        ui.Update(Press(&Input::down)); // SPECTATOR OVERLAY, with its preview
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_spectator_full");
+        ui.Update(Press(&Input::right));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_spectator_compact");
+        ui.Update(Press(&Input::right));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_spectator_none");
     }
     {   // Team setup.
         FakeService service;

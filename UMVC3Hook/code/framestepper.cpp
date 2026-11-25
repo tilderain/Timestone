@@ -1899,9 +1899,9 @@ void FrameStepper_Process()
     // sides can adjust them mid-match. A spectator has no settings to adjust.
     if (Spectate_IsViewing())
     {
-        // F3 is the HUD key for players; watching, it hides the overlay.
+        // F3 is the HUD key for players; watching, it steps the overlay down.
         if (KeyPressed(VK_F3))
-            LobbyFlow_ToggleSpectatorOverlay();
+            LobbyFlow_CycleSpectatorOverlay();
     }
     if (Netplay_IsActive() && !Spectate_IsViewing())
     {

@@ -295,6 +295,7 @@ left, right or confirm and applied at once:
 | VSYNC | `[Display] VSYNC_` | `D3D9Reset_SetVsync` |
 | STEAM ROUTING | `[Network] SteamRelayOnly` | read at the next connection (`ConnectionOptions`) |
 | NETWORK STATS | `[FrameStepper] StatusHudMode` (0 off, 1 compact, 2 full) | `FrameStepper_SetStatusHudMode` |
+| SPECTATOR OVERLAY | `[Lobby] SpectatorOverlayLevel` (0 none, 1 compact, 2 full) | `LobbyFlow_SetSpectatorOverlay` |
 
 NETWORK STATS is the match's ping / delay / rollback readout, FULL, COMPACT
 or OFF, the same value F3 cycles in a match. Unset, it is COMPACT (it was
@@ -302,8 +303,66 @@ FULL before 2026-11-25); an ini that already holds a value keeps it. While
 the cursor is on the row, a mock-up of the readout for the value shown is
 drawn in the screen's top-left corner, where a match has it, in place of
 the SETTINGS title (`DrawNetStatsPreview`, made-up numbers, the host's
-yellow; OFF draws nothing and the title stays). Its lines are a copy of what `FrameStepper_Draw` prints, so a change
+yellow; OFF draws nothing). Its lines are a copy of what `FrameStepper_Draw` prints, so a change
 there needs the same change here.
+
+SPECTATOR OVERLAY is what is drawn over a match being watched, the value F3
+steps down while watching. FULL: the set score at the top
+centre with the feed's state under it (SPECTATING when all is well), and
+the two name plates under the life bars. COMPACT: the name plates, and the
+feed's state only when it is reconnecting or waiting for the match (not
+while catching up).
+NONE: nothing, the name plates hidden too (`hkBtScoreUpdate`). The
+out-of-sync warning is drawn at every value. Unset, it is FULL, or NONE if
+the on/off it replaced (`[Lobby] SpectatorOverlay`) was off. The row has a
+preview like NETWORK STATS's (`DrawSpectatorPreview`). The name plates are
+the game's own text units, `Font_UserName_1P` / `_2P` of
+`ui\game\ga_sprite\ga_pos05` (in `game.arc`; `uBtScore`'s layout), and the
+preview draws them from that layout's values:
+
+| | 1P | 2P |
+|---|---|---|
+| `mPos`, `mCenterAttr` | (218, 146), 3 (middle-left) | (1060, 146), 5 (middle-right) |
+| `mScale`, `fontType` | (0.85, 0.9), 0 (body) | same |
+| `mColor` -> `mColor1` | (1, 1, 0.2) -> (1, 0.494, 0) | (0.937, 0.392, 1) -> (0.8, 0, 1) |
+| `mShadowColor`, `mShadowPos` | (0.2, 0.094, 0, 0.749), (2, 2) | (0.094, 0, 0.2, 0.749), (2, 2) |
+
+A text unit's size on screen goes with `mScale` squared and a single line
+hangs from its anchor, so the preview draws them at 0.7225 by 0.81 of the
+32 px cell with the top at y 146. The canvas has one colour per text, so
+the preview uses `mColor` without the shading to `mColor1`. On both rows the SETTINGS title is not drawn, at
+any value.
+
+In a battle the top-centre text is drawn by the battle HUD itself, as the
+preview has it (body font, centred, the score at size 0.68 with its
+middle at y 20, the feed's state at 0.5 and y 41, cyan, red for DESYNCED):
+`hkBtScoreUpdate` puts the two lines on `Font_Press_1P` (`uBtScore+0xC0`) and
+`Font_Press_2P` (`+0xE8`), text units of `ga_pos05` that a netplay battle
+never shows (`uBtScore__updatePlayerNamesAndScore` hides all eleven of its
+units at the top of every update). Their gradient attribute is cleared for a
+single colour, and so is their shadow attribute: the two lines have no
+shadow, in a match or in the preview (`mShadowPos` is `+0x380` and
+`mShadowColor` `+0x390`, should one be wanted; the layout's is dark blue at
+(2, 3)). Built 2026-11-25, not run
+in game; to check there:
+
+- the layout writes its units' tracks while its frame advances (the 30-frame
+  fade-in). Nothing is put on the two units until the name plate's alpha is
+  full; if the scheduler keeps re-applying tracks after that, the text would
+  sit at the units' own places (255, 13 and 844, 12) in their pale blue;
+- a stalled feed freezes the whole frame, HUD included, for the first 1.5 s;
+  after that the waiting notice pauses the battle natively and the frame
+  runs again, so RECONNECTING and WAITING appear then.
+
+On a watched character select the same two lines (`WatchOverlayText`) are
+drawn with the lobby's canvas in `FeedWatchedSelect`, under the screen's
+status bar (y 691; the state line only when out of sync). There is no ImGui
+drawing of them any more, so nothing of the overlay is shown where neither
+a battle HUD nor the canvas is up: a spectator's loading screen and the
+result screen.
+
+Both are a `Level` (`lobby_ui.h`): three values through
+`SettingsSource::level` / `setLevel`.
 
 The screen's code is `lobby_ui_settings.cpp`; what it shares with the other
 screens in `lobby_ui.cpp` (palette, selection animation, `Painter`) is in

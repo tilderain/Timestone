@@ -70,9 +70,15 @@ struct SpectatorInfo {
     Person queue[kMax];
 };
 SpectatorInfo LobbyFlow_GetSpectatorInfo();
-// Shows or hides the spectator's overlay (who is playing, feed state) and
-// saves the choice. Game thread.
-void LobbyFlow_ToggleSpectatorOverlay();
+// What is drawn over a match being watched: 2 full (the set
+// score, the feed's state under it, the name plates under the life bars),
+// 1 compact (the name plates, and the feed's state when it is lost or waiting),
+// 0 none (only the out-of-sync warning). Any thread.
+int LobbyFlow_GetSpectatorOverlay();
+// Sets it and saves the choice; false if it could not be saved.
+bool LobbyFlow_SetSpectatorOverlay(int level);
+// Full, compact, none, full... (F3 while watching). Game thread.
+void LobbyFlow_CycleSpectatorOverlay();
 
 // True from match launch until the player is back in the lobby.
 bool LobbyFlow_InRoomMatch();
@@ -100,6 +106,12 @@ bool LobbyFlow_IsSpectating();
 bool LobbyFlow_PlayerInCharSelect();
 // The two players of the match being watched, player 1 first.
 bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2);
+// The spectator overlay's top-centre text for the battle HUD to draw, at the
+// level chosen: `line` (the set score; empty when not
+// shown) and `note` (the feed's state; null when not shown). False when
+// there is neither. Game thread.
+bool LobbyFlow_GetSpectatorOverlayText(char* line, size_t size, const char** note,
+                                       bool* desynced);
 
 // ImGui fallback drawn from the overlay pass: tells the player the lobby is
 // still starting, or that the native UI could not be brought up.
