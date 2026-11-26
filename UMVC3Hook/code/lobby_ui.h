@@ -254,6 +254,10 @@ private:
     int topCursor_ = 0;
     int browseCursor_ = 0;
     int browseScroll_ = 0;
+    // The lobby we are in, and after leaving it the one the list's cursor
+    // goes to once the search for the list has come back (0: none).
+    uint64_t roomId_ = 0;
+    uint64_t browseSeekId_ = 0;
     int createCursor_ = 0;
     int seatSlot_ = 0;
     int seatSide_ = 0;

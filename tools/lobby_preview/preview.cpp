@@ -727,6 +727,29 @@ int main(int argc, char** argv)
         Settle(ui, 2);
         ok &= Capture(ui, directory, "browse");
     }
+    {   // Back from a lobby: the list's cursor is on the lobby that was left.
+        FakeService service;
+        service.results = {
+            MakeResult(11, "Friday Night Marvel", "Vevota", 6, 8, 34, true, true),
+            MakeResult(12, "Beginners welcome", "ArcherOfLegend", 2, 4, 72),
+            MakeResult(13, "Room to grow", "Jasongamedev", 5, 16, 118),
+            MakeResult(14, "EU evening casuals", "Brian_NY", 3, 8, 164),
+            MakeResult(15, "West coast", "Sheep", 7, 8, 210),
+            MakeResult(16, "Tournament practice", "Ryn", 4, 6, 90),
+        };
+        LobbyUi ui(service, kRoster, DefaultPrefs());
+        Settle(ui);
+        ui.Update(Press(&Input::confirm));
+        Settle(ui);
+        service.Create(DefaultPrefs().create);
+        service.room.id = 15;
+        Settle(ui);
+        service.Leave();
+        Settle(ui);
+        ui.Update(Press(&Input::confirm)); // the "lobby has been closed" notice
+        Settle(ui);
+        ok &= Capture(ui, directory, "browse_after_leave");
+    }
     {   // Empty browser.
         FakeService service;
         LobbyUi ui(service, kRoster, DefaultPrefs());

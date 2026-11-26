@@ -465,8 +465,15 @@ void LobbyUi::SyncWithService()
             // Back to the lobby list, freshly searched, ready to pick another.
             // An accepted invite is already moving us on: leave that alone.
             if (service_.Busy() == RoomBusy::None) {
+                // With the cursor on the lobby just left: at once, in the
+                // list as it was, and again when the search has come back,
+                // in case the lobby has moved in the list or was not in it.
                 browseCursor_ = 0;
                 browseScroll_ = 0;
+                browseSeekId_ = roomId_;
+                for (int i = 0; i < service_.ResultCount(); ++i)
+                    if (service_.Result(i).id == roomId_) browseCursor_ = i;
+                if (browseCursor_ >= kBrowseRows) browseScroll_ = browseCursor_ - kBrowseRows + 1;
                 service_.Search();
                 GoTo(Screen::Browse);
             } else {
@@ -480,6 +487,7 @@ void LobbyUi::SyncWithService()
         leftByChoice_ = false;
     }
     wasInRoom_ = inRoom;
+    if (inRoom) roomId_ = service_.Room().id;
 
     if (inRoom) {
         const int slots = service_.Room().settings.slotCount;
@@ -644,6 +652,7 @@ void LobbyUi::UpdateTop(const Input& input)
     switch (topCursor_) {
     case TOP_SEARCH:
         browseCursor_ = 0;
+        browseSeekId_ = 0;
         browseScroll_ = 0;
         service_.Search();
         GoTo(Screen::Browse);
@@ -674,6 +683,17 @@ void LobbyUi::UpdateTop(const Input& input)
 void LobbyUi::UpdateBrowse(const Input& input)
 {
     const int count = service_.ResultCount();
+    // Back from a lobby: once its search is in, the cursor goes to that
+    // lobby. Moving the cursor first, or the lobby being gone, drops it.
+    if (browseSeekId_) {
+        if (input.up || input.down) {
+            browseSeekId_ = 0;
+        } else if (service_.Busy() != RoomBusy::Searching) {
+            for (int i = 0; i < count; ++i)
+                if (service_.Result(i).id == browseSeekId_) browseCursor_ = i;
+            browseSeekId_ = 0;
+        }
+    }
     if (browseCursor_ >= count) browseCursor_ = count > 0 ? count - 1 : 0;
     MoveCursor(browseCursor_, count, input, false);
     if (browseCursor_ < browseScroll_) browseScroll_ = browseCursor_;
