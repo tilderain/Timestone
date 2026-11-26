@@ -295,7 +295,10 @@ $(OUTPUT): $(ALL_OBJ)
 INSTALL_RC  := $(BUILDDIR)/TimestoneInstall.rc
 INSTALL_RES := $(BUILDDIR)/TimestoneInstall.res.o
 INSTALL_SRC := tools/timestone_install.cpp $(SRCDIR)/code/space_bg.cpp
-INSTALL_DEPS := tools/install_ui.h $(SRCDIR)/code/space_bg.h $(SRCDIR)/code/lobby_canvas.h
+INSTALL_DEPS := tools/install_ui.h tools/install_text.h $(SRCDIR)/imgui/imstb_truetype.h \
+	$(SRCDIR)/code/space_bg.h $(SRCDIR)/code/lobby_canvas.h
+# The installers' own font: Medium for the text, Bold for titles and buttons.
+INSTALL_FONTS := $(SRCDIR)/assets/BaiJamjuree-Medium.ttf $(SRCDIR)/assets/BaiJamjuree-Bold.ttf
 
 $(INSTALL_RC): Makefile
 	@mkdir -p $(@D)
@@ -328,19 +331,21 @@ $(INSTALL_RC): Makefile
 		'END' \
 		'' \
 		'1 24 "tools/TimestoneInstall.manifest"' \
-		'SPACE_STARS RCDATA "UMVC3Hook/assets/space_stars_512.dxt1"' > $@
+		'SPACE_STARS RCDATA "UMVC3Hook/assets/space_stars_512.dxt1"' \
+		'FONT_BODY RCDATA "UMVC3Hook/assets/BaiJamjuree-Medium.ttf"' \
+		'FONT_TITLE RCDATA "UMVC3Hook/assets/BaiJamjuree-Bold.ttf"' > $@
 
-$(INSTALL_RES): $(INSTALL_RC) tools/TimestoneInstall.manifest $(SRCDIR)/assets/space_stars_512.dxt1
+$(INSTALL_RES): $(INSTALL_RC) tools/TimestoneInstall.manifest $(SRCDIR)/assets/space_stars_512.dxt1 $(INSTALL_FONTS)
 	$(WINDRES) -O coff -i $< -o $@
 
 $(UPDATER_OUTPUT): $(INSTALL_SRC) $(INSTALL_DEPS) $(INSTALL_RES) Makefile
 	$(CXX) -O2 -fno-declone-ctor-dtor -flto -ffunction-sections -fdata-sections -std=c++20 \
-		-Wall -Wextra \
+		-Wall -Wextra -Wno-unused-function \
 		-DWIN32_LEAN_AND_MEAN -DNOMINMAX -DUNICODE -D_UNICODE \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \
 		-D_GLIBCXX_USE_CXX11_ABI=0 \
-		-Itools -I$(SRCDIR)/code \
+		-Itools -I$(SRCDIR)/code -I$(SRCDIR)/imgui \
 		-static -mwindows \
 		-Wl,--gc-sections -Wl,-s -o $@ $(INSTALL_SRC) $(INSTALL_RES) \
 		-lwinhttp -lbcrypt -lgdi32 -lshell32 -lversion -lole32 -ladvapi32
@@ -356,8 +361,8 @@ INSTALL_LINUX_SRC := tools/timestone_install_linux.cpp $(SRCDIR)/code/space_bg.c
 INSTALL_LINUX_LIBS ?= -lX11 -lxcb -lXau -lXdmcp
 INSTALL_SCRIPT := TimestoneInstall.sh
 
-$(INSTALL_LINUX): $(INSTALL_LINUX_SRC) $(INSTALL_DEPS) $(SRCDIR)/imgui/imstb_truetype.h \
-		$(SRCDIR)/assets/space_stars_512.dxt1 Makefile
+$(INSTALL_LINUX): $(INSTALL_LINUX_SRC) $(INSTALL_DEPS) \
+		$(SRCDIR)/assets/space_stars_512.dxt1 $(INSTALL_FONTS) Makefile
 	@mkdir -p $(@D)
 	$(HOST_CXX) -O2 -std=c++20 -Wall -Wextra -Wno-unused-function -static \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \

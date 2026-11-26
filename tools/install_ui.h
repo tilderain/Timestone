@@ -10,7 +10,8 @@
 // backdrop, which is the plugin's own code (space_bg.cpp) and its one shipped
 // picture (UMVC3Hook/assets, CC0). The game's panel and font textures cannot
 // be shipped, so the panel, bar and buttons are drawn here as plain shapes
-// and the text comes from a system font.
+// and the text is in Bai Jamjuree (UMVC3Hook/assets, SIL Open Font License),
+// which both installers carry.
 
 #include "space_bg.h"
 

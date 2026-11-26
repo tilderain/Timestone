@@ -13,6 +13,14 @@ recoloured towards dark blue and purple, brightened, and scaled down from
 1024x1024. The
 image tiles seamlessly in both directions.
 
+`BaiJamjuree-Medium.ttf` and `BaiJamjuree-Bold.ttf` are the installers' font
+(`tools/timestone_install.cpp`, `tools/timestone_install_linux.cpp`): Medium
+for the text, Bold for titles and buttons. Both programs carry the files
+whole. Bai Jamjuree is by Cadson Demak, from
+https://github.com/google/fonts/tree/main/ofl/baijamjuree, unmodified, under
+the SIL Open Font License 1.1 (text in `THIRDPARTYNOTICES`). It covers Latin
+and Thai; other characters fall back to a system font.
+
 Nothing here comes from the game.
 
 ## Rebuilding the star tile
