@@ -26,7 +26,7 @@ GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
 GIT_HEAD_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
 # Git maintenance can move loose branch refs into packed-refs.
 GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(wildcard $(GIT_DIR)/HEAD $(GIT_DIR)/packed-refs $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF))))
-VERSION    := 0.6.8
+VERSION    := 0.6.9
 VERSION_RC := $(shell printf '%s.0' '$(VERSION)' | tr . ,)
 
 SRCDIR    := UMVC3Hook
@@ -72,6 +72,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/d3d9reset.cpp \
 	$(SRCDIR)/code/shader_constants.cpp \
 	$(SRCDIR)/code/d3d9ex.cpp \
+	$(SRCDIR)/code/environment_log.cpp \
 	$(SRCDIR)/code/frame_pacing.cpp \
 	$(SRCDIR)/code/framestepper.cpp \
 	$(SRCDIR)/code/dtieditor.cpp \
@@ -114,6 +115,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/space_bg.cpp \
 	$(SRCDIR)/code/chr_colors.cpp \
 	$(SRCDIR)/code/lobby_ui.cpp \
+	$(SRCDIR)/code/lobby_ui_settings.cpp \
 	$(SRCDIR)/code/lobby_native.cpp \
 	$(SRCDIR)/code/lobby_ime.cpp \
 	$(SRCDIR)/code/lobby_room.cpp \
@@ -310,7 +312,10 @@ $(OUTPUT): $(ALL_OBJ)
 INSTALL_RC  := $(BUILDDIR)/TimestoneInstall.rc
 INSTALL_RES := $(BUILDDIR)/TimestoneInstall.res.o
 INSTALL_SRC := tools/timestone_install.cpp $(SRCDIR)/code/space_bg.cpp
-INSTALL_DEPS := tools/install_ui.h $(SRCDIR)/code/space_bg.h $(SRCDIR)/code/lobby_canvas.h
+INSTALL_DEPS := tools/install_ui.h tools/install_text.h $(SRCDIR)/imgui/imstb_truetype.h \
+	$(SRCDIR)/code/space_bg.h $(SRCDIR)/code/lobby_canvas.h
+# The installers' own font: Medium for the text, Bold for titles and buttons.
+INSTALL_FONTS := $(SRCDIR)/assets/BaiJamjuree-Medium.ttf $(SRCDIR)/assets/BaiJamjuree-Bold.ttf
 
 $(INSTALL_RC): Makefile
 	@mkdir -p $(@D)
@@ -343,19 +348,21 @@ $(INSTALL_RC): Makefile
 		'END' \
 		'' \
 		'1 24 "tools/TimestoneInstall.manifest"' \
-		'SPACE_STARS RCDATA "UMVC3Hook/assets/space_stars_512.dxt1"' > $@
+		'SPACE_STARS RCDATA "UMVC3Hook/assets/space_stars_512.dxt1"' \
+		'FONT_BODY RCDATA "UMVC3Hook/assets/BaiJamjuree-Medium.ttf"' \
+		'FONT_TITLE RCDATA "UMVC3Hook/assets/BaiJamjuree-Bold.ttf"' > $@
 
-$(INSTALL_RES): $(INSTALL_RC) tools/TimestoneInstall.manifest $(SRCDIR)/assets/space_stars_512.dxt1
+$(INSTALL_RES): $(INSTALL_RC) tools/TimestoneInstall.manifest $(SRCDIR)/assets/space_stars_512.dxt1 $(INSTALL_FONTS)
 	$(WINDRES) -O coff -i $< -o $@
 
 $(UPDATER_OUTPUT): $(INSTALL_SRC) $(INSTALL_DEPS) $(INSTALL_RES) Makefile
 	$(CXX) -O2 -fno-declone-ctor-dtor -flto -ffunction-sections -fdata-sections -std=c++20 \
-		-Wall -Wextra \
+		-Wall -Wextra -Wno-unused-function \
 		-DWIN32_LEAN_AND_MEAN -DNOMINMAX -DUNICODE -D_UNICODE \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \
 		-D_GLIBCXX_USE_CXX11_ABI=0 \
-		-Itools -I$(SRCDIR)/code \
+		-Itools -I$(SRCDIR)/code -I$(SRCDIR)/imgui \
 		-static -mwindows \
 		-Wl,--gc-sections -Wl,-s -o $@ $(INSTALL_SRC) $(INSTALL_RES) \
 		-lwinhttp -lbcrypt -lgdi32 -lshell32 -lversion -lole32 -ladvapi32
@@ -371,8 +378,8 @@ INSTALL_LINUX_SRC := tools/timestone_install_linux.cpp $(SRCDIR)/code/space_bg.c
 INSTALL_LINUX_LIBS ?= -lX11 -lxcb -lXau -lXdmcp
 INSTALL_SCRIPT := TimestoneInstall.sh
 
-$(INSTALL_LINUX): $(INSTALL_LINUX_SRC) $(INSTALL_DEPS) $(SRCDIR)/imgui/imstb_truetype.h \
-		$(SRCDIR)/assets/space_stars_512.dxt1 Makefile
+$(INSTALL_LINUX): $(INSTALL_LINUX_SRC) $(INSTALL_DEPS) \
+		$(SRCDIR)/assets/space_stars_512.dxt1 $(INSTALL_FONTS) Makefile
 	@mkdir -p $(@D)
 	$(HOST_CXX) -O2 -std=c++20 -Wall -Wextra -Wno-unused-function -static \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \
@@ -384,8 +391,9 @@ $(INSTALL_SCRIPT): tools/timestone_install_stub.sh $(INSTALL_LINUX)
 	mv $@.tmp $@
 	@echo "=== Built: $(INSTALL_SCRIPT) ==="
 
-# The notices ship under a Timestone- name so they are identifiable once
-# extracted into the game folder.
+# The notices ship under a Timestone- name so they are identifiable beside
+# whatever else the package is unpacked next to. The installers leave them,
+# and the installer itself, out of the game folder.
 $(PACKAGE_NOTICES): THIRDPARTYNOTICES
 	@mkdir -p $(dir $@)
 	cp $< $@

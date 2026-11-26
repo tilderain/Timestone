@@ -514,12 +514,15 @@ static int32_t GetGameFrameCount()
     return *(int32_t*)(sReplay + 0x54) - g_gameFrameBase;
 }
 
+static void LogGameNetSummary();
+
 extern "C" void Controller_ResetFrameEpoch()
 {
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
     // Reset both native cursors at the battle barrier so frame labels match.
     if (sReplay)
         *(int32_t*)(sReplay + 0x54) = 0;
+    LogGameNetSummary();
     g_gameFrameBase = 0;
     g_netFrameCount = 0;
     g_fightFrameBase = -1;
@@ -632,8 +635,65 @@ static int32_t  g_rollbackStatDepth[ROLLBACK_STAT_SIZE] = {};
 static uint32_t g_rollbackStatHead = 0;
 static std::atomic<float> g_averageRollbackFrames{0.0f};
 
+// One game's netcode in numbers, for the line written when it ends. Game
+// thread only; a few integer additions per rollback or input wait.
+static struct GameNetStats {
+    uint32_t frames;            // played under netplay
+    uint32_t rollbacks, resimulatedFrames, deepest, atLimit;
+    uint32_t waits, longWaits;  // the game held for the opponent's input
+    int64_t waitQpc, longestWaitQpc;
+    int32_t lowestDelay = INT32_MAX, highestDelay = INT32_MIN;
+} g_gameNetStats;
+
+// A delay the running game was played at: both sides of a change made
+// during it, and the one it ended on.
+static void NoteGameDelay(int32_t delay)
+{
+    GameNetStats& s = g_gameNetStats;
+    if (delay < s.lowestDelay) s.lowestDelay = delay;
+    if (delay > s.highestDelay) s.highestDelay = delay;
+}
+
+static void NoteInputWait(int64_t startQpc)
+{
+    LARGE_INTEGER end;
+    QueryPerformanceCounter(&end);
+    const int64_t waited = end.QuadPart - startQpc;
+    GameNetStats& s = g_gameNetStats;
+    ++s.waits;
+    s.waitQpc += waited;
+    if (waited > s.longestWaitQpc) s.longestWaitQpc = waited;
+    if (waited * 60 > g_qpcFrequency) ++s.longWaits;
+}
+
+// Where every game ends or begins (Controller_ResetFrameEpoch).
+static void LogGameNetSummary()
+{
+    NoteGameDelay(g_delayFrames);
+    const GameNetStats s = g_gameNetStats;
+    g_gameNetStats = GameNetStats{};
+    if (s.frames < 60 || !g_qpcFrequency || Netplay_IsSpectator()) return;
+    const double toMs = 1000.0 / static_cast<double>(g_qpcFrequency);
+    char delay[24];
+    if (s.lowestDelay == s.highestDelay) snprintf(delay, sizeof(delay), "%d", s.highestDelay);
+    else snprintf(delay, sizeof(delay), "%d-%d", s.lowestDelay, s.highestDelay);
+    HookLog("Netplay: game summary: %u frames, delay %s | rollbacks %u (avg %.1f, deepest %u, "
+            "%u at the %d-frame limit, %.1f%% of frames resimulated) | input waits %u "
+            "(%u over a frame, %.0f ms in all, longest %.0f ms)\n",
+            s.frames, delay, s.rollbacks,
+            s.rollbacks ? static_cast<double>(s.resimulatedFrames) / s.rollbacks : 0.0,
+            s.deepest, s.atLimit, g_rollbackFrames,
+            100.0 * s.resimulatedFrames / s.frames, s.waits, s.longWaits,
+            s.waitQpc * toMs, s.longestWaitQpc * toMs);
+}
+
 static void RecordRollbackDepth(int32_t depth)
 {
+    GameNetStats& s = g_gameNetStats;
+    ++s.rollbacks;
+    s.resimulatedFrames += static_cast<uint32_t>(depth);
+    if (static_cast<uint32_t>(depth) > s.deepest) s.deepest = static_cast<uint32_t>(depth);
+    if (depth >= g_rollbackFrames) ++s.atLimit;
     g_rollbackStatTick[g_rollbackStatHead % ROLLBACK_STAT_SIZE] = GetTickCount64();
     g_rollbackStatDepth[g_rollbackStatHead % ROLLBACK_STAT_SIZE] = depth;
     ++g_rollbackStatHead;
@@ -961,6 +1021,7 @@ extern "C" void Controller_SetDelayFrames(int32_t delay)
     if (delay == g_delayFrames)
         return;
 
+    if (g_gameNetStats.frames) NoteGameDelay(g_delayFrames);
     g_delayFrames = delay;
     HookLog("Netplay: delay changed to %d\n", delay);
 }
@@ -1002,6 +1063,7 @@ static void ApplyScheduledDelayIfReady()
         }
     }
 
+    if (g_gameNetStats.frames) NoteGameDelay(g_delayFrames);
     g_delayFrames = newDelay == 0 && g_rollbackFrames == 0 ? 1 : newDelay;
     g_pendingDelayFrames = -1;
     g_pendingDelayEffectiveFrame = -1;
@@ -1043,29 +1105,49 @@ extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
     return true;
 }
 
-// The intro under rollback. Its cameras and cut-in are units a rollback
-// neither restores nor replays, so a snapshot taken in the intro cannot be
-// gone back to once they are gone (crash of 2026-11-24: sCamera::move called
-// through a viewport camera that had become a uBattleUiHit). Nothing in the
-// intro needs a rollback either, given two things:
-//   - the characters are given neutral input through the intro and for
-//     INTRO_QUIET_FRAMES after it, so a mispredicted input there changes
-//     nothing (the skip is read from confirmed frames, see hkStepIntro);
-//   - no replay starts before the end of that stretch
-//     (Controller_FirstRollbackFrame, used where a replay is begun).
-// The quiet frames after the intro are the start of the countdown, where no
-// character can act yet; they are there so the first snapshot gone back to
-// is one taken with the intro's objects already gone.
-static constexpr int32_t INTRO_QUIET_FRAMES = 20;
-
+// The intro under rollback. Its camera (sAction+0x1D8, a uMayaMotionCamera
+// that also takes viewport 0) is a unit a rollback neither restores nor
+// replays. It lives until the game enters the countdown: sAction::move runs
+// sAction__executeMatchPhase(3) at the top of the tick after the intro
+// reports it is over, which kills the camera, clears the pointer and gives
+// the viewport back. A snapshot taken while sAction is still in step 2, that
+// tick's included, holds those pointers and cannot be gone back to (crash of
+// 2026-11-24: sCamera::move called through a viewport camera that had become
+// a uBattleUiHit). Nothing in those ticks needs a rollback either:
+//   - the characters are given neutral input in them, so a mispredicted
+//     input changes nothing (the skip is read from confirmed frames, see
+//     hkStepIntro);
+//   - no replay starts in them (Controller_FirstRollbackFrame, used where a
+//     replay is begun).
+// The tick after the last of them is the countdown's second, with live
+// input: the players can move through "READY... FIGHT" as in the game itself.
+// (Until 2026-11-25 twenty more frames were kept neutral as a margin, which
+// took a third of a second of movement off the start of every game.)
+//
+// The step is read at the top of the tick, before anything in it runs, so
+// the frame noted is the one this tick's snapshot and inputs are filed under.
 static bool IsIntroQuietFrame(int32_t frame)
 {
-    return g_introLastFrame >= 0 && frame <= g_introLastFrame + INTRO_QUIET_FRAMES;
+    return g_introLastFrame >= 0 && frame <= g_introLastFrame;
 }
 
 extern "C" int32_t Controller_FirstRollbackFrame()
 {
-    return g_introLastFrame >= 0 ? g_introLastFrame + INTRO_QUIET_FRAMES + 1 : 0;
+    return g_introLastFrame >= 0 ? g_introLastFrame + 1 : 0;
+}
+
+extern "C" bool FrameStepper_IsBattleSynchronized();
+
+extern "C" void Controller_NoteTickStart(int32_t frame)
+{
+    if (frame < 0 || !Netplay_IsActive() || !FrameStepper_IsBattleSynchronized())
+        return;
+    using GetActionFn = uint64_t(__fastcall*)();
+    static GetActionFn getAction = (GetActionFn)_addr(0x140001A90);
+    const uint64_t action = getAction();
+    // mStep: 2 is the intro, 3 and 4 the countdown, 5 the fight.
+    if (action && *(int32_t*)(action + 0xD8) <= 2)
+        g_introLastFrame = frame;
 }
 
 // A bit of the timeline's input word that no logical action uses: "an attack
@@ -1459,8 +1541,6 @@ static void __fastcall hkStepIntro(uint64_t param_1)
         }
         // The intro plays, and the game's own skip is taken on a face button
         // from either player, read from confirmed frames of the timeline.
-        if (!g_isResimulating)
-            g_introLastFrame = GetGameFrameCount();
         CaptureLocalSkipInput();
         g_padReadOverridden = true;
         g_padReadValue = TimelineSkipPressed() ? SKIP_PAD_BUTTONS : 0;
@@ -1746,6 +1826,8 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
 
     LagDiagnosticScope diagnostic(LagMetric::InputWait);
     const int32_t remoteBefore = g_lastRemoteFrame;
+    LARGE_INTEGER waitStart;
+    QueryPerformanceCounter(&waitStart);
     Rollback_FreezeWatchdogHeartbeat(reason, g_netFrameCount);
     //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
     //        frame, reason, g_netFrameCount, g_lastRemoteFrame);
@@ -1759,6 +1841,7 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
     }
     LagDiagnostics_RecordWait(LagMetric::InputWait, frame, remoteBefore, g_lastRemoteFrame,
                               g_delayFrames, g_rollbackFrames);
+    NoteInputWait(waitStart.QuadPart);
     if (!IsFrameConfirmed(frame) && Netplay_HasInboundRestartMatch()) {
         Rollback_FreezeWatchdogHeartbeat("restart pending", g_netFrameCount);
         HookLog("Netplay: interrupted %s wait for pending match restart at frame %d\n",
@@ -1776,6 +1859,8 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
 {
     LagDiagnosticScope diagnostic(LagMetric::PredictionWait);
     const int32_t remoteBefore = g_lastRemoteFrame;
+    LARGE_INTEGER waitStart;
+    QueryPerformanceCounter(&waitStart);
     SetPredictionBudgetExhausted();
     Rollback_FreezeWatchdogHeartbeat("prediction budget exhausted",
                                      g_netFrameCount);
@@ -1794,6 +1879,7 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
 
     LagDiagnostics_RecordWait(LagMetric::PredictionWait, frame, remoteBefore, g_lastRemoteFrame,
                               g_delayFrames, g_rollbackFrames);
+    NoteInputWait(waitStart.QuadPart);
     if (IsFrameConfirmed(frame)) {
         ClearPredictionBudgetExhausted();
         Rollback_FreezeWatchdogHeartbeat("prediction-budget-wait-complete",
@@ -1818,6 +1904,7 @@ extern "C" void Controller_OnFrameStart()
     g_netFrameCount = GetGameFrameCount();
     // If sReplay isn't ready yet, skip packet processing this frame.
     if (g_netFrameCount < 0) return;
+    ++g_gameNetStats.frames;
 
     // Keep the native replay cursor on the shared frame epoch.
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
@@ -2802,5 +2889,4 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook inputAutoRepeatTimerProcess (%d)\n", s);
 
     AutoTest_InitHooks();
-    HookLog("Controller: Init complete - hooks installed\n");
 }

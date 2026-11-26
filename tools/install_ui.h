@@ -10,7 +10,8 @@
 // backdrop, which is the plugin's own code (space_bg.cpp) and its one shipped
 // picture (UMVC3Hook/assets, CC0). The game's panel and font textures cannot
 // be shipped, so the panel, bar and buttons are drawn here as plain shapes
-// and the text comes from a system font.
+// and the text is in Bai Jamjuree (UMVC3Hook/assets, SIL Open Font License),
+// which both installers carry.
 
 #include "space_bg.h"
 
@@ -129,6 +130,7 @@ public:
     }
 
     void Frame(lobby::Tex, float, float, float, float, lobby::Uv, lobby::Anchor, Color) override {}
+    void SpriteTurned(lobby::Tex, float, float, float, float, lobby::Uv, float, Color) override {}
     void Text(const char*, float, float, float, lobby::Anchor, Color, lobby::Font, float,
               lobby::Blend) override
     {
@@ -539,6 +541,22 @@ inline bool ListStoredZip(const std::vector<unsigned char>& zip, std::vector<Zip
         cursor += recordSize;
     }
     return !files.empty();
+}
+
+// Files of the release that are for whoever unpacks it by hand and are not
+// put into the game folder: the notices and the installer itself. An install
+// also takes out the copies earlier installers left there.
+inline const char* const kPackageOnlyFiles[] = {"Timestone-THIRDPARTYNOTICES",
+                                                "TimestoneInstall.exe"};
+
+inline void DropPackageOnlyFiles(std::vector<ZipFile>& files)
+{
+    for (size_t i = files.size(); i-- > 0;)
+        for (const char* name : kPackageOnlyFiles)
+            if (files[i].name == name) {
+                files.erase(files.begin() + i);
+                break;
+            }
 }
 
 // ---------------------------------------------------------------------------

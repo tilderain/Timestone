@@ -53,6 +53,33 @@ static void FormatPop(uint32_t pop, char out[5])
 
 // Runs on the status poll, twice a second: reads the route and logs when it
 // differs from the one last seen.
+// What a route change cost, written once the new route has had time to show
+// it: Steam's ping is smoothed, so the figure at the change itself is still
+// the old route's. Bridge thread only.
+static constexpr DWORD ROUTE_SETTLE_MS = 10 * 1000;
+static int g_routePolledPing = -1;      // the poll before this one
+static int g_routePingBefore = -1;      // on the route that was left
+static DWORD g_routeChangeTick = 0;     // 0: no report owed
+static float g_routeWorstLossIn = 0.0f, g_routeWorstLossOut = 0.0f;
+static int g_routeWorstPing = 0;
+
+static void ReportSettledRoute(const SteamNetConnectionRealTimeStatus_t& status, int route)
+{
+    if (!g_routeChangeTick) return;
+    const float in = g_steamPacketLoss.load(std::memory_order_relaxed);
+    const float out = g_steamRemotePacketLoss.load(std::memory_order_relaxed);
+    if (in > g_routeWorstLossIn) g_routeWorstLossIn = in;
+    if (out > g_routeWorstLossOut) g_routeWorstLossOut = out;
+    if (status.m_nPing > g_routeWorstPing) g_routeWorstPing = status.m_nPing;
+    if (GetTickCount() - g_routeChangeTick < ROUTE_SETTLE_MS) return;
+    g_routeChangeTick = 0;
+    HookLog("[Netplay] Route settled: %s, %lu s after the change | RTT: %d -> %d ms "
+            "(worst %d) | relay-est=%d ms | worst loss in=%.1f%% out=%.1f%%\n",
+            kRouteNames[route], ROUTE_SETTLE_MS / 1000, g_routePingBefore, status.m_nPing,
+            g_routeWorstPing, g_relayPingEstimate.load(std::memory_order_relaxed),
+            g_routeWorstLossIn, g_routeWorstLossOut);
+}
+
 static void PollRoute(const SteamNetConnectionRealTimeStatus_t& status)
 {
     SteamNetConnectionInfo_t info = {};
@@ -68,7 +95,11 @@ static void PollRoute(const SteamNetConnectionRealTimeStatus_t& status)
     const uint32_t pop = route == kRouteRelaySdr ? info.m_idPOPRelay : 0;
 
     const int previous = g_steamRoute.load(std::memory_order_relaxed);
-    if (route == previous && pop == g_steamRelayPop) return;
+    if (route == previous && pop == g_steamRelayPop) {
+        ReportSettledRoute(status, route);
+        g_routePolledPing = status.m_nPing;
+        return;
+    }
 
     char popText[5], previousPopText[5];
     FormatPop(pop, popText);
@@ -79,12 +110,22 @@ static void PollRoute(const SteamNetConnectionRealTimeStatus_t& status)
                 kRouteNames[route], pop ? " pop=" : "", popText, status.m_nPing,
                 g_relayPingEstimate.load(std::memory_order_relaxed));
     } else {
-        HookLog("[Netplay] Route changed: %s%s%s -> %s%s%s at +%.1f s | RTT: %d ms | "
-                "relay-est=%d ms\n",
+        // A second change inside the window keeps the first one's "before".
+        if (!g_routeChangeTick)
+            g_routePingBefore = g_routePolledPing > 0 ? g_routePolledPing : status.m_nPing;
+        HookLog("[Netplay] Route changed: %s%s%s -> %s%s%s at +%.1f s | RTT before: %d ms | "
+                "relay-est=%d ms | loss in=%.1f%% out=%.1f%%\n",
                 kRouteNames[previous], g_steamRelayPop ? " pop=" : "", previousPopText,
                 kRouteNames[route], pop ? " pop=" : "", popText, seconds,
-                status.m_nPing, g_relayPingEstimate.load(std::memory_order_relaxed));
+                g_routePingBefore, g_relayPingEstimate.load(std::memory_order_relaxed),
+                g_steamPacketLoss.load(std::memory_order_relaxed),
+                g_steamRemotePacketLoss.load(std::memory_order_relaxed));
+        g_routeChangeTick = GetTickCount();
+        if (!g_routeChangeTick) g_routeChangeTick = 1;
+        g_routeWorstLossIn = g_routeWorstLossOut = 0.0f;
+        g_routeWorstPing = 0;
     }
+    g_routePolledPing = status.m_nPing;
     g_steamRelayPop = pop;
     g_steamRoute.store(route, std::memory_order_relaxed);
 }
@@ -300,6 +341,8 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     g_jitterWindowStartTick = GetTickCount();
     g_steamRoute = kRouteUnknown;
     g_steamRelayPop = 0;
+    g_routePolledPing = -1;
+    g_routeChangeTick = 0;
     g_logJitterPeakUsec = -1;
     g_bridgeCreatedTick = GetTickCount();
     g_lastStatusPollTick = g_bridgeCreatedTick - STATUS_POLL_INTERVAL_MS;

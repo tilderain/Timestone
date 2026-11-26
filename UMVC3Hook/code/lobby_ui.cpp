@@ -1,4 +1,5 @@
 #include "lobby_ui.h"
+#include "lobby_ui_internal.h"
 #include "space_bg.h"
 #include "lobby_music.h"
 
@@ -17,79 +18,9 @@ namespace lobby {
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// Palette and shared geometry (1280x720 UI space)
-// ---------------------------------------------------------------------------
-constexpr Color kText = kWhite;
-// The option menu's selection animation, read from the shared sprite
-// animation list (ui\cmn\anm\sprite_base, CAC): animation 8 drives the
-// highlight bar and 9/10 the left/right arrows, all on one 76-frame loop, so
-// they move together. From frame 1 the highlight dims (colour 0xBF -> 0x3F)
-// while the arrows slide 5 px inward, over 50 frames; from frame 51 the
-// highlight brightens again and the arrows slide back, over 25 frames.
-// Easing as uUiAnmSprite__interpolateChannel (0x1402C7B90): mode 5 is
-// 1-(1-u)^2, mode 2 is u^2.
-constexpr uint32_t kSelectLoopFrames = 76;
-constexpr float kSelectArrowTravel = 5.0f;
-inline float EaseOutQuad(float u) { return 1.0f - (1.0f - u) * (1.0f - u); }
-
-// Highlight brightness, 1 = brightest, 0 = dimmest.
-inline float SelectionLevel(uint32_t frame)
-{
-    const uint32_t t = frame % kSelectLoopFrames;
-    if (t < 1u) return 1.0f;
-    if (t < 51u) return 1.0f - EaseOutQuad((t - 1u) / 50.0f);
-    return EaseOutQuad((t - 51u) / 25.0f);
-}
-
-// How far each arrow sits in from its rest position, toward the value.
-inline float SelectionArrowInset(uint32_t frame)
-{
-    const uint32_t t = frame % kSelectLoopFrames;
-    if (t < 1u) return 0.0f;
-    if (t < 51u) return kSelectArrowTravel * EaseOutQuad((t - 1u) / 50.0f);
-    const float u = (t - 51u) / 25.0f;
-    return kSelectArrowTravel * (1.0f - u * u);
-}
-
-// -1..1 form of SelectionLevel for the highlight alpha expressions.
-inline float SelectionWave(uint32_t frame) { return SelectionLevel(frame) * 2.0f - 1.0f; }
-
-// Highlight bar opacity, from `dimmest` up to the native peak colour 0xBF.
-constexpr float kSelectPeak = 0xBF / 255.0f;
-inline float SelectionPulse(uint32_t frame, float dimmest = 0.44f)
-{
-    return dimmest + (kSelectPeak - dimmest) * SelectionLevel(frame);
-}
-
-// Opacity of the top menu's white selection bar: 1.0 down to kMenuBarFadeMin
-// and back, once every kMenuBarFadeFrames frames.
-constexpr float kMenuBarFadeMin = 0.82f;
-constexpr float kMenuBarFadeFrames = 96.0f;
-inline float MenuBarFade(uint32_t frame)
-{
-    const float phase = std::cos(frame * (6.2831853f / kMenuBarFadeFrames));
-    return kMenuBarFadeMin + (1.0f - kMenuBarFadeMin) * (0.5f + 0.5f * phase);
-}
-
-constexpr Color kDim = Rgb(0xBAC4D2);
-constexpr Color kFaint = Rgb(0x7E8A9A);
-constexpr Color kYellow = Rgb(0xFFD63A);
-constexpr Color kCyan = Rgb(0x5CE4FF);
-constexpr Color kRed = Rgb(0xFF5A4C);
-constexpr Color kGreen = Rgb(0x86F25E);
-constexpr Color kPurple = Rgb(0xC79BFF); // the host changed the lobby's settings
-
-constexpr float kScreenW = 1280.0f;
-constexpr float kScreenH = 720.0f;
-constexpr float kSafeLeft = 56.0f;
-constexpr float kSafeRight = 1224.0f;
-constexpr float kFooterY = 664.0f;
-
 constexpr int kBrowseRows = 7;
 constexpr int kChatRows = 5;
 constexpr int kChatExpandFrames = 12; // the chat panel's slide open or shut
-constexpr uint32_t kTransitionFrames = 9;
 // The room's backdrop fades in over the title art, and out faster on leaving.
 constexpr uint32_t kRoomBackdropFrames = 90;
 
@@ -97,25 +28,34 @@ constexpr uint32_t kRoomBackdropFrames = 90;
 struct GlyphCell { uint8_t col, row; };
 // BTN_QUICK_CHAT is RB on a pad and X on the keyboard.
 enum Button : uint8_t {
-    BTN_CONFIRM, BTN_CANCEL, BTN_X, BTN_Y, BTN_MENU, BTN_DPAD, BTN_QUICK_CHAT, BTN_COUNT
+    BTN_CONFIRM, BTN_CANCEL, BTN_X, BTN_Y, BTN_MENU, BTN_DPAD, BTN_QUICK_CHAT, BTN_SPECTATE,
+    BTN_COUNT
 };
-constexpr GlyphCell kPadGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 2}};
+// BTN_SPECTATE is X on a pad and right Ctrl on the keyboard, where X is the
+// quick chat. The game's key sheet (mai_hlp04) has caps for the arrows, both
+// Alts, Ctrls and Shifts, Backspace, Enter, X, Y, Tab and Esc only, so the
+// key is one of those.
+constexpr GlyphCell kPadGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 2},
+                                             {2, 1}};
 // The game's fixed keyboard menu mapping: Enter, Backspace, X, Y, Esc (Start).
-constexpr GlyphCell kKeyGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 1}};
+constexpr GlyphCell kKeyGlyphs[BTN_COUNT] = {{1, 1}, {0, 1}, {2, 1}, {3, 1}, {1, 3}, {0, 0}, {2, 1},
+                                             {2, 2}};
 
 struct Prompt {
     Button button;
     const char* label;
 };
 
-const char* const kTopItems[] = {"SEARCH LOBBY", "CREATE LOBBY", "TEAM SETUP", "MAIN MENU"};
+enum TopItem { TOP_SEARCH, TOP_CREATE, TOP_TEAM, TOP_SETTINGS, TOP_MAIN_MENU, kTopCount };
+const char* const kTopItems[kTopCount] = {"SEARCH LOBBY", "CREATE LOBBY", "TEAM SETUP", "SETTINGS",
+                                          "MAIN MENU"};
 const char* const kTopHelp[] = {
     "Search for a lobby and join the players inside.",
     "Set your conditions and create a lobby.",
     "Choose the team you bring to a match and how you enter battle.",
+    "Change the display, connection and music settings.",
     "Leave the lobby and return to the game's main menu.",
 };
-constexpr int kTopCount = 4;
 const char kDiscordSetupQuestion[] =
     "Show what you are doing in Timestone on your Discord status?\n"
     "Change it any time in Settings (F3 / Esc menu)\n"
@@ -125,12 +65,11 @@ const char* const kSlotMenuItems[] = {"JOIN QUEUE & SPECTATE", "JOIN QUEUE", "SP
 constexpr int kSlotMenuCount = 3;
 // The lobby menu, in order. LOBBY SETTINGS is the host's alone.
 enum RoomMenuAction {
-    ROOM_MENU_TEAM, ROOM_MENU_MUSIC, ROOM_MENU_SETTINGS, ROOM_MENU_INVITE, ROOM_MENU_LINK,
-    ROOM_MENU_LEAVE, ROOM_MENU_ACTIONS
+    ROOM_MENU_LINK, ROOM_MENU_TEAM, ROOM_MENU_MUSIC, ROOM_MENU_SETTINGS, ROOM_MENU_INVITE,
+    ROOM_MENU_ACTIONS
 };
 const char* const kRoomMenuItems[ROOM_MENU_ACTIONS] = {
-    "TEAM SETUP", "LOBBY MUSIC", "LOBBY SETTINGS", "INVITE FRIENDS", "COPY LOBBY LINK",
-    "LEAVE LOBBY"};
+    "COPY LOBBY LINK", "TEAM SETUP", "LOBBY MUSIC", "LOBBY SETTINGS", "INVITE FRIENDS"};
 constexpr int kMusicRows = 9; // tracks visible at once in the music picker
 constexpr int kCharGridColumns = 10; // faces across in the team screen's character grid
 constexpr int kColorGridColumns = 8; // faces across in the team screen's color grid
@@ -192,9 +131,6 @@ constexpr uint32_t kReadyUpInputHold = 45;
 constexpr uint32_t kEntryTimeout = 30 * 60;
 constexpr uint32_t kTeamTimeout = 40 * 60;
 
-float Clamp01(float value) { return value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value; }
-float EaseOut(float t) { t = 1.0f - Clamp01(t); return 1.0f - t * t * t; }
-
 int PingLevel(int pingMs)
 {
     if (pingMs < 0) return 0;
@@ -204,88 +140,6 @@ int PingLevel(int pingMs)
     if (pingMs < 360) return 2;
     return 1;
 }
-
-// Applies the screen transition (fade + slide) to everything drawn through it.
-class Painter {
-public:
-    Painter(Canvas& canvas, float alpha, float dx) : canvas_(canvas), alpha_(alpha), dx_(dx) {}
-
-    Painter Fixed() const { return Painter(canvas_, 1.0f, 0.0f); }
-    Painter Faded(float alpha) const { return Painter(canvas_, alpha_ * alpha, dx_); }
-
-    void Sprite(Tex tex, float x, float y, float w, float h, Uv uv, Anchor anchor,
-                Color color = kWhite) const
-    {
-        canvas_.Sprite(tex, x + dx_, y, w, h, uv, anchor, WithAlpha(color, alpha_));
-    }
-
-    void Fill(float x, float y, float w, float h, Color color) const
-    {
-        canvas_.Sprite(TEX_WHITE, x + dx_, y, w, h, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
-                       WithAlpha(color, alpha_));
-    }
-
-    void Line(float x0, float y0, float x1, float y1, float width, Color color) const
-    {
-        canvas_.Line(x0 + dx_, y0, x1 + dx_, y1, width, WithAlpha(color, alpha_));
-    }
-
-    // 9-slice frame described by the rectangle its visible art should cover
-    // (top-left origin). The frame's transparent margin is added around it.
-    void Box(Tex tex, float x, float y, float w, float h, Color color = kWhite) const
-    {
-        const FrameStyle& style = GetFrameStyle(tex);
-        const float totalW = w + style.insetLeft + style.insetRight;
-        const float totalH = h + style.insetTop + style.insetBottom;
-        float innerW = totalW - 2.0f * FrameBorderX(tex, style.uv);
-        float innerH = totalH - 2.0f * FrameBorderY(tex, style.uv);
-        if (innerW < 0.0f) innerW = 0.0f;
-        if (innerH < 0.0f) innerH = 0.0f;
-        canvas_.Frame(tex, x - style.insetLeft + dx_, y - style.insetTop, innerW, innerH,
-                      style.uv, A_TL, WithAlpha(color, alpha_));
-    }
-
-    void Text(const char* text, float x, float y, float scale, Anchor anchor,
-              Color color = kText, Font font = FONT_BODY, float stretch = 1.0f,
-              Blend blend = BLEND_NORMAL) const
-    {
-        if (!text || !text[0]) return;
-        canvas_.Text(text, x + dx_, y, scale, anchor, WithAlpha(color, alpha_), font, stretch,
-                     blend);
-    }
-
-    void TextFit(const char* text, float x, float y, float scale, float maxWidth,
-                 Anchor anchor, Color color = kText, Font font = FONT_BODY) const
-    {
-        char fitted[192];
-        FitText(fitted, sizeof(fitted), text, maxWidth, scale, font);
-        Text(fitted, x, y, scale, anchor, color, font);
-    }
-
-    // Like TextFit, but the whole text is always shown: it is drawn smaller
-    // until it fits maxWidth, never cut. Returns the scale used.
-    float TextShrink(const char* text, float x, float y, float scale, float maxWidth,
-                     Anchor anchor, Color color = kText, Font font = FONT_BODY) const
-    {
-        const float width = TextWidth(text, font) * scale;
-        if (width > maxWidth && width > 0.0f) scale *= maxWidth / width;
-        Text(text, x, y, scale, anchor, color, font);
-        return scale;
-    }
-
-    // Small label with a dark drop for legibility over the busy backdrop.
-    void Label(const char* text, float x, float y, float scale, Anchor anchor,
-               Color color = kText) const
-    {
-        Text(text, x + 2.0f, y + 2.0f, scale, anchor, Color{0.0f, 0.0f, 0.0f, 0.75f});
-        Text(text, x, y, scale, anchor, color);
-    }
-
-private:
-    Canvas& canvas_;
-    float alpha_;
-    float dx_;
-};
 
 // Names someone typed (a lobby, a preset, a player) are drawn in the heading
 // font only when it has every character: it is a Latin display face, accented
@@ -321,23 +175,37 @@ void DrawGlyph(const Painter& p, Button button, bool keyboard, float right, floa
              A_MR);
 }
 
-// Distance from a value's centre to each arrow. The option menu uses 130; the
-// lobby's values run longer (character and assist names), so a little more,
-// and the value text is fitted to stay clear of the arrows.
-constexpr float kValueArrowSpan = 150.0f;
-constexpr float kValueTextWidth = 2.0f * (kValueArrowSpan - 24.0f);
 // Team screen assist names: the room between the row label and the panel edge.
 constexpr float kAssistTextWidth = 380.0f;
 
-// Left/right arrows around a selectable value: the option menu's own arrow
-// art (drawn pointing left; the right one is the mirror image), 32 px as
-// there, sliding inward and back in step with the selection highlight.
-void DrawValueArrows(const Painter& p, uint32_t frame, float centerX, float y, float halfSpan)
+// The stage select page's arrow (ui\chs\chs_sprite\chs_option_sel, units
+// chs_sell_La and chs_sell_Lb), turned from pointing left to pointing down.
+// The texture's right half is a glow outline and its left half the filled
+// arrow inside it, both 32 px at scale 1.5. Their animations are from the
+// shared sprite animation list, on a 59-frame loop:
+//  - 21, the outline: from frame 1 it slides 4 px back from its point over 30
+//    frames (mode 2, u^2), then returns over 30 (mode 1, linear). The filled
+//    arrow is its child and moves with it.
+//  - 20, the filled arrow: from frame 1 a full turn about its own long axis
+//    over 60 frames (linear), which on screen is its width closing to nothing
+//    and opening again, twice a loop. It has a black shadow 3 px down-right.
+void DrawStageArrowDown(const Painter& p, uint32_t frame, float x, float y)
 {
-    const float inset = SelectionArrowInset(frame);
-    p.Sprite(TEX_OPT_ARROW, centerX - halfSpan + inset, y, 32.0f, 32.0f, kFullUv, A_MC);
-    p.Sprite(TEX_OPT_ARROW, centerX + halfSpan - inset, y, 32.0f, 32.0f,
-             Uv{1.0f, 0.0f, 0.0f, 1.0f}, A_MC);
+    constexpr float kSize = 48.0f, kTurn = -1.5707963f;
+    constexpr Uv kOutline{0.5f, 0.0f, 1.0f, 1.0f}, kFilled{0.0f, 0.0f, 0.5f, 1.0f};
+    const uint32_t t = frame % 59u;
+    float slide = 0.0f, across = 1.0f;
+    if (t >= 1u) {
+        const float u = (t - 1u) / 30.0f;
+        slide = t < 30u ? 4.0f * u * u : 4.0f * (1.0f - (t - 30u) / 30.0f);
+        across = std::fabs(std::cos((t - 1u) / 60.0f * 6.2831853f));
+    }
+    y -= slide;
+    p.SpriteTurned(TEX_SELECT_ARROW, x, y, kSize, kSize, kOutline, kTurn);
+    // Turned a quarter, the sprite's height lies across the screen.
+    p.SpriteTurned(TEX_SELECT_ARROW, x + 3.0f, y + 3.0f, kSize, kSize * across, kFilled, kTurn,
+                   Color{0.0f, 0.0f, 0.0f, 1.0f});
+    p.SpriteTurned(TEX_SELECT_ARROW, x, y, kSize, kSize * across, kFilled, kTurn);
 }
 
 void DrawPing(const Painter& p, float x, float y, int pingMs, float scale = 1.0f,
@@ -409,8 +277,9 @@ void PopUtf8(char* text)
 // ---------------------------------------------------------------------------
 // Construction and service synchronisation
 // ---------------------------------------------------------------------------
-LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs& prefs)
-    : service_(service), roster_(roster), prefs_(prefs)
+LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs& prefs,
+                 const SettingsSource& settings)
+    : service_(service), roster_(roster), prefs_(prefs), settings_(settings)
 {
     if (prefs_.create.maxMembers < 2 || prefs_.create.maxMembers > kMaxMembers)
         prefs_.create.maxMembers = kDefaultMembers;
@@ -451,6 +320,7 @@ void LobbyUi::GoTo(Screen screen)
     slotMenuOpen_ = false;
     quickChatOpen_ = false;
     musicOpen_ = false;
+    resolutionOpen_ = false;
     charPickerOpen_ = false;
     colorPickerOpen_ = false;
     iconPickerOpen_ = false;
@@ -786,6 +656,7 @@ void LobbyUi::Update(const Input& input)
     case Screen::Create: UpdateCreate(input); break;
     case Screen::Room: UpdateRoom(input); break;
     case Screen::Team: UpdateTeam(input); break;
+    case Screen::Settings: UpdateSettings(input); break;
     }
 }
 
@@ -800,23 +671,27 @@ void LobbyUi::UpdateTop(const Input& input)
     if (!input.confirm) return;
     Play(SFX_CONFIRM);
     switch (topCursor_) {
-    case 0:
+    case TOP_SEARCH:
         browseCursor_ = 0;
         browseScroll_ = 0;
         service_.Search();
         GoTo(Screen::Browse);
         break;
-    case 1:
+    case TOP_CREATE:
         createCursor_ = 0;
         if (!prefs_.create.name[0])
             snprintf(prefs_.create.name, sizeof(prefs_.create.name), "%.40s's Lobby",
                      service_.LocalName());
         GoTo(Screen::Create);
         break;
-    case 2:
+    case TOP_TEAM:
         teamReturn_ = Screen::Top;
         teamCursor_ = 0;
         GoTo(Screen::Team);
+        break;
+    case TOP_SETTINGS:
+        settingsCursor_ = 0;
+        GoTo(Screen::Settings);
         break;
     default:
         mainMenuRequested_ = true;
@@ -1096,10 +971,17 @@ void LobbyUi::UpdateRoom(const Input& input)
     const bool onOwnSeat = seated && local->slot == seatSlot_ && local->side == seatSide_;
 
     const bool queued = local && local->queueSlot >= 0;
-    if (input.actionX && (seated || queued)) {
-        if (seated) service_.Stand();
-        else service_.LeaveQueue();
-        Play(SFX_CANCEL);
+    if (input.spectate) {
+        // Watch this setup's matches, or stop: the slot menu's SPECTATE in
+        // one press. Not from a seat (one place at a time); a place in line
+        // is kept.
+        if (seated) {
+            Play(SFX_CANCEL);
+            return;
+        }
+        const bool watching = service_.WatchIntent() == seatSlot_;
+        service_.SetWatchIntent(watching ? -1 : seatSlot_);
+        Play(watching ? SFX_CANCEL : SFX_CONFIRM);
         return;
     }
     if (input.cancel) {
@@ -1576,10 +1458,6 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
         break;
     case ROOM_MENU_LINK:
         service_.CopyLobbyLink();
-        break;
-    default:
-        confirm_ = Confirm::LeaveRoom;
-        confirmCursor_ = 0; // default to "Yes"
         break;
     }
 }
@@ -2340,7 +2218,11 @@ void LobbyUi::Draw(Canvas& canvas)
     case Screen::Create: help = DrawCreate(canvas); break;
     case Screen::Room: help = DrawRoom(canvas); break;
     case Screen::Team: help = DrawTeam(canvas); break;
+    case Screen::Settings: help = DrawSettings(canvas); break;
     }
+#ifdef LOBBY_LAYOUT_EDIT
+    LayoutDrawAdded(canvas, static_cast<int>(screen_)); // elements made in the layout editor
+#endif
     // The footer is drawn last so it stays readable above modal dimming.
     bool modal = DrawModal(canvas);
     if (updateActive_) {
@@ -2416,6 +2298,13 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     } else if (screen_ == Screen::Top) {
         add(BTN_CONFIRM, "Select");
         add(BTN_CANCEL, "Main Menu");
+    } else if (screen_ == Screen::Settings && resolutionOpen_) {
+        add(BTN_CONFIRM, "Apply");
+        add(BTN_CANCEL, "Close");
+    } else if (screen_ == Screen::Settings) {
+        if (SettingsRowOpensList()) add(BTN_CONFIRM, "Resolutions");
+        else add(BTN_DPAD, "Change");
+        add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Browse) {
         add(BTN_CONFIRM, "Join");
         add(BTN_X, "Search again");
@@ -2489,15 +2378,14 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
             add(BTN_CONFIRM, "Sit");
         else if (!seated)
             add(BTN_CONFIRM, "Join queue");
-        // On the keyboard X is the quick chat; Backspace leaves the seat.
-        if (!usingKeyboard_ && seated) add(BTN_X, "Leave seat");
-        else if (!usingKeyboard_ && queued) add(BTN_X, "Leave queue");
+        // X on a pad; on the keyboard X is the quick chat and right Ctrl
+        // does this.
+        if (!seated)
+            add(BTN_SPECTATE,
+                service_.WatchIntent() == seatSlot_ ? "Stop spectating" : "Spectate");
         addChat();
         add(BTN_MENU, "Menu");
-        if (usingKeyboard_ && (seated || queued))
-            add(BTN_CANCEL, seated ? "Leave seat" : "Leave queue");
-        else
-            add(BTN_CANCEL, seated || queued ? "Back" : "Leave");
+        add(BTN_CANCEL, seated ? "Leave seat" : queued ? "Leave queue" : "Leave");
     }
 
     float x = kSafeRight;
@@ -2561,8 +2449,8 @@ const char* LobbyUi::DrawTop(Canvas& canvas) const
         p.TextFit(service_.StatusText(), 84.0f, 494.0f, 0.62f, 450.0f, A_ML, kRed);
 
     for (int i = 0; i < kTopCount; ++i) {
-        const float y = 214.0f + i * 82.0f;
-        const float shift = i * 14.0f; // native main-menu stagger
+        const float y = 198.0f + i * 68.0f;
+        const float shift = i * 12.0f; // native main-menu stagger
         const bool selected = i == topCursor_;
         if (selected) {
             // The white bar carries a round ornament near its right end; the
@@ -2685,18 +2573,9 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
             p.Label("Create your own lobby and do battle with all comers.", kScreenW * 0.5f,
                     384.0f, 0.7f, A_MC, kDim);
     } else if (count > kBrowseRows) {
-        // More lobbies under the last row: a chevron pointing down at them,
-        // bobbing in step with the selection arrows. The game's arrow art
-        // only points sideways, so this one is drawn.
-        if (browseScroll_ + kBrowseRows < count) {
-            const float cx = kScreenW * 0.5f, cy = 612.0f + SelectionArrowInset(frame_);
-            for (int pass = 0; pass < 2; ++pass) {
-                const float width = pass ? 4.0f : 8.0f;
-                const Color color = pass ? kYellow : Color{0.0f, 0.0f, 0.0f, 0.7f};
-                p.Line(cx - 16.0f, cy, cx, cy + 11.0f, width, color);
-                p.Line(cx + 16.0f, cy, cx, cy + 11.0f, width, color);
-            }
-        }
+        // More lobbies under the last row: the stage select's arrow, turned
+        // to point down at them.
+        if (browseScroll_ + kBrowseRows < count) DrawStageArrowDown(p, frame_, kScreenW * 0.5f, 623.0f);
         char page[32];
         snprintf(page, sizeof(page), "%d / %d", browseCursor_ + 1, count);
         p.Label(page, kSafeRight, 640.0f, 0.62f, A_MR, kDim);

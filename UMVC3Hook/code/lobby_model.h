@@ -312,6 +312,7 @@ struct Input {
     bool menu;    // Start
     bool pageLeft, pageRight; // shoulder buttons
     bool quickChat;           // RB on a pad, X on the keyboard
+    bool spectate;            // X on a pad, right Ctrl on the keyboard
     bool usingKeyboard;       // last input source, selects footer glyphs
     bool unfocused;           // the game's window is not the one in front
     // Text typed this frame while a text field is active (UTF-8, may be empty).

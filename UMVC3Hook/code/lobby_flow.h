@@ -72,9 +72,23 @@ struct SpectatorInfo {
     Person queue[kMax];
 };
 SpectatorInfo LobbyFlow_GetSpectatorInfo();
-// Shows or hides the spectator's overlay (who is playing, feed state) and
-// saves the choice. Game thread.
-void LobbyFlow_ToggleSpectatorOverlay();
+// What is drawn over a match being watched: 2 full (the set
+// score, the feed's state under it, the name plates under the life bars),
+// 1 compact (the name plates, and the feed's state when it is lost or waiting),
+// 0 none (only the out-of-sync warning). Any thread.
+int LobbyFlow_GetSpectatorOverlay();
+// Sets it and saves the choice; false if it could not be saved.
+bool LobbyFlow_SetSpectatorOverlay(int level);
+// Full, compact, none, full... (F3 while watching). Game thread.
+void LobbyFlow_CycleSpectatorOverlay();
+// A player's set score for the battle HUD to draw, in its two parts: the
+// format ("FT3"; empty for a set with no length) and the score ("0 - 0").
+// Both empty, and false, when there is none to show. Game thread.
+bool LobbyFlow_GetScoreText(char* format, size_t formatSize, char* score, size_t scoreSize);
+// Whether the set score is drawn over a room match being played. Any thread.
+bool LobbyFlow_GetScoreDisplay();
+// Sets it and saves the choice; false if it could not be saved.
+bool LobbyFlow_SetScoreDisplay(bool shown);
 
 // True from match launch until the player is back in the lobby.
 bool LobbyFlow_InRoomMatch();
@@ -102,6 +116,12 @@ bool LobbyFlow_IsSpectating();
 bool LobbyFlow_PlayerInCharSelect();
 // The two players of the match being watched, player 1 first.
 bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2);
+// The spectator overlay's top-centre text for the battle HUD to draw, at the
+// level chosen: `line` (the set score; empty when not
+// shown) and `note` (the feed's state; null when not shown). False when
+// there is neither. Game thread.
+bool LobbyFlow_GetSpectatorOverlayText(char* line, size_t size, const char** note,
+                                       bool* desynced);
 
 // Discord rich presence: what the player is doing, in the lobby's own terms
 // (phase, room, set, teams). Game thread; leaves `out` untouched when the

@@ -5,9 +5,15 @@
 // tools/umvc3_ui/umvc3_ui.py turns those commands into PNGs using textures
 // unpacked from the user's own game archives, so layout can be reviewed
 // without launching the game. Run tools/lobby_preview/preview.sh.
+//
+// Built with LOBBY_LAYOUT_EDIT it is also the layout editor's host program
+// (tools/lobby_editor): every command then names the source line that drew
+// it, and a second argument names a file of the editor's changes to apply.
 
 #include "lobby_canvas.h"
+#include "lobby_layout.h"
 #include "lobby_model.h"
+#include "lobby_ui_internal.h"
 #include "lobby_ui.h"
 #include "assist_names.h"
 
@@ -18,6 +24,134 @@
 
 using namespace lobby;
 
+#ifdef LOBBY_LAYOUT_EDIT
+#include <map>
+
+namespace {
+
+// The editor's changes, by "file:line" of the Painter call, and the textures
+// it brought in, which the edits name by their place in this list.
+std::map<std::string, LayoutEdit> g_edits;
+struct CustomTex {
+    std::string name;
+    TexInfo info;
+};
+std::vector<CustomTex> g_customTex;
+// The site whose command is drawn next; empty for what no Painter call drew.
+std::string g_site;
+// While an element made in the editor is drawn, the name its commands go by.
+std::string g_addedSite;
+// The LobbyUi screen last drawn, for the editor to file new elements under.
+int g_drawnScreen = -1;
+
+// An element made in the editor: not in the screen code at all.
+struct Added {
+    std::string id, kind, text; // kind: sprite, frame, fill or text
+    int screen = 0, tex = -1;
+    float x = 0, y = 0, w = 0, h = 0, scale = 1;
+    Uv uv{0, 0, 1, 1};
+    Color color{1, 1, 1, 1};
+};
+std::vector<Added> g_added;
+
+// One thing per line:
+//   tex <name> <width> <height>
+//   edit <file:line> <dx> <dy> <dw> <dh> <scale> <tex or -1> <hasUv> <u0> <v0> <u1> <v1> <hidden> <swap>
+//   add <id> <screen> <kind> <x> <y> <w> <h> <scale> <tex or -1> <u0> <v0> <u1> <v1> <r> <g> <b> <a> <text to the end of the line>
+bool LoadEdits(const char* path)
+{
+    FILE* file = fopen(path, "r");
+    if (!file) return false;
+    char line[512], name[256];
+    while (fgets(line, sizeof(line), file)) {
+        int width = 0, height = 0, tex = -1, hasUv = 0, hidden = 0, swap = 0, used = 0;
+        LayoutEdit edit;
+        Added added;
+        char id[64], kind[32];
+        if (sscanf(line, "add %63s %d %31s %f %f %f %f %f %d %f %f %f %f %f %f %f %f %n", id,
+                   &added.screen, kind, &added.x, &added.y, &added.w, &added.h, &added.scale,
+                   &added.tex, &added.uv.u0, &added.uv.v0, &added.uv.u1, &added.uv.v1,
+                   &added.color.r, &added.color.g, &added.color.b, &added.color.a, &used) == 17) {
+            added.id = id;
+            added.kind = kind;
+            added.text = line + used;
+            while (!added.text.empty() && (added.text.back() == '\n' || added.text.back() == '\r'))
+                added.text.pop_back();
+            g_added.push_back(added);
+            continue;
+        }
+        if (sscanf(line, "tex %255s %d %d", name, &width, &height) == 3) {
+            g_customTex.push_back({name, {}});
+        } else if (sscanf(line, "edit %255s %f %f %f %f %f %d %d %f %f %f %f %d %d", name, &edit.dx,
+                          &edit.dy, &edit.dw, &edit.dh, &edit.scale, &tex, &hasUv, &edit.uv.u0,
+                          &edit.uv.v0, &edit.uv.u1, &edit.uv.v1, &hidden, &swap) == 14) {
+            edit.swap = swap != 0;
+            edit.tex = tex < 0 ? -1 : TEX_COUNT + tex;
+            edit.hasUv = hasUv != 0;
+            edit.hidden = hidden != 0;
+            g_edits[name] = edit;
+            continue;
+        } else {
+            continue;
+        }
+        CustomTex& custom = g_customTex.back();
+        custom.info = TexInfo{nullptr, static_cast<uint16_t>(width), static_cast<uint16_t>(height),
+                             ARC_COMMON, false};
+    }
+    fclose(file);
+    // The names stay put from here on.
+    for (CustomTex& custom : g_customTex) custom.info.path = custom.name.c_str();
+    return true;
+}
+
+} // namespace
+
+namespace lobby {
+
+const LayoutEdit& LayoutSite(Site site)
+{
+    static const LayoutEdit kNone;
+    const char* base = site.file;
+    for (const char* c = site.file; *c; ++c)
+        if (*c == '/' || *c == '\\') base = c + 1;
+    if (!g_addedSite.empty()) { // an element of the editor's own: nothing to apply to it
+        g_site = g_addedSite;
+        return kNone;
+    }
+    g_site = std::string(base) + ":" + std::to_string(site.line);
+    const auto found = g_edits.find(g_site);
+    return found == g_edits.end() ? kNone : found->second;
+}
+
+void LayoutDrawAdded(Canvas& canvas, int screen)
+{
+    g_drawnScreen = screen;
+    const Painter p(canvas, 1.0f, 0.0f);
+    for (const Added& added : g_added) {
+        if (added.screen != screen) continue;
+        g_addedSite = "added:" + added.id;
+        const Tex tex = static_cast<Tex>(added.tex < 0 ? TEX_WHITE : TEX_COUNT + added.tex);
+        if (added.kind == "sprite")
+            p.Sprite(tex, added.x, added.y, added.w, added.h, added.uv, A_TL, added.color);
+        else if (added.kind == "frame")
+            p.FrameOver(tex, added.x, added.y, added.w, added.h, added.uv, added.color);
+        else if (added.kind == "fill")
+            p.Fill(added.x, added.y, added.w, added.h, added.color);
+        else if (added.kind == "text")
+            p.Text(added.text.c_str(), added.x, added.y, added.scale, A_TL, added.color);
+    }
+    g_addedSite.clear();
+}
+
+const TexInfo& LayoutCustomTex(int index)
+{
+    if (index >= 0 && index < static_cast<int>(g_customTex.size())) return g_customTex[index].info;
+    return GetTexInfo(TEX_WHITE);
+}
+
+} // namespace lobby
+#endif
+
 namespace {
 
 class JsonCanvas final : public Canvas {
@@ -26,6 +160,25 @@ public:
                 Color color) override
     {
         Emit("sprite", tex, x, y, w, h, uv, anchor, color);
+    }
+
+    void SpriteTurned(Tex tex, float x, float y, float w, float h, Uv uv, float radians,
+                      Color color) override
+    {
+        Emit("sprite", tex, x, y, w, h, uv, A_MC, color);
+        char turn[48];
+        snprintf(turn, sizeof(turn), ",\"turn\":%.5f}", radians);
+        commands_.back().replace(commands_.back().size() - 1, 1, turn);
+    }
+
+    // Names the Painter call behind the command just added, for the editor.
+    void Tag()
+    {
+#ifdef LOBBY_LAYOUT_EDIT
+        if (g_site.empty()) return;
+        commands_.back().replace(commands_.back().size() - 1, 1, ",\"site\":\"" + g_site + "\"}");
+        g_site.clear();
+#endif
     }
 
     void Frame(Tex tex, float x, float y, float w, float h, Uv uv, Anchor anchor,
@@ -53,6 +206,7 @@ public:
                  blend == BLEND_MENU_INK ? 0.0f : color.b, color.a,
                  static_cast<int>(font), Depth());
         commands_.push_back(line);
+        Tag();
     }
 
     void Line(float x0, float y0, float x1, float y1, float width, Color color) override
@@ -63,6 +217,7 @@ public:
                  "\"color\":[%.3f,%.3f,%.3f,%.3f],\"depth\":%d}",
                  x0, y0, x1, y1, width, color.r, color.g, color.b, color.a, Depth());
         commands_.push_back(line);
+        Tag();
     }
 
     bool Save(const char* path) const
@@ -70,6 +225,11 @@ public:
         FILE* file = fopen(path, "w");
         if (!file) return false;
         fputs("[\n", file);
+#ifdef LOBBY_LAYOUT_EDIT
+        // Not a command: which of LobbyUi's screens this is.
+        fprintf(file, "{\"type\":\"meta\",\"screen\":%d}%s\n", g_drawnScreen,
+                commands_.empty() ? "" : ",");
+#endif
         for (size_t i = 0; i < commands_.size(); ++i)
             fprintf(file, "%s%s\n", commands_[i].c_str(), i + 1 < commands_.size() ? "," : "");
         fputs("]\n", file);
@@ -99,6 +259,7 @@ private:
                  type, path.c_str(), x, y, w, h, uv.u0, uv.v0, uv.u1, uv.v1, anchor, color.r,
                  color.g, color.b, color.a, Depth());
         commands_.push_back(line);
+        Tag();
     }
 
     std::vector<std::string> commands_;
@@ -396,6 +557,29 @@ SearchResult MakeResult(uint64_t id, const char* name, const char* host, int mem
     return result;
 }
 
+// Stand-in for the plugin's settings: twelve modes and switches that hold.
+const int kFakeModes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1280, 720}, {1280, 800},
+                             {1360, 768}, {1600, 900}, {1680, 1050}, {1920, 1080}, {1920, 1200},
+                             {2560, 1440}, {3840, 2160}};
+int g_fakeMode = 8;
+bool g_fakeSwitches[static_cast<int>(Setting::Count)] = {false, false, false, true};
+int g_fakeLevels[static_cast<int>(Level::Count)] = {1, 2};
+const SettingsSource kFakeSettings = {
+    [](Setting setting) { return g_fakeSwitches[static_cast<int>(setting)]; },
+    [](Setting setting, bool on) { g_fakeSwitches[static_cast<int>(setting)] = on; return true; },
+    []() { return 12; },
+    [](int index, int* width, int* height) {
+        if (index < 0) index = g_fakeMode;
+        if (index >= 12) return false;
+        *width = kFakeModes[index][0];
+        *height = kFakeModes[index][1];
+        return true;
+    },
+    [](int index) { g_fakeMode = index; return true; },
+    [](Level setting) { return g_fakeLevels[static_cast<int>(setting)]; },
+    [](Level setting, int level) { g_fakeLevels[static_cast<int>(setting)] = level; return true; },
+};
+
 UiPrefs DefaultPrefs()
 {
     UiPrefs prefs = {};
@@ -483,8 +667,13 @@ void Settle(LobbyUi& ui, int frames = 14)
     for (int i = 0; i < frames; ++i) ui.Update(idle);
 }
 
+// With a third argument only the screen of that name is written (the editor
+// asks for the one it is showing).
+const char* g_onlyScreen = nullptr;
+
 bool Capture(LobbyUi& ui, const std::string& directory, const char* name)
 {
+    if (g_onlyScreen && strcmp(g_onlyScreen, name) != 0) return true;
     JsonCanvas canvas;
     ui.Draw(canvas);
     const std::string path = directory + "/" + name + ".json";
@@ -498,6 +687,10 @@ bool Capture(LobbyUi& ui, const std::string& directory, const char* name)
 int main(int argc, char** argv)
 {
     const std::string directory = argc > 1 ? argv[1] : ".";
+#ifdef LOBBY_LAYOUT_EDIT
+    if (argc > 2 && !LoadEdits(argv[2])) fprintf(stderr, "no edits read from %s\n", argv[2]);
+#endif
+    if (argc > 3) g_onlyScreen = argv[3];
     bool ok = true;
 
     {   // Top menu.
@@ -732,6 +925,44 @@ int main(int argc, char** argv)
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_busy");
         }
+    }
+    {   // Settings.
+        FakeService service;
+        LobbyUi ui(service, kRoster, DefaultPrefs(), kFakeSettings);
+        Settle(ui);
+        for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "top_settings");
+        ui.Update(Press(&Input::confirm));
+        Settle(ui);
+        ok &= Capture(ui, directory, "settings_resolution_row");
+        ui.Update(Press(&Input::confirm)); // the display's modes
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_resolutions");
+        ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::confirm)); // apply the next one
+        for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down));
+        ui.Update(Press(&Input::right)); // relay only
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings");
+        ui.Update(Press(&Input::down)); // NETWORK STATS, with its preview
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_net_stats_compact");
+        ui.Update(Press(&Input::left));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_net_stats_full");
+        ui.Update(Press(&Input::left));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_net_stats_off");
+        ui.Update(Press(&Input::down)); // SPECTATOR OVERLAY, with its preview
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_spectator_full");
+        ui.Update(Press(&Input::right));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_spectator_compact");
+        ui.Update(Press(&Input::right));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "settings_spectator_none");
     }
     {   // Team setup.
         FakeService service;

@@ -1861,8 +1861,6 @@ void AutoTest_InitHooks()
 
     if (status != MH_OK)
         HookLog("AutoTest: failed to hook command matcher (%d)\n", status);
-    else
-        HookLog("AutoTest: command matcher instrumentation installed\n");
 }
 
 extern "C" bool AutoTest_GetInput(int32_t frame, uint32_t playerIndex,

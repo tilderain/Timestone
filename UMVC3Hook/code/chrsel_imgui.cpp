@@ -144,7 +144,6 @@ void EnsureArchiveReadyHook()
         HookLog("ChrSelImGui: failed to enable archive readiness hook (%d)\n", status);
         return;
     }
-    HookLog("ChrSelImGui: installed replacement archive readiness hook\n");
 }
 
 void LogResetState()

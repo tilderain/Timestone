@@ -27,6 +27,10 @@ void Spectate_RecBegin();
 void Spectate_RecEnd();
 bool Spectate_IsRecording();
 // The start-up barrier released: a game begins on frame 0 with this seed.
+// The game the players are about to load (its teams and stage are set):
+// spectators boot it now and wait at the start for Spectate_RecGameStart,
+// instead of beginning to load when the players have already begun to play.
+void Spectate_RecGameAnnounce(uint32_t gameId);
 void Spectate_RecGameStart(uint32_t gameId, uint32_t roundSeed, uint32_t openingP1,
                            uint32_t openingP2);
 // Final inputs of the next frame, in order, starting at 0 for each game.
@@ -69,6 +73,9 @@ bool Spectate_IsViewing();
 bool Spectate_GetGameStart(uint32_t* roundSeed, uint32_t* openingP1, uint32_t* openingP2);
 uint32_t Spectate_GetInput(uint32_t team, int32_t frame);
 // The players' number for the game being played back (0 between games).
+// A spectator waiting at the start of a game the players never began (they
+// left while it loaded): there is nothing to wait for.
+bool Spectate_GameAbandoned();
 uint32_t Spectate_PlayGameId();
 
 enum class SpectateStep : uint8_t {

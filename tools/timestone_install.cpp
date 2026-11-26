@@ -27,7 +27,7 @@
 #undef near
 #undef far
 
-#include "install_ui.h"
+#include "install_text.h"
 
 #ifndef TIMESTONE_VERSION
 #define TIMESTONE_VERSION "0.1.0"
@@ -753,6 +753,7 @@ DWORD WINAPI InstallThread(void*)
     std::vector<install::ZipFile> files;
     const install::ZipFile* plugin = nullptr;
     if (install::ListStoredZip(zip, files)) {
+        install::DropPackageOnlyFiles(files);
         for (const install::ZipFile& file : files)
             if (file.name == "Timestone.asi")
                 plugin = &file;
@@ -818,6 +819,10 @@ DWORD WINAPI InstallThread(void*)
     if (!shipsUpdater)
         DeleteFileW((folder + L"TimestoneUpdater.exe").c_str());
     DeleteFileW((folder + L"TimestoneUpdater.exe.new").c_str());
+    // Left by earlier installers. This one may be that copy of the installer,
+    // running: then it stays.
+    for (const char* name : install::kPackageOnlyFiles)
+        DeleteFileW((folder + Utf8ToWide(name)).c_str());
 
     std::wstring message = L"Timestone " + tag + L" is installed.";
     if (RunningUnderWine()) {
@@ -900,6 +905,9 @@ void Uninstall()
             L"TimestoneUpdater.exe.new"})
         if (!remove(name))
             return;
+    // An earlier installer's copy of itself. It cannot go if it is the one
+    // running, and that is no failure.
+    DeleteFileW((gameDir + L"\\TimestoneInstall.exe").c_str());
     const bool keepLoader = OtherPluginsPresent(gameDir);
     if (!keepLoader && !remove(L"dinput8.dll"))
         return;
@@ -934,7 +942,8 @@ void StartTask(Task task)
 }
 
 // ---------------------------------------------------------------------------
-// Text, drawn by GDI straight into the picture.
+// Text in a font of the system's, drawn by GDI straight into the picture.
+// Only for what the installer's own font cannot write: see WindowText.
 // ---------------------------------------------------------------------------
 class GdiText final : public install::TextPainter {
 public:
@@ -1026,6 +1035,56 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// The window's text: the font the installer carries, drawn by install_text.h
+// exactly as the Linux installer draws it. A line with a character that font
+// lacks (it is Latin and Thai) goes to GDI and a system font instead, so a
+// folder named in any script still shows.
+// ---------------------------------------------------------------------------
+class WindowText final : public install::TextPainter {
+public:
+    WindowText(HDC dc, uint32_t* pixels, int width, int height)
+        : system_(dc, width / install::kScreenW), carried_(pixels, width, height)
+    {
+        size_t bodySize = 0, titleSize = 0;
+        const unsigned char* body = Carried(L"FONT_BODY", bodySize);
+        const unsigned char* title = Carried(L"FONT_TITLE", titleSize);
+        usable_ = body && title && carried_.Use(body, body + bodySize, title, title + titleSize);
+    }
+
+    float BlockHeight(install::FontId font, const wchar_t* text, float width,
+        unsigned flags) override
+    {
+        return For(font, text).BlockHeight(font, text, width, flags);
+    }
+
+    void Draw(install::FontId font, const wchar_t* text, install::Rect rect,
+        install::Color color, unsigned flags) override
+    {
+        For(font, text).Draw(font, text, rect, color, flags);
+    }
+
+private:
+    static const unsigned char* Carried(const wchar_t* name, size_t& size)
+    {
+        HRSRC resource = FindResourceW(nullptr, name, RT_RCDATA);
+        HGLOBAL loaded = resource ? LoadResource(nullptr, resource) : nullptr;
+        size = resource ? SizeofResource(nullptr, resource) : 0;
+        return loaded ? static_cast<const unsigned char*>(LockResource(loaded)) : nullptr;
+    }
+
+    install::TextPainter& For(install::FontId font, const wchar_t* text)
+    {
+        if (usable_ && carried_.Covers(font, text))
+            return carried_;
+        return system_;
+    }
+
+    GdiText system_;
+    install::FontText carried_;
+    bool usable_ = false;
+};
+
+// ---------------------------------------------------------------------------
 // The window
 // ---------------------------------------------------------------------------
 enum class Action { None, Install, Uninstall, Browse, Close, Retry, Launch };
@@ -1037,7 +1096,7 @@ struct Window {
     uint32_t* pixels = nullptr;
     int width = 0, height = 0;
     std::vector<uint8_t> stars;
-    GdiText* text = nullptr;
+    WindowText* text = nullptr;
     ULONGLONG startedAt = 0;
     Stage shownStage = Stage::Searching;
     int cursor = 0;
@@ -1396,7 +1455,7 @@ bool CreateInstallerWindow(HINSTANCE instance)
     window.pixels = static_cast<uint32_t*>(bits);
 
     LoadStars(window.stars); // without them the backdrop is its grid on black
-    window.text = new GdiText(window.dc, window.width / install::kScreenW);
+    window.text = new WindowText(window.dc, window.pixels, window.width, window.height);
     window.startedAt = GetTickCount64();
     Render();
     ShowWindow(window.handle, SW_SHOWNORMAL);

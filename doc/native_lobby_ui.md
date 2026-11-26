@@ -280,6 +280,112 @@ be committed.
 | `lobby_flow.*` | Title-area hold, match start handshake, return to room |
 | `steam_lobby.cpp` | Room mode added beside the existing 1v1 mode |
 
+### Settings screen (2026-11-25, built, not run in game)
+
+SETTINGS on the top menu, between TEAM SETUP and MAIN MENU. RESOLUTION
+opens a list of the display's modes (the same filter as the Esc menu's):
+moving through it changes nothing, confirm applies the one under the cursor
+and closes it. The other rows are each one of two values (NETWORK STATS: three), changed by
+left, right or confirm and applied at once:
+
+| Row | Where it lives | Applied by |
+|---|---|---|
+| RESOLUTION | the game's `config.ini` | `D3D9Reset_SetResolution` |
+| FULLSCREEN | the game's `config.ini` | `D3D9Reset_SetFullscreen` |
+| VSYNC | `[Display] VSYNC_` | `D3D9Reset_SetVsync` |
+| STEAM ROUTING | `[Network] SteamRelayOnly` | read at the next connection (`ConnectionOptions`) |
+| NETWORK STATS | `[FrameStepper] StatusHudMode` (0 off, 1 compact, 2 full) | `FrameStepper_SetStatusHudMode` |
+| SPECTATOR OVERLAY | `[Lobby] SpectatorOverlayLevel` (0 none, 1 compact, 2 full) | `LobbyFlow_SetSpectatorOverlay` |
+| SCORE DISPLAY | `[Lobby] ScoreDisplay` (on unless 0) | `LobbyFlow_SetScoreDisplay` |
+
+SCORE DISPLAY is the set score a player has at the top centre of a room
+match ("FT3    0 - 0"; a first-to-1 has none). F4 flips it in a match. It is
+drawn as a spectator's score line is (below), not by ImGui any more: by the
+battle HUD in two parts, the score ("0 - 0") at the top centre on
+`Font_Press_1P` and the format ("FT3") in the top right on `Font_Listen`
+(`uBtScore+0x100`; right-aligned, ending at x 1050 as that unit is laid
+out), and by the lobby's canvas on the character select, as one line under
+the status bar. It has no preview on the settings
+screen.
+
+NETWORK STATS is the match's ping / delay / rollback readout, FULL, COMPACT
+or OFF, the same value F3 cycles in a match. Unset, it is COMPACT (it was
+FULL before 2026-11-25); an ini that already holds a value keeps it. While
+the cursor is on the row, a mock-up of the readout for the value shown is
+drawn in the screen's top-left corner, where a match has it, in place of
+the SETTINGS title (`DrawNetStatsPreview`, made-up numbers, the host's
+yellow; OFF draws nothing). Its lines are a copy of what `FrameStepper_Draw` prints, so a change
+there needs the same change here.
+
+SPECTATOR OVERLAY is what is drawn over a match being watched, the value F3
+steps down while watching. FULL: the set score at the top
+centre with the feed's state under it (SPECTATING when all is well), and
+the two name plates under the life bars. COMPACT: the name plates, and the
+feed's state only when it is reconnecting or waiting for the match (not
+while catching up).
+NONE: nothing, the name plates hidden too (`hkBtScoreUpdate`). The
+out-of-sync warning is drawn at every value. Unset, it is FULL, or NONE if
+the on/off it replaced (`[Lobby] SpectatorOverlay`) was off. The row has a
+preview like NETWORK STATS's (`DrawSpectatorPreview`). The name plates are
+the game's own text units, `Font_UserName_1P` / `_2P` of
+`ui\game\ga_sprite\ga_pos05` (in `game.arc`; `uBtScore`'s layout), and the
+preview draws them from that layout's values:
+
+| | 1P | 2P |
+|---|---|---|
+| `mPos`, `mCenterAttr` | (218, 146), 3 (middle-left) | (1060, 146), 5 (middle-right) |
+| `mScale`, `fontType` | (0.85, 0.9), 0 (body) | same |
+| `mColor` -> `mColor1` | (1, 1, 0.2) -> (1, 0.494, 0) | (0.937, 0.392, 1) -> (0.8, 0, 1) |
+| `mShadowColor`, `mShadowPos` | (0.2, 0.094, 0, 0.749), (2, 2) | (0.094, 0, 0.2, 0.749), (2, 2) |
+
+A text unit's size on screen goes with `mScale` squared and a single line
+hangs from its anchor, so the preview draws them at 0.7225 by 0.81 of the
+32 px cell with the top at y 146. The canvas has one colour per text, so
+the preview uses `mColor` without the shading to `mColor1`. On both rows the SETTINGS title is not drawn, at
+any value.
+
+In a battle the top-centre text is drawn by the battle HUD itself, as the
+preview has it (body font, centred, the score at size 0.68 with its
+middle at y 20, the feed's state at 0.5 and y 41, cyan, red for DESYNCED):
+`hkBtScoreUpdate` puts the two lines on `Font_Press_1P` (`uBtScore+0xC0`) and
+`Font_Press_2P` (`+0xE8`), text units of `ga_pos05` that a netplay battle
+never shows (`uBtScore__updatePlayerNamesAndScore` hides all eleven of its
+units at the top of every update). Their gradient attribute is cleared for a
+single colour, and so is their shadow attribute: the two lines have no
+shadow, in a match or in the preview (`mShadowPos` is `+0x380` and
+`mShadowColor` `+0x390`, should one be wanted; the layout's is dark blue at
+(2, 3)). Built 2026-11-25, not run
+in game; to check there:
+
+- the layout writes its units' tracks while its frame advances (the 30-frame
+  fade-in). Nothing is put on the two units until the name plate's alpha is
+  full; if the scheduler keeps re-applying tracks after that, the text would
+  sit at the units' own places (255, 13 and 844, 12) in their pale blue;
+- a stalled feed freezes the whole frame, HUD included, for the first 1.5 s;
+  after that the waiting notice pauses the battle natively and the frame
+  runs again, so RECONNECTING and WAITING appear then.
+
+On a watched character select the same two lines (`WatchOverlayText`) are
+drawn with the lobby's canvas in `FeedWatchedSelect`, under the screen's
+status bar (y 691; the state line only when out of sync). There is no ImGui
+drawing of them any more, so nothing of the overlay is shown where neither
+a battle HUD nor the canvas is up: a spectator's loading screen and the
+result screen.
+
+Both are a `Level` (`lobby_ui.h`): three values through
+`SettingsSource::level` / `setLevel`.
+
+The screen's code is `lobby_ui_settings.cpp`; what it shares with the other
+screens in `lobby_ui.cpp` (palette, selection animation, `Painter`) is in
+`lobby_ui_internal.h`.
+
+None of them is the lobby's own: `lobby_ui` reaches them through
+`SettingsSource` (function pointers, given by `lobby_flow.cpp`), so the
+screen still has no game dependency and the preview tool runs it with a
+stand-in. The same settings remain in the launch menu's settings window and
+the Esc menu. Muting a joined lobby's music (`[Lobby] MuteMusic`,
+`UiPrefs::muteMusic`) is not here: it is on the lobby menu only.
+
 ### Drawing
 
 Each frame the screens issue draw commands back to front. The backend maps
@@ -304,8 +410,19 @@ cloned sprite. The clone's prototype (`icon_RoomFriend`) has `mPrimitiveAttr`
 (`+0x39C`) `0x1004`, while every native sprite with a plain `_BM_NOMIP`
 texture keeps the constructor's `0x1000` (`uBaseSprite__ctor` `0x1402C33B0`;
 `mPass` defaults to 22). The backend now clears bit 2 for this texture only.
-What that bit selects is not established, and the fix is **unverified in
-game**; if the plate still does not draw, the room looks as it did before.
+The fix is **unverified in game**; if the plate still does not draw, the room
+looks as it did before.
+
+Bit 2 of `mPrimitiveAttr` selects the texture filter.
+`cPrim__changeSpriteSamplerState` (`0x140785BD0`) binds the shader function
+`FPrimitiveSampleBaseMap` when it is set and `FPrimitiveSampleBaseMapLin` when
+it is clear. In `nativePCx64\UserShader\UserShaderPackage.mfx` the two records
+differ only in the sampler paired with `tBaseMap`: `SSWrapPoint` (nearest
+texel) for the first, `SSWrapLinear` (linear) for the second. The prototype
+`icon_RoomFriend` carries `0x1004` (point); the backend clears the bit on
+every sprite it draws (frames keep their prototype's value). The UI
+textures are `_NOMIP`, so neither path has mip levels to fall back on when a
+picture is drawn much smaller than its texture.
 
 ### Rooms
 
@@ -731,7 +848,8 @@ One per game of a set (`Game` in `spectate.cpp`):
 
 - the boot configuration (`TrainingBootConfig`, CPU mode, five bars);
 - the round seed and both opening characters, known when the start-up
-  barrier releases (`Spectate_RecGameStart`, from `HookedMove`);
+  barrier releases (`Spectate_RecGameStart`, from `HookedMove`); a match's
+  first game is in the log before that, from `Spectate_RecGameAnnounce`;
 - one input pair per frame, player 1 first, appended once the frame is final:
   `RecordSpectateFrames` in `controller.cpp` walks forward from the last
   logged frame while `IsFrameConfirmed` holds. The local value is
@@ -828,6 +946,37 @@ configuration arrives, so it starts behind by its own loading time and relies
 on the catch-up. A game that was already restarted when the spectator arrived
 is skipped; it boots the roster that follows and waits for the next game.
 
+### Starting level with the players (2026-11-25, built, not run)
+
+A spectator already watching had to catch up at the start of every match,
+and could after a rematch. Two causes, both in when it began to load:
+
+- **First game.** The game entered the log only at the players' start-up
+  barrier (`Spectate_RecGameStart`), so `MSG_GAME` reached a spectator when
+  the players were already playing; it then loaded, and came up as far behind
+  as its load took (288 frames in the one log there is of it). Now
+  `BeginLaunch` calls `Spectate_RecGameAnnounce` once the teams and stage are
+  set: the game goes into the log unstarted, `MSG_GAME` goes out at once, and
+  the spectator boots alongside the players and waits at its own barrier for
+  `MSG_START` (`Spectate_GetGameStart` already waited on `started`). No
+  frames are logged into a game that has not started.
+- **Rematch and the select between games.** The restart and its roster were
+  already sent the moment the players restarted, but a spectator only acted
+  on them after playing out what it had left, the second or so it runs
+  behind. `Spectate_Next` now goes with the players at once when the
+  spectator is on the result screen (`sAction` step 9 or later) and the game
+  is marked restarted, or the players have opened the select after it. A
+  restart during the fight is still played up to.
+
+A game announced and never begun (the players left while it loaded) ends the
+watching: `Spectate_GameAbandoned`, asked at the spectator's barrier. If it
+was restarted there with the same teams, the spectator waits for the game
+after it instead.
+
+A spectator still plays about a second behind the feed by design
+(`kResumeBuffer`), and still catches up if it loads much slower than the
+players do or joins a game in progress.
+
 ### Intro picks (found in the first test, 2026-11-16)
 
 The first run matched the players on positions, life and action ids for a
@@ -852,6 +1001,9 @@ match there as it comes up. It is withdrawn by Stop Watching in the pause
 menu, by cancelling while a match is being joined, by a join that fails, by
 taking a seat (`Sit`), and by leaving the queue it came with. A spectator
 whose queue reaches the front is taken back to the room.
+X on a pad, right Ctrl on the keyboard (`Input::spectate`), toggles that wish for
+the setup under the cursor without the menu; it does nothing from a seat, and
+keeps a place in line. Leaving a seat or a queue is the cancel button's alone.
 The setup card shows the WATCH tag and a count.
 In the battle the top of the screen names the two players, the set score and
 the state of the feed; the pause menu offers Stop Watching only.
@@ -1104,6 +1256,31 @@ When player 1 sends the launch (`SendLaunchAsHost`) the stage is one of the
 two players' preferred stages picked at random (`PickMatchStage`); a player
 with no preference goes along with the other's, and when neither has one it
 is any stage but the training room. **Unverified in game.**
+
+### The lobby list's "more below" arrow
+
+When the search results run past the last row, an arrow under it points down
+at them (`DrawStageArrowDown`). It is the stage select page's arrow, drawn the
+way that page's layout `ui\chs\chs_sprite\chs_option_sel` draws its left one
+and turned a quarter turn with `Canvas::SpriteTurned`:
+
+- Texture `ui\chs\chs_sprite\chs_opt_sel_b_BM_HQ_NOMIP`, 128x64, pointing
+  left: the filled arrow in the left half, a glow outline in the right.
+- `chs_sell_La` is the outline (UV 0.5..1), 32x32 at scale 1.5, with sprite
+  animation 21. `chs_sell_Lb` is the filled arrow (UV 0..0.5), its child, in
+  front of it, with a black shadow at (3, 3) and sprite animation 20. The
+  right arrow is the mirror image (`chs_sell_Ra`/`Rb`, animations 22 and 20).
+- The animations are in `ui\cmn\anm\sprite_base`, both 59 frames long.
+  21: from frame 1 position x 0 -> 4 over 30 frames (mode 2), from frame 30
+  back to 0 over 30 (mode 1). 20: from frame 1 angle x 0 -> 360 degrees over
+  60 frames (mode 1), the arrow turning about its own long axis. The plugin
+  draws that turn as the sprite's width across the arrow times |cos|.
+- Modes as `uUiAnmSprite__interpolateChannel` `0x1402C7B90`: 1 linear,
+  2 u^2, 5 1-(1-u)^2.
+
+The texture is in `ui\mnchs` (about 1.6 MB; `ui\mnchscmn` has it too),
+requested the first time it is drawn and released with the units, like the
+stage icons' archive. `ui\mnchsstg` has no arrow art. **Unverified in game.**
 
 ### The cards
 

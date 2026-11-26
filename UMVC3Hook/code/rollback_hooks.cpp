@@ -2,6 +2,7 @@
 #include "../pch.h"
 
 extern "C" int32_t Controller_FirstRollbackFrame();
+extern "C" void Controller_NoteTickStart(int32_t frame);
 
 #include "rollback_hooks.h"
 
@@ -137,6 +138,69 @@ static void SetFightingName(uint64_t widget, const char* name)
     ((void(__fastcall*)(uint64_t, bool))_addr(FN_UI_SET_VISIBLE))(widget, true);
 }
 
+// The plugin's text along the top of a room match (a spectator's overlay, a
+// player's set score), on three of uBtScore's text units that a netplay
+// battle leaves hidden: Font_Press_1P (+0xC0), Font_Press_2P (+0xE8) and
+// Font_Listen (+0x100) of ui\game\ga_sprite\ga_pos05. The game hides all
+// eleven of its units at the top of every update, so one not set here stays
+// hidden. Drawn as the lobby's settings screen previews it: the body font at
+// the given size (1 = the 32 px cell) with its middle at `y`, centred on `x`
+// or ending there. Field offsets and the two text-unit quirks (on-screen
+// size goes with mScale squared; a single line hangs from its anchor) as
+// lobby_native.cpp.
+constexpr uint32_t kMiddleCentre = 4, kMiddleRight = 5; // uBaseSprite::mCenterAttr
+static void SetOverlayLine(uint64_t unit, const char* text, float y, float scale, uint32_t rgba,
+                           float x = 640.0f, uint32_t anchor = kMiddleCentre)
+{
+    if (!unit) return;
+    const auto setVisible = (void(__fastcall*)(uint64_t, bool))_addr(FN_UI_SET_VISIBLE);
+    if (!text || !text[0]) {
+        setVisible(unit, false);
+        return;
+    }
+    constexpr uint32_t kAttrShadow = 0x2, kAttrGradient = 0x10;
+    ((void(__fastcall*)(uint64_t, const char*))_addr(FN_UI_FONT_SET_TEXT))(unit, text);
+    // The anchor is baked into the glyph quads: a change needs a relayout.
+    if (*(uint32_t*)(unit + 0x368) != anchor)
+        *(int32_t*)(unit + 0x6F0) = *(int32_t*)(unit + 0x594) - 1;
+    *(float*)(unit + 0x50) = x;
+    *(float*)(unit + 0x54) = y - 16.0f * scale;
+    *(float*)(unit + 0x70) = *(float*)(unit + 0x74) = sqrtf(scale);
+    *(uint32_t*)(unit + 0x368) = anchor;
+    *(uint32_t*)(unit + 0x310) = rgba;
+    // One colour, not the layout's shading from mColor to mColor1, and no
+    // shadow (the layout's is dark blue at (2, 3)).
+    *(uint32_t*)(unit + 0x364) &= ~(kAttrGradient | kAttrShadow);
+    *(uint8_t*)(unit + 0x108) = 1;
+    setVisible(unit, true);
+}
+
+static void DrawTopText(uint64_t score)
+{
+    char line[160];
+    char format[12] = "";
+    const char* note = nullptr;
+    bool desynced = false;
+    // The layout fades its units in over its first 30 frames, writing their
+    // position and colour as it goes: nothing is put on them until the name
+    // plate (never written here) has reached full alpha.
+    const uint64_t namePlate = *(uint64_t*)(score + 0xC8);
+    if (!namePlate || *(uint8_t*)(namePlate + 0x313) != 0xFF) return;
+    if (!LobbyFlow_IsSpectating()) {
+        LobbyFlow_GetScoreText(format, sizeof(format), line, sizeof(line));
+    } else if (!LobbyFlow_GetSpectatorOverlayText(line, sizeof(line), &note, &desynced)) {
+        line[0] = '\0';
+        note = nullptr;
+    }
+    constexpr uint32_t kWhite = 0xFFFFFFFF, kCyan = 0xFFFFDC78, kRed = 0xFF5A6EFF; // A B G R
+    SetOverlayLine(*(uint64_t*)(score + 0xC0), line, 20.0f, 0.68f, kWhite);
+    SetOverlayLine(*(uint64_t*)(score + 0xE8), note, 41.0f, 0.5f, desynced ? kRed : kCyan);
+    // A player's set format ("FT3"), apart from the score: in the top right,
+    // where Font_Listen is laid out (it ends at x 1050).
+    SetOverlayLine(*(uint64_t*)(score + 0x100), format, 20.0f, 0.68f, kWhite, 1050.0f,
+                   kMiddleRight);
+}
+
 static void __fastcall hkBtScoreUpdate(uint64_t score, uint64_t a2,
                                         uint64_t a3, uint64_t a4)
 {
@@ -151,7 +215,15 @@ static void __fastcall hkBtScoreUpdate(uint64_t score, uint64_t a2,
     const bool localIsP1 = Netplay_IsHost();
     const char* p1Name = localIsP1 ? localDisplayName : peerDisplayName;
     const char* p2Name = localIsP1 ? peerDisplayName : localDisplayName;
-    // Watching: the two players' names, not ours.
+    DrawTopText(score);
+    // Watching: the two players' names, not ours, and none at all with the
+    // spectator overlay set to none.
+    if (LobbyFlow_IsSpectating() && LobbyFlow_GetSpectatorOverlay() == 0) {
+        for (const uint64_t offset : {0xC8ull, 0xF0ull})
+            if (const uint64_t widget = *(uint64_t*)(score + offset))
+                ((void(__fastcall*)(uint64_t, bool))_addr(FN_UI_SET_VISIBLE))(widget, false);
+        return;
+    }
     if (LobbyFlow_IsSpectating() && !LobbyFlow_GetWatchedNames(&p1Name, &p2Name)) {
         p1Name = "Player 1";
         p2Name = "Player 2";
@@ -177,8 +249,8 @@ static void EnableHook(uintptr_t address, void* replacement, void** original,
 {
     MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(address), replacement, original);
     if (status == MH_OK) {
+        // Success is silent: `success` only names the hook for the reader here.
         GameplayHooks_QueueEnable((LPVOID)_addr(address));
-        HookLog("%s\n", success);
     } else {
         HookLog(failure, status);
     }
@@ -222,6 +294,8 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         Rollback_ClearPendingReSimulation();
 
     int32_t curFrame = Controller_GetNetFrameCount();
+    // Before anything in the tick runs: is this still an intro tick?
+    if (!g_isResimulating) Controller_NoteTickStart(curFrame);
     Rollback_FreezeWatchdogHeartbeat("main-enter", curFrame);
     int32_t traceFrame = g_isResimulating ? g_resimulateCurrentFrame : curFrame;
     if (TraceLifecycleFrame(traceFrame)) {
@@ -269,9 +343,9 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
             bool shouldResim = Rollback_ConsumeReSimRequest(start, end);
             if (!shouldResim)
                 shouldResim = AutoTest_GetForcedClientResim(curFrame, &start, &end);
-            // No replay begins in the intro or just after it: the frames
-            // there are played on neutral input whatever was predicted, and
-            // their snapshots hold the intro's cameras (controller.cpp).
+            // No replay begins in the intro: its ticks are played on neutral
+            // input whatever was predicted, and their snapshots hold the
+            // intro's camera (controller.cpp).
             if (shouldResim) {
                 const int32_t first = Controller_FirstRollbackFrame();
                 if (start < first) start = first;
@@ -530,7 +604,6 @@ static void InstallInputCallTiming()
         std::memcpy(patch + 2, &displacement, sizeof(displacement));
         GameplayHooks_RecordPatch(address, site.size);
         std::memcpy(address, patch, site.size);
-        HookLog("Input timing: patched call at 0x%llX\n", (unsigned long long)site.address);
     }
     DWORD ignored;
     const bool restored = VirtualProtect((void*)origin, span, previous, &ignored);
@@ -1203,8 +1276,8 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
     RollbackUnit_Install();
     XInputDiscovery_Init();
-    HookLog("Native network: component/agent/ranking/room frame updates %s\n",
-            DisableNativeNetworkFrameUpdates() ? "disabled (12-byte patch)" : "patch failed");
+    if (!DisableNativeNetworkFrameUpdates())
+        HookLog("Native network: component/agent/ranking/room frame updates patch FAILED\n");
     g_originalMvc3MainMove = originalMove;
     EnableHook(FN_SMVC3MAIN_MOVE, (void*)&hkMvc3MainMove, (void**)originalMove,
                "Rollback: hooked sMvc3Main__move",
@@ -1212,9 +1285,7 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 
     MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(FN_CCHR_SET_POS),
                                      (LPVOID)&hkCChrSetPos, (LPVOID*)&oCChrSetPos);
-    if (status == MH_OK)
-        HookLog("Rollback: hooked cChr__setPos for resim diagnostics\n");
-    else
+    if (status != MH_OK)
         HookLog("Rollback: failed to hook cChr__setPos (%d)\n", status);
 
     EnableHook(0x140258540, (void*)&hkWindowFocus, (void**)&oWindowFocus,

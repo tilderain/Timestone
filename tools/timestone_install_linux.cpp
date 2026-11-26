@@ -8,18 +8,14 @@
 // is run through Wine or Proton.
 //
 // It is linked whole, so it needs nothing installed but an X server (every
-// desktop has one, Wayland ones through XWayland), a font, and curl or wget
-// for the download. With no display it does the install in the terminal.
+// desktop has one, Wayland ones through XWayland), and curl or wget for the
+// download. Its font comes with it. With no display it does the install in the terminal.
 //
 //   TimestoneInstall [game folder]   the folder holding umvc3.exe, if not found
 //   TimestoneInstall --text          no window
 //   TimestoneInstall --uninstall     remove Timestone from the game folder, no window
 
-#include "install_ui.h"
-
-#define STB_TRUETYPE_IMPLEMENTATION
-#define STBTT_STATIC
-#include "imstb_truetype.h" // the copy that comes with Dear ImGui
+#include "install_text.h"
 
 #include <atomic>
 #include <cerrno>
@@ -55,6 +51,26 @@ __asm__(".section .rodata\n"
         ".previous\n");
 extern "C" const unsigned char timestone_stars_tile[];
 extern "C" const unsigned char timestone_stars_tile_end[];
+
+// The window's font, Bai Jamjuree (SIL Open Font License, see
+// UMVC3Hook/assets/README.md): Medium for the text, Bold for titles and
+// buttons.
+__asm__(".section .rodata\n"
+        ".global timestone_font_body\n"
+        "timestone_font_body:\n"
+        ".incbin \"BaiJamjuree-Medium.ttf\"\n"
+        ".global timestone_font_body_end\n"
+        "timestone_font_body_end:\n"
+        ".global timestone_font_title\n"
+        "timestone_font_title:\n"
+        ".incbin \"BaiJamjuree-Bold.ttf\"\n"
+        ".global timestone_font_title_end\n"
+        "timestone_font_title_end:\n"
+        ".previous\n");
+extern "C" const unsigned char timestone_font_body[];
+extern "C" const unsigned char timestone_font_body_end[];
+extern "C" const unsigned char timestone_font_title[];
+extern "C" const unsigned char timestone_font_title_end[];
 
 namespace {
 
@@ -490,6 +506,7 @@ void Install()
     std::vector<ZipFile> files;
     const ZipFile* plugin = nullptr;
     if (ListStoredZip(zip, files)) {
+        DropPackageOnlyFiles(files);
         for (const ZipFile& file : files)
             if (file.name == "Timestone.asi") plugin = &file;
     }
@@ -543,6 +560,8 @@ void Install()
     for (const ZipFile& file : files) shipsUpdater |= file.name == "TimestoneUpdater.exe";
     if (!shipsUpdater) unlink((folder + "TimestoneUpdater.exe").c_str());
     unlink((folder + "TimestoneUpdater.exe.new").c_str());
+    // Left by earlier installers.
+    for (const char* name : kPackageOnlyFiles) unlink((folder + name).c_str());
 
     std::string message = "Timestone " + tag + " is installed.";
     switch (EnableProtonLoader(gameDir)) {
@@ -613,7 +632,8 @@ void Uninstall()
     // The plugin first: once it is gone the game starts without Timestone,
     // whatever else is left.
     for (const char* name : {"Timestone.asi", "Timestone.asi.old", "Timestone-THIRDPARTYNOTICES",
-                             "TimestoneUpdater.exe", "TimestoneUpdater.exe.new"})
+                             "TimestoneUpdater.exe", "TimestoneUpdater.exe.new",
+                             "TimestoneInstall.exe"})
         if (!remove(name)) return;
     const bool keepLoader = OtherPluginsPresent(gameDir);
     if (!keepLoader && !remove("dinput8.dll")) return;
@@ -680,7 +700,9 @@ void StartTask(Task task)
 }
 
 // ---------------------------------------------------------------------------
-// Text, from a font of the system's drawn into the picture.
+// Text: install_text.h draws it, from the font the installer carries. A
+// character that font lacks (it is Latin and Thai) comes from a font of the
+// system's, so a folder named in any script still shows.
 // ---------------------------------------------------------------------------
 std::wstring Wide(const std::string& utf8)
 {
@@ -699,232 +721,52 @@ std::wstring Wide(const std::string& utf8)
     return wide;
 }
 
-class FontText final : public TextPainter {
-public:
-    FontText(uint32_t* pixels, int width, int height)
-        : pixels_(pixels), width_(width), height_(height), scale_(width / kScreenW)
-    {
-    }
-
-    // False if the system has no font this can read.
-    bool Load()
-    {
-        static const char* const kBold[] = {
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-            "/usr/share/fonts/google-noto/NotoSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/TTF/LiberationSans-Bold.ttf"};
-        static const char* const kRegular[] = {
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans.ttf",
-            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/TTF/LiberationSans-Regular.ttf"};
-        // What the desktop itself would use, then the places fonts usually are.
-        const auto load = [](Face& face, const char* pattern, const char* const* places, size_t count) {
-            std::string file;
-            if (Run({"fc-match", "-f", "%{file}", pattern}, &file) == 0 && face.Open(TrimLine(file)))
-                return true;
-            for (size_t i = 0; i < count; ++i)
-                if (face.Open(places[i])) return true;
-            return false;
-        };
-        const bool regular = load(regular_, "sans", kRegular, sizeof(kRegular) / sizeof(kRegular[0]));
-        const bool bold = load(bold_, "sans:bold", kBold, sizeof(kBold) / sizeof(kBold[0]));
-        if (regular && !bold) bold_ = regular_, bold_.Rebind();
-        if (bold && !regular) regular_ = bold_, regular_.Rebind();
-        return regular || bold;
-    }
-
-    float BlockHeight(FontId font, const wchar_t* text, float width, unsigned flags) override
-    {
-        return Wrap(font, text, width * scale_, (flags & kTextPath) != 0).size() * LineHeight(font) /
-                   scale_ + 2.0f;
-    }
-
-    void Draw(FontId font, const wchar_t* text, Rect rect, Color color, unsigned flags) override
-    {
-        if (!text[0]) return;
-        const float left = rect.x * scale_, top = rect.y * scale_;
-        const float boxW = rect.w * scale_, boxH = rect.h * scale_;
-        const float lineH = LineHeight(font);
-        std::vector<std::wstring> lines;
-        float y = top;
-        if (flags & (kTextMiddle | kTextRight)) {
-            lines.push_back(Fit(font, text, boxW));
-            y = top + (boxH - lineH) * 0.5f;
-        } else {
-            lines = Wrap(font, text, boxW, (flags & kTextPath) != 0);
-        }
-        for (const std::wstring& line : lines) {
-            const float lineW = Measure(font, line);
-            const float x = flags & kTextRight ? left + boxW - lineW : left + (boxW - lineW) * 0.5f;
-            const float baseline = y + Ascent(font);
-            if (flags & kTextOutline) {
-                const int edge = scale_ >= 1.25f ? 2 : 1;
-                for (int dy = -edge; dy <= edge; ++dy)
-                    for (int dx = -edge; dx <= edge; ++dx)
-                        if (dx || dy) DrawLine(font, line, x + dx, baseline + dy, lobby::Rgb(0x080A12));
-            }
-            DrawLine(font, line, x, baseline, color);
-            y += lineH;
-        }
-    }
-
-private:
-    struct Face {
+// The window's text: the carried font, and what the desktop itself would use
+// (then the places fonts usually are) for characters it lacks.
+bool LoadFonts(FontText& text)
+{
+    if (!text.Use(timestone_font_body, timestone_font_body_end,
+                  timestone_font_title, timestone_font_title_end))
+        return false;
+    static const char* const kBold[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/TTF/LiberationSans-Bold.ttf"};
+    static const char* const kRegular[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/TTF/LiberationSans-Regular.ttf"};
+    const auto load = [](const char* pattern, const char* const* places, size_t count) {
         std::vector<unsigned char> data;
-        stbtt_fontinfo info{};
-
-        bool Open(const std::string& path)
-        {
-            // Plain TrueType and OpenType files; a collection's first face.
-            if (path.empty() || !ReadWholeFile(path, data, 48u << 20) || data.size() < 12) return false;
-            return Rebind();
-        }
-        bool Rebind()
-        {
-            const int offset = stbtt_GetFontOffsetForIndex(data.data(), 0);
-            return offset >= 0 && stbtt_InitFont(&info, data.data(), offset) != 0;
-        }
+        const auto usable = [&data](const std::string& path) {
+            return !path.empty() && ReadWholeFile(path, data, 48u << 20) && data.size() >= 12;
+        };
+        std::string file;
+        if (Run({"fc-match", "-f", "%{file}", pattern}, &file) == 0 && usable(TrimLine(file)))
+            return data;
+        for (size_t i = 0; i < count; ++i)
+            if (usable(places[i])) return data;
+        data.clear();
+        return data;
     };
-    struct Glyph {
-        int w = 0, h = 0, left = 0, top = 0;
-        float advance = 0.0f;
-        std::vector<unsigned char> cover;
-    };
-
-    static int Index(FontId font) { return static_cast<int>(font); }
-    Face& FaceOf(FontId font) { return font == FontId::Title || font == FontId::Button ? bold_ : regular_; }
-    float Pixels(FontId font) const { return kFontHeight[Index(font)] * 0.80f * scale_; }
-    float Scale(FontId font) { return stbtt_ScaleForMappingEmToPixels(&FaceOf(font).info, Pixels(font)); }
-    float Ascent(FontId font)
-    {
-        int ascent, descent, gap;
-        stbtt_GetFontVMetrics(&FaceOf(font).info, &ascent, &descent, &gap);
-        return ascent * Scale(font);
-    }
-    float LineHeight(FontId font)
-    {
-        int ascent, descent, gap;
-        stbtt_GetFontVMetrics(&FaceOf(font).info, &ascent, &descent, &gap);
-        return (ascent - descent + gap) * Scale(font);
-    }
-
-    const Glyph& GlyphOf(FontId font, wchar_t character)
-    {
-        const uint64_t key = (static_cast<uint64_t>(Index(font)) << 32) | static_cast<uint32_t>(character);
-        const auto found = glyphs_.find(key);
-        if (found != glyphs_.end()) return found->second;
-        Glyph glyph;
-        const stbtt_fontinfo* info = &FaceOf(font).info;
-        const float scale = Scale(font);
-        const int index = stbtt_FindGlyphIndex(info, static_cast<int>(character));
-        int advance = 0, bearing = 0;
-        stbtt_GetGlyphHMetrics(info, index, &advance, &bearing);
-        glyph.advance = advance * scale;
-        if (unsigned char* bitmap = stbtt_GetGlyphBitmap(info, scale, scale, index, &glyph.w, &glyph.h,
-                                                         &glyph.left, &glyph.top)) {
-            glyph.cover.assign(bitmap, bitmap + static_cast<size_t>(glyph.w) * glyph.h);
-            stbtt_FreeBitmap(bitmap, nullptr);
-        }
-        return glyphs_.emplace(key, std::move(glyph)).first->second;
-    }
-
-    float Measure(FontId font, const std::wstring& text)
-    {
-        float width = 0.0f;
-        for (const wchar_t c : text) width += GlyphOf(font, c).advance;
-        return width;
-    }
-
-    // One line no wider than `width`: what does not fit is replaced by dots.
-    std::wstring Fit(FontId font, const std::wstring& text, float width)
-    {
-        if (Measure(font, text) <= width) return text;
-        std::wstring head = text;
-        while (head.size() > 1 && Measure(font, head + L"...") > width) head.pop_back();
-        return head + L"...";
-    }
-
-    // Lines broken to fit `width`: at spaces, or for a path after a slash
-    // (a folder name is kept whole where it can be). A run longer than a
-    // line is cut where the line ends.
-    std::vector<std::wstring> Wrap(FontId font, const std::wstring& text, float width, bool path = false)
-    {
-        std::vector<std::wstring> lines;
-        std::wstring line;
-        size_t keep = 0, resume = 0; // the last place to break: the line's length, and where the next starts
-        for (size_t i = 0; i <= text.size(); ++i) {
-            if (i == text.size() || text[i] == L'\n') {
-                lines.push_back(line);
-                line.clear();
-                keep = resume = 0;
-                continue;
-            }
-            const size_t before = line.size();
-            line.push_back(text[i]);
-            if (Measure(font, line) > width && before > 0) {
-                const bool broken = keep > 0;
-                lines.push_back(line.substr(0, broken ? keep : before));
-                line = line.substr(broken ? resume : before);
-                keep = resume = 0;
-            }
-            if (!path && text[i] == L' ') {
-                keep = line.size() - 1; // the space itself is dropped
-                resume = line.size();
-            } else if (path && (text[i] == L'/' || text[i] == L'\\')) {
-                keep = resume = line.size(); // the slash stays at the line's end
-            }
-        }
-        return lines;
-    }
-
-    void DrawLine(FontId font, const std::wstring& text, float x, float baseline, Color color)
-    {
-        const int r = static_cast<int>(color.r * 255.0f), g = static_cast<int>(color.g * 255.0f),
-                  b = static_cast<int>(color.b * 255.0f);
-        const int base = static_cast<int>(std::floor(baseline + 0.5f));
-        for (const wchar_t c : text) {
-            const Glyph& glyph = GlyphOf(font, c);
-            const int originX = static_cast<int>(std::floor(x + 0.5f)) + glyph.left;
-            const int originY = base + glyph.top;
-            for (int row = 0; row < glyph.h; ++row) {
-                const int py = originY + row;
-                if (py < 0 || py >= height_) continue;
-                for (int column = 0; column < glyph.w; ++column) {
-                    const int px = originX + column;
-                    const int cover = glyph.cover[static_cast<size_t>(row) * glyph.w + column];
-                    if (!cover || px < 0 || px >= width_) continue;
-                    uint32_t& pixel = pixels_[static_cast<size_t>(py) * width_ + px];
-                    const int alpha = cover + (cover >> 7), keep = 256 - alpha;
-                    const int dr = (pixel >> 16) & 255, dg = (pixel >> 8) & 255, db = pixel & 255;
-                    pixel = static_cast<uint32_t>(((r * alpha + dr * keep) >> 8) << 16 |
-                                                  ((g * alpha + dg * keep) >> 8) << 8 |
-                                                  ((b * alpha + db * keep) >> 8));
-                }
-            }
-            x += glyph.advance;
-        }
-    }
-
-    uint32_t* pixels_;
-    int width_, height_;
-    float scale_;
-    Face regular_, bold_;
-    std::map<uint64_t, Glyph> glyphs_;
-};
+    text.Spare(load("sans", kRegular, sizeof(kRegular) / sizeof(kRegular[0])),
+               load("sans:bold", kBold, sizeof(kBold) / sizeof(kBold[0])));
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // One screen from the state: shared by the window and the screenshots.
@@ -1087,7 +929,7 @@ int WriteScreens(const char* folder)
     std::vector<uint8_t> stars;
     LoadStars(stars);
     FontText text(pixels.data(), width, height);
-    if (!text.Load()) {
+    if (!LoadFonts(text)) {
         fprintf(stderr, "no usable font found\n");
         return 1;
     }
@@ -1187,7 +1029,7 @@ int RunWindow(Display* display)
     std::vector<uint8_t> stars;
     LoadStars(stars); // without them the backdrop is its grid on black
     FontText text(pixels.data(), width, height);
-    if (!text.Load()) return -1;
+    if (!LoadFonts(text)) return -1;
 
     const Window window = XCreateSimpleWindow(display, RootWindow(display, screen),
         (screenW - width) / 2, (screenH - height) / 2, width, height, 0, 0, 0);

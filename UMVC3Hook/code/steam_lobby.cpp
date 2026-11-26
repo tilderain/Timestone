@@ -1571,11 +1571,8 @@ bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity)
     if (!link || capacity == 0) return false;
     link[0] = '\0';
     if (!g_isHost || !g_lobbyId || !g_matchmaking) return false;
-    const uint64_t owner = g_api.GetLobbyOwner(g_matchmaking, g_lobbyId);
-    if (!owner) return false;
-    const int length = snprintf(link, capacity, "steam://joinlobby/357190/%llu/%llu",
-        static_cast<unsigned long long>(g_lobbyId),
-        static_cast<unsigned long long>(owner));
+    const int length = snprintf(link, capacity, "https://hero.rehab/join#%llu",
+        static_cast<unsigned long long>(g_lobbyId));
     return length > 0 && static_cast<size_t>(length) < capacity;
 }
 
@@ -2087,11 +2084,8 @@ bool SteamRoom_GetJoinLink(char* link, size_t capacity)
     if (!link || capacity == 0) return false;
     link[0] = '\0';
     if (LocalLobby_Enabled() || !SteamRoom_IsActive()) return false;
-    const uint64_t owner = g_api.GetLobbyOwner(g_matchmaking, g_lobbyId);
-    if (!owner) return false;
-    const int length = snprintf(link, capacity, "steam://joinlobby/357190/%llu/%llu",
-        static_cast<unsigned long long>(g_lobbyId),
-        static_cast<unsigned long long>(owner));
+    const int length = snprintf(link, capacity, "https://hero.rehab/join#%llu",
+        static_cast<unsigned long long>(g_lobbyId));
     return length > 0 && static_cast<size_t>(length) < capacity;
 }
 

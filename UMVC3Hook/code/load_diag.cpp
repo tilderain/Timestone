@@ -110,11 +110,9 @@ void CloseItem(double now)
 void LoadDiag_Install()
 {
     void* target = reinterpret_cast<void*>(_addr(FN_RESOURCE_EXECUTE_DECODE));
-    if (MH_CreateHook(target, reinterpret_cast<void*>(&Hook_ExecuteDecode),
-                      reinterpret_cast<void**>(&g_originalExecuteDecode)) == MH_OK &&
-        MH_EnableHook(target) == MH_OK)
-        HookLog("LoadDiag: timing archive decodes and the resource loader\n");
-    else
+    if (!(MH_CreateHook(target, reinterpret_cast<void*>(&Hook_ExecuteDecode),
+                        reinterpret_cast<void**>(&g_originalExecuteDecode)) == MH_OK &&
+          MH_EnableHook(target) == MH_OK))
         HookLog("LoadDiag: FAILED to hook the archive decode\n");
 }
 

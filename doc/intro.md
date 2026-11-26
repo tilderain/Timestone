@@ -177,10 +177,35 @@ taken in the intro handed the viewport that dead camera.
 - The skip is read `SKIP_INPUT_LAG` (16) frames back, from inputs that are
   confirmed on both sides (`ConfirmedInputs`). The frame the intro or the
   outro ends on is then the same live and in a replay.
-- Through the intro and `INTRO_QUIET_FRAMES` (20) after it the characters are
-  given neutral input (`ResolveTimelineInput`), so a mispredicted input there
-  changes nothing.
-- No replay starts in that stretch (`Controller_FirstRollbackFrame`, applied
-  in `rollback_hooks.cpp` where a replay is begun).
+- Through the intro the characters are given neutral input
+  (`ResolveTimelineInput`), so a mispredicted input there changes nothing.
+- No replay starts in the intro (`Controller_FirstRollbackFrame`, applied in
+  `rollback_hooks.cpp` where a replay is begun).
 - Restoring `sCamera` keeps a viewport's live camera when the snapshot's is
   no longer a live unit with both matrix getters (`rollback_restore.cpp`).
+
+### Movement in the countdown (2026-11-25, built, not run)
+
+Players reported that the characters stood still at the start of a game and
+that inputs were not taken from the first frame. The countdown
+(`sAction__stepCountdown` `0x140009670`, step 3) lasts 120 frames and the
+characters can already move in it; the first version of the fix above also
+kept 20 frames after the intro neutral, as a margin for the intro's objects
+to go away, and that came off the start of the countdown.
+
+The margin was not needed. The intro's camera is `sAction+0x1D8` (a
+`uMayaMotionCamera`, created on entry to step 2 and put on viewport 0, the
+battle camera kept at `+0x1E0`). `sAction__move` consumes the queued step at
+the top of the tick after the intro reports it is over:
+`sAction__executeMatchPhase(3)` kills that camera, zeroes `+0x1D8` and gives
+viewport 0 its camera back, in the same tick as the countdown's first
+sub-step. So the last snapshot that holds the intro's pointers is the one
+taken at the top of that tick, with `mStep` still 2.
+
+`Controller_NoteTickStart` (called at the top of `hkMvc3MainMove`, before
+anything in the tick runs) notes the tick's frame while `mStep <= 2`. Those
+frames are the neutral, never-replayed ones; the next tick has live input
+and can be gone back to. One tick of the countdown (the one that enters it)
+is neutral instead of twenty. The skip itself is still read 16 frames back,
+so the intro ends 16 frames after the press.
+

@@ -38,6 +38,7 @@
 #include "code/d3d9ex.h"
 #include "code/frame_pacing.h"
 #include "code/exception.h"
+#include "code/environment_log.h"
 #include "code/mk10utils.h"
 #include <Windows.h>
 #include <atomic>
@@ -1675,9 +1676,7 @@ static void InstallD3D9CreateDeviceHook(IDirect3D9* d3d9)
 			(LPVOID*)&g_originalD3D9GetAdapterModeCount);
 		if (modeCountStatus == MH_OK)
 			modeCountStatus = MH_EnableHook(modeCountTarget);
-		if (modeCountStatus == MH_OK || modeCountStatus == MH_ERROR_ENABLED) {
-			HookLog("D3D9: protected fixed-capacity adapter mode list\n");
-		} else {
+		if (modeCountStatus != MH_OK && modeCountStatus != MH_ERROR_ENABLED) {
 			HookLog("D3D9: failed to hook IDirect3D9::GetAdapterModeCount (%d)\n",
 				modeCountStatus);
 		}
@@ -1702,7 +1701,6 @@ static void InstallD3D9CreateDeviceHook(IDirect3D9* d3d9)
 	}
 
 	g_d3d9CreateDeviceHookReady.store(true, std::memory_order_release);
-	HookLog("D3D9: serialized IDirect3D9::CreateDevice\n");
 }
 
 static IDirect3D9* WINAPI HookDirect3DCreate9(UINT sdkVersion)
@@ -2164,7 +2162,6 @@ void OnInitializeHook()
 		// Since param_1+0x60 stays NULL, sub-state 1 (the wait loop) immediately advances to
 		// cleanup -- the caution screen never renders.
 		Memory::VP::Patch<uint8_t>(_addr(0x1402179ab), 0xEB);
-		HookLog("UMVC3Hook: Training mode - patched caution screen skip\n");
 	//}
 
 	// Hook aTitleLogo__update to skip logo movies (epilepsy/Capcom/Marvel) in training mode
@@ -2176,13 +2173,11 @@ void OnInitializeHook()
 		lobby::Ime_InstallHook();
 		if (!D3D9Reset_InstallNativeHooks())
 			D3D9Reset_AbortStartup("Could not install the graphics recovery controller; see Timestone.log");
-		if (MH_CreateHook(
+		if (!(MH_CreateHook(
 			(LPVOID)_addr(0x140217700),
 			(LPVOID)Hook_titleLogoUpdate,
 			(LPVOID*)&oTitleLogoUpdate
-		) == MH_OK && MH_EnableHook((LPVOID)_addr(0x140217700)) == MH_OK) {
-			HookLog("UMVC3Hook: Hooked aTitleLogo__update\n");
-		} else {
+		) == MH_OK && MH_EnableHook((LPVOID)_addr(0x140217700)) == MH_OK)) {
 			D3D9Reset_AbortStartup("Could not install the title/launcher readiness gate");
 		}
 	}
@@ -2290,11 +2285,10 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 	// Launch Normally is left untouched.
 	if (opt != LAUNCH_NORMAL) {
 		void* target = (void*)_addr(0x1402BA150);
-		if (MH_CreateHook(target, (LPVOID)&Hook_OpenVersusPauseMenu,
+		// No pause menu in netplay.
+		if (!(MH_CreateHook(target, (LPVOID)&Hook_OpenVersusPauseMenu,
 				(LPVOID*)&g_originalOpenVersusPauseMenu) == MH_OK &&
-			MH_EnableHook(target) == MH_OK)
-			HookLog("UMVC3Hook: Hooked sAction__openVersusPauseMenu (no pause menu in netplay)\n");
-		else
+			MH_EnableHook(target) == MH_OK))
 			HookLog("UMVC3Hook: FAILED to hook sAction__openVersusPauseMenu\n");
 		// Native online rewards for netplay matches; Steam achievement
 		// delivery, which the removed native network update used to do.
@@ -2430,20 +2424,17 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 		Memory::VP::Patch<uint8_t>(_addr(0x1402B4140), 0xB0);  // MOV AL,
 		Memory::VP::Patch<uint8_t>(_addr(0x1402B4141), 0x01);  //   1
 		Memory::VP::Patch<uint8_t>(_addr(0x1402B4142), 0xC3);  // RET
-		HookLog("UMVC3Hook: Patched sPad__isSlotValidAndConnected to always return true (slot always alive)\n");
 
 		// The direct aTitle transition still runs aTitle__load, which creates a
 		// purely visual uLoading unit at 0x14021706F. Keep its state countdown and
 		// resource readiness checks, but skip constructing the loading screen.
 		Memory::VP::Nop(_addr(0x14021706F), 5);
-		HookLog("UMVC3Hook: Disabled aTitle loading-screen creation for training boot\n");
 
 		// Backup patch: in uBattleUiTrainingCheckP2PadAssigned_maybe @ 0x1402E57EE,
 		// change JNZ to JMP so the function ALWAYS returns 1 (skip P2 wait state)
 		// even if sPadCheckSlotDeviceAlive_maybe somehow returns false.
 		// Original: 75 44 (JNZ +0x44) → EB 44 (JMP +0x44)
 		Memory::VP::Patch<uint8_t>(_addr(0x1402E57EE), 0xEB);
-		HookLog("UMVC3Hook: Patched uBattleUiTrainingCheckP2PadAssigned_maybe JNZ->JMP\n");
 
 		TrainingBoot_InitHooks();
 	}
@@ -2604,6 +2595,7 @@ extern "C" __declspec(dllexport) void InitializeASI()
 	}*/
 
 	Exception_InstallHandler();
+	EnvironmentLog_Boot();
 	BootTimer_Init();
 	BootTimer_Stamp("InitializeASI entry");
 	SettingsMgr->Init();
@@ -2611,8 +2603,6 @@ extern "C" __declspec(dllexport) void InitializeASI()
 
 	if (enet_initialize() != 0) {
 		HookLog("UMVC3Hook: Failed to initialize enet!\n");
-	} else {
-		HookLog("UMVC3Hook: enet initialized successfully\n");
 	}
 
 	CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);

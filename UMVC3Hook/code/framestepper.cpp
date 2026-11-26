@@ -30,6 +30,7 @@
 #include "keyboard_input.h"
 #include "trainingboot.h"
 #include "lobby_flow.h"
+#include "lobby_local.h"
 #include "spectate.h"
 
 extern void D3D9ResetDiagnostics_NoteGameThread();
@@ -116,7 +117,7 @@ static int32_t g_trainingLastFrame = -1;
 static uint32_t g_trainingLastGeneration = 0;
 static bool g_trainingFrameCountingActive = false;
 static bool g_trainingFrameLimitExitRequested = false;
-static int g_statusHudMode = 2;
+static int g_statusHudMode = 1;
 static float g_statusHudBottom = 0.0f;
 static bool g_opponentDisconnected = false;
 
@@ -328,7 +329,8 @@ static void ScheduleNetplayDelay(int32_t delay)
 // setting; this is the one place to read it. Outside a room they stay.
 extern "C" bool FrameStepper_MidMatchChangesAllowed()
 {
-    return !LobbyFlow_InRoomMatch();
+    // A lobby test build plays both sides on one machine, so they stay there.
+    return LocalLobby_Enabled() || !LobbyFlow_InRoomMatch();
 }
 
 static void AdjustNetplayDelay(int32_t delta)
@@ -1013,6 +1015,10 @@ static void __fastcall HookedMove(void* sMvc3Main)
         // is "ready" as soon as the feed has delivered the game's seed and
         // opening characters, and it never needs anything from us.
         const bool viewing = Spectate_IsViewing();
+        // Loaded for a game the players then never began: back to the room.
+        if (viewing && !g_battleSynchronized && g_restartTargetFrame < 0 &&
+            Spectate_GameAbandoned())
+            LobbyFlow_RequestReturnToLobby("");
         uint32_t watchedSeed = 0;
         uint32_t watchedOpening[2] = {0, 0};
         const bool watchedStartKnown = viewing && !g_battleSynchronized &&
@@ -1360,23 +1366,35 @@ static void LoadConfig()
     KEY_PAUSE   = GetPrivateProfileIntA("FrameStepper", "PauseKey",   VK_F2, iniPath);
     KEY_ADVANCE = GetPrivateProfileIntA("FrameStepper", "AdvanceKey", VK_F3, iniPath);
     g_statusHudMode = GetPrivateProfileIntA(
-        "FrameStepper", "StatusHudMode", 2, iniPath);
+        "FrameStepper", "StatusHudMode", 1, iniPath);
     if (g_statusHudMode < 0 || g_statusHudMode > 2)
-        g_statusHudMode = 2;
+        g_statusHudMode = 1;
 }
 
-static void SaveStatusHudMode()
+static bool SaveStatusHudMode()
 {
     char iniPath[MAX_PATH];
     GetConfigPath(iniPath, sizeof(iniPath));
     if (!iniPath[0])
-        return;
+        return false;
 
     char value[2] = { (char)('0' + g_statusHudMode), '\0' };
     if (!IniSafe_WriteString(
             "FrameStepper", "StatusHudMode", value, iniPath)) {
         HookLog("FrameStepper: failed to save HUD mode to %s\n", iniPath);
+        return false;
     }
+    return true;
+}
+
+int FrameStepper_GetStatusHudMode() { return g_statusHudMode; }
+
+bool FrameStepper_SetStatusHudMode(int mode)
+{
+    if (mode < 0 || mode > 2)
+        return false;
+    g_statusHudMode = mode;
+    return SaveStatusHudMode();
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,6 +1660,9 @@ bool KeyDown(int vk)
 
 static bool DebugControlsDisabledForNetplay()
 {
+    // A lobby test build plays both sides on one machine: its matches keep
+    // the debug keys, as dual training does.
+    if (LocalLobby_Enabled()) return false;
     return Netplay_IsActive() && GetLaunchOption() != LAUNCH_DUAL_TRAINING;
 }
 
@@ -1883,12 +1904,15 @@ void FrameStepper_Process()
     // sides can adjust them mid-match. A spectator has no settings to adjust.
     if (Spectate_IsViewing())
     {
-        // F3 is the HUD key for players; watching, it hides the overlay.
+        // F3 is the HUD key for players; watching, it steps the overlay down.
         if (KeyPressed(VK_F3))
-            LobbyFlow_ToggleSpectatorOverlay();
+            LobbyFlow_CycleSpectatorOverlay();
     }
     if (Netplay_IsActive() && !Spectate_IsViewing())
     {
+        // F4 shows or hides the set score of a room match.
+        if (KeyPressed(VK_F4) && LobbyFlow_InRoomMatch())
+            LobbyFlow_SetScoreDisplay(!LobbyFlow_GetScoreDisplay());
         // (On the character select F3 is the pause menu's key.)
         if (KeyPressed(VK_F3) && !LobbyFlow_PlayerInCharSelect())
         {
@@ -1977,7 +2001,8 @@ void FrameStepper_Process()
             isPaused = true;
         }
     }
-    if (!IsTrainingMode())
+    // A lobby test build's room match has them whatever mode it runs in.
+    if (!IsTrainingMode() && !(LocalLobby_Enabled() && LobbyFlow_InRoomMatch()))
     {
         // The character graph can disappear briefly while the native pause
         // popup initializes. Do not interpret that transient as an unpause;

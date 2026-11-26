@@ -154,6 +154,7 @@ void OptSoundStream_Init()
     const bool hooked = GameplayHooks_Create((LPVOID)_addr(0x1406897B0), (LPVOID)&hkFreeStreamingSource,
                                              (LPVOID*)&g_original) == MH_OK &&
                         GameplayHooks_QueueEnable((LPVOID)_addr(0x1406897B0)) == MH_OK;
-    HookLog("SoundStream: %s mode, freeStreamingSource %s\n", MODE == Mode::Shadow ? "shadow" : "replace",
-            hooked ? "hooked" : "FAILED");
+    if (!hooked)
+        HookLog("SoundStream: %s mode, freeStreamingSource hook FAILED\n",
+                MODE == Mode::Shadow ? "shadow" : "replace");
 }

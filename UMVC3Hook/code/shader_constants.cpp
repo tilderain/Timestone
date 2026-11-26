@@ -75,7 +75,8 @@ bool Hook(IDirect3DDevice9* device, int slot, void* detour, SetConstants* origin
     MH_STATUS status = MH_CreateHook(target, detour, reinterpret_cast<void**>(original));
     if (status == MH_OK)
         status = MH_EnableHook(target);
-    HookLog("ShaderConstants: hook %s %p status=%d\n", name, target, (int)status);
+    if (status != MH_OK)
+        HookLog("ShaderConstants: hook %s %p FAILED status=%d\n", name, target, (int)status);
     return status == MH_OK;
 }
 

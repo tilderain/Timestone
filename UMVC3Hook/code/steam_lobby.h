@@ -115,7 +115,7 @@ bool SteamRoom_SendChat(const void* data, int size);
 bool SteamRoom_PollChat(uint64_t* sender, char* buffer, int capacity, int* size);
 // Opens Steam's invite dialog for the room. False if the overlay is unavailable.
 bool SteamRoom_InviteFriends();
-// "steam://joinlobby/..." link to the room, as the launcher's Copy Lobby Link
+// "https://hero.rehab/join#<lobby id>" link to the room, as the launcher's Copy Lobby Link
 // gives for its lobby. False outside a room.
 bool SteamRoom_GetJoinLink(char* link, size_t capacity);
 // Opens the Steam overlay on a player's profile. False if it is unavailable.

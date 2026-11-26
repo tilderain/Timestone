@@ -88,7 +88,6 @@ bool GameplayHooks_Apply()
         HookLog("GameplayHooks: could not apply queued detours status=%d\n", status);
         return false;
     }
-    HookLog("GameplayHooks: applied queued detours\n");
     return true;
 }
 

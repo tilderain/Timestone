@@ -121,9 +121,10 @@ constexpr uint32_t SPRITE_ATTR_GRADIENT = 0x10;
 constexpr size_t SPRITE_CENTER_ATTR = 0x368;
 constexpr size_t SPRITE_BLEND_STATE = 0x398;
 constexpr size_t SPRITE_PRIMITIVE_ATTR = 0x39C;
-// Set on the sprite prototype (0x1004) and on no native sprite that shows a
-// plain DXT1 texture: those all keep the constructor's 0x1000.
-constexpr uint32_t SPRITE_PRIMITIVE_ATTR_HQ_ONLY = 0x4;
+// The texture filter: set, the sprite is point sampled (SSWrapPoint); clear,
+// linear (SSWrapLinear). cPrim__changeSpriteSamplerState 0x140785BD0. Set on
+// the sprite prototype (0x1004); the constructor's value is 0x1000.
+constexpr uint32_t SPRITE_PRIMITIVE_ATTR_POINT_FILTER = 0x4;
 constexpr size_t FRAME_ATTR = 0x540;         // bit 0: tile the centre cell
 constexpr size_t FONT_MSG_INDEX = 0x594;     // -1 while showing a raw string
 constexpr size_t FONT_CACHED_MSG_ID = 0x6F0;
@@ -306,6 +307,9 @@ void* g_licenseArchive = nullptr;
 // about 7 MB in all). It is asked for the first time a stage icon is wanted
 // and given back when the lobby's units are released.
 void* g_stageArchive = nullptr;
+// ui\mnchs is the character select screen's own archive (about 1.6 MB); the
+// select screens' arrow is in it. Asked for and given back like the stage one.
+void* g_selectArchive = nullptr;
 
 // Requests a language-specific UI archive by its base name ("ui\\lic").
 void RequestArchive(void*& handle, const char* name)
@@ -366,6 +370,8 @@ void ReleaseBannerArchives()
     using Release = void(__fastcall*)(void*);
     if (g_stageArchive) Native<Release>(CRESOURCE_RELEASE_REF)(g_stageArchive);
     g_stageArchive = nullptr;
+    if (g_selectArchive) Native<Release>(CRESOURCE_RELEASE_REF)(g_selectArchive);
+    g_selectArchive = nullptr;
     for (void*& archive : g_bannerArchives) {
         if (archive) Native<Release>(CRESOURCE_RELEASE_REF)(archive);
         archive = nullptr;
@@ -386,10 +392,11 @@ void* GetTexture(Tex tex)
     if (info.archive == ARC_LICENSE) RequestLicenseArchive();
     // Asked every frame while it loads: nothing is read from disk here.
     if (info.archive == ARC_BANNER && !BannerArchiveReady(tex)) return nullptr;
-    if (info.archive == ARC_STAGE) {
-        RequestArchive(g_stageArchive, "ui\\mnchsstg");
-        if (!g_stageArchive ||
-            !(Field<uint32_t>(g_stageArchive, CRESOURCE_STATE) & kResourceSettled))
+    if (info.archive == ARC_STAGE || info.archive == ARC_SELECT) {
+        const bool stage = info.archive == ARC_STAGE;
+        void*& archive = stage ? g_stageArchive : g_selectArchive;
+        RequestArchive(archive, stage ? "ui\\mnchsstg" : "ui\\mnchs");
+        if (!archive || !(Field<uint32_t>(archive, CRESOURCE_STATE) & kResourceSettled))
             return nullptr;
     }
     if (info.archive == ARC_LOOSE) {
@@ -683,6 +690,16 @@ void ApplyPlacement(void* unit, float x, float y, float scaleX, float scaleY, An
     SetDraw(unit, true);
 }
 
+// The draw state of a lobby sprite: the prototype's, with linear filtering.
+// The layout is 1280x720 stretched to the real resolution, and point
+// sampling made every enlarged picture pixel-sharp. Pooled units are reused,
+// so this is written on every draw.
+uint32_t SpriteDrawAttr()
+{
+    return Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR) &
+           ~SPRITE_PRIMITIVE_ATTR_POINT_FILTER;
+}
+
 void ApplyTextured(void* unit, Tex tex, void* texture, float w, float h, Uv uv)
 {
     if (Field<void*>(unit, SPRITE_TEXTURE) != texture) {
@@ -711,14 +728,23 @@ public:
         void* unit = AcquireUnit(KIND_SPRITE);
         if (!unit) return;
         ApplyTextured(unit, tex, texture, w, h, uv);
-        // Pooled units are reused, so this is set on every draw. The comic
-        // plate is the one plain DXT1 texture drawn here; it gets the draw
-        // state the native lobby's own backdrop sprite (a_lic_bg) has.
-        const uint32_t attr =
-            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
-        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
-            tex == TEX_ROOM_BACKDROP ? attr & ~SPRITE_PRIMITIVE_ATTR_HQ_ONLY : attr;
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) = SpriteDrawAttr();
         ApplyPlacement(unit, x, y, 1.0f, 1.0f, anchor, color);
+    }
+
+    void SpriteTurned(Tex tex, float x, float y, float w, float h, Uv uv, float radians,
+                      Color color) override
+    {
+        if (color.a <= 0.004f || w <= 0.0f || h <= 0.0f) return;
+        void* texture = GetTexture(tex);
+        if (!texture) return;
+        void* unit = AcquireUnit(KIND_SPRITE);
+        if (!unit) return;
+        ApplyTextured(unit, tex, texture, w, h, uv);
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) = SpriteDrawAttr();
+        ApplyPlacement(unit, x, y, 1.0f, 1.0f, A_MC, color);
+        Field<float>(unit, UCOORD_QUAT + 8) = std::sin(radians * 0.5f);
+        Field<float>(unit, UCOORD_QUAT + 12) = std::cos(radians * 0.5f);
     }
 
     void Line(float x0, float y0, float x1, float y1, float width, Color color) override
@@ -733,8 +759,7 @@ public:
         // A flat quad as long as the line, centred on its middle and turned
         // about the screen's axis (uCoord's rotation, a quaternion).
         ApplyTextured(unit, TEX_WHITE, texture, length, width, Uv{0.25f, 0.25f, 0.75f, 0.75f});
-        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
-            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) = SpriteDrawAttr();
         ApplyPlacement(unit, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 1.0f, 1.0f, A_MC, color);
         const float half = std::atan2(dy, dx) * 0.5f;
         Field<float>(unit, UCOORD_QUAT + 8) = std::sin(half);
@@ -755,8 +780,7 @@ public:
         const float v1 = static_cast<float>(kSpaceLineRow0 + kSpaceLineRows) / kSpaceStarsSize;
         ApplyTextured(unit, TEX_SPACE_STARS, texture, length, static_cast<float>(kSpaceLineRows),
                       Uv{0.25f, v0, 0.75f, v1});
-        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) =
-            Field<uint32_t>(g_pools[KIND_SPRITE].prototype, SPRITE_PRIMITIVE_ATTR);
+        Field<uint32_t>(unit, SPRITE_PRIMITIVE_ATTR) = SpriteDrawAttr();
         ApplyPlacement(unit, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 1.0f, 1.0f, A_MC, color);
         const float half = std::atan2(dy, dx) * 0.5f;
         Field<float>(unit, UCOORD_QUAT + 8) = std::sin(half);
@@ -968,6 +992,32 @@ void LogPadState(void* pad, const char* why)
 // detection the way sPad::Pad::detect does (flags 0x18: XInput, then
 // DirectInput) until each slot is active; from then on the engine's own poll
 // keeps re-detecting it. The call is rate limited to once a second per slot.
+void Native_LogPadPaths()
+{
+    using GetInstance = void*(__fastcall*)();
+    void* pad = Native<GetInstance>(SPAD_GET_INSTANCE)();
+    if (!pad) {
+        HookLog("Input: sPad is not there; no controller can be read\n");
+        return;
+    }
+    char text[160] = {};
+    size_t used = 0;
+    for (int slot = 0; slot < 4; ++slot) {
+        const uint8_t* slotObject =
+            static_cast<uint8_t*>(pad) + SPAD_SLOT_BASE + slot * SPAD_SLOT_STRIDE;
+        const uint8_t kind = slotObject[SPAD_SLOT_KIND];
+        const char* path = !slotObject[SPAD_SLOT_ACTIVE] ? "inactive"
+            : kind == 0 ? "empty" : kind == 2 ? "DirectInput" : "XInput";
+        const int wrote = snprintf(text + used, sizeof(text) - used, "%s%d=%s", slot ? ", " : "",
+                                   slot, path);
+        if (wrote > 0) used += static_cast<size_t>(wrote);
+        if (used >= sizeof(text)) break;
+    }
+    HookLog("Input: pad slots %s | lobby XInput fallback %s\n", text,
+            g_xinputLogged ? "HAS BEEN USED (the game's own pad reading saw no controller)"
+                           : "not used");
+}
+
 void Native_EnsurePadSlotsActive()
 {
     using GetInstance = void*(__fastcall*)();
@@ -992,7 +1042,7 @@ namespace {
 // (sPad__accumulateUnitFlagsFromQuery): arrows, Enter/A, Backspace/B, X, Y,
 // Esc as Start.
 struct KeyState {
-    bool up, down, left, right, confirm, cancel, x, y, menu, quickChat;
+    bool up, down, left, right, confirm, cancel, x, y, menu, quickChat, spectate;
 };
 
 KeyState ReadKeyboard(bool textActive)
@@ -1014,6 +1064,9 @@ KeyState ReadKeyboard(bool textActive)
         keys.y = IsKeyHeld('Y');
         // X is also the quick chat key; in a room that is all it does.
         keys.quickChat = keys.x;
+        // So watching a setup, X on a pad, has its own key: right Ctrl,
+        // which the game's key sheet has a cap for.
+        keys.spectate = IsKeyHeld(VK_RCONTROL);
     }
     return keys;
 }
@@ -1402,6 +1455,7 @@ void Native_ReadInput(Input& input, bool textActive)
     enum : uint32_t {
         H_UP = 1, H_DOWN = 2, H_LEFT = 4, H_RIGHT = 8, H_CONFIRM = 16, H_CANCEL = 32,
         H_X = 64, H_Y = 128, H_MENU = 256, H_LB = 512, H_RB = 1024, H_QUICK_CHAT = 2048,
+        H_SPECTATE = 4096,
     };
     uint32_t fromPad = 0, fromKeys = 0;
     if (padHeld & PAD_UP) fromPad |= H_UP;
@@ -1410,7 +1464,7 @@ void Native_ReadInput(Input& input, bool textActive)
     if (padHeld & PAD_RIGHT) fromPad |= H_RIGHT;
     if (padHeld & decideMask) fromPad |= H_CONFIRM;
     if (padHeld & cancelMask) fromPad |= H_CANCEL;
-    if (padHeld & PAD_X) fromPad |= H_X;
+    if (padHeld & PAD_X) fromPad |= H_X | H_SPECTATE;
     if (padHeld & PAD_Y) fromPad |= H_Y;
     if (padHeld & PAD_START) fromPad |= H_MENU;
     if (padHeld & PAD_LB) fromPad |= H_LB;
@@ -1425,6 +1479,7 @@ void Native_ReadInput(Input& input, bool textActive)
     if (keys.y) fromKeys |= H_Y;
     if (keys.menu) fromKeys |= H_MENU;
     if (keys.quickChat) fromKeys |= H_QUICK_CHAT;
+    if (keys.spectate) fromKeys |= H_SPECTATE;
 
     const uint32_t held = fromPad | fromKeys;
     // A button already down when the lobby (re)appears is not a press: the
@@ -1464,6 +1519,7 @@ void Native_ReadInput(Input& input, bool textActive)
     input.pageLeft = (pressed & H_LB) != 0;
     input.pageRight = (pressed & H_RB) != 0;
     input.quickChat = (pressed & H_QUICK_CHAT) != 0;
+    input.spectate = (pressed & H_SPECTATE) != 0;
     input.usingKeyboard = g_usingKeyboard;
     input.unfocused = !foreground;
 
