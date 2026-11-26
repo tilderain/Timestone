@@ -1013,7 +1013,13 @@ void Native_LogPadPaths()
         if (wrote > 0) used += static_cast<size_t>(wrote);
         if (used >= sizeof(text)) break;
     }
-    HookLog("Input: pad slots %s | lobby XInput fallback %s\n", text,
+    // Player 1 is read from the slot it is mapped to, and only while the
+    // source byte says "pad" (sMvc3Pad+0xC30, see controller.cpp).
+    const uint64_t manager = *reinterpret_cast<uint64_t*>(_addr(0x140D510A0) /* sMvc3Manager instance */);
+    const int32_t* assign = manager ? reinterpret_cast<const int32_t*>(manager + 0x140) : nullptr;
+    HookLog("Input: pad slots %s | players on slots %d/%d, player 1 source %s | lobby XInput "
+            "fallback %s\n", text, assign ? assign[0] : -2, assign ? assign[1] : -2,
+            Field<uint8_t>(pad, 0xC30) ? "pad" : "keyboard",
             g_xinputLogged ? "HAS BEEN USED (the game's own pad reading saw no controller)"
                            : "not used");
 }

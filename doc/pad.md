@@ -127,16 +127,28 @@ repeat state.
    `sPad + slotIndex * 0x2E0 + 0x1BC` and applies SOCD cleaning.
 
 The keyboard and pad sources are alternatives in this native getter, not an
-automatic OR. On a netplay client, the plugin combines decoded buttons from all
-four hardware slots whose active and device-kind fields are nonzero, then applies
-SOCD once to the combined mask. It reads existing native poll results; it does
-not poll or reacquire devices itself. This avoids assuming the local controller
-is in hardware slot 0. Unused connected controllers can contribute input too.
-Normal/offline routing and the netplay host's routing are unchanged. The client
-then uses player 0's native keyboard remap from the scoped `buttonRemap` hook. Their
-logical masks are combined for local P2. This preserves the native keyboard
-focus/device gate and suppresses keyboard input while the process is not
-foreground.
+automatic OR. The choice is the byte at `sPad+0xC30` (0 keyboard, 1 pad),
+maintained every frame by `0x1402B42C0`: a rising edge on the hardware slot
+player 0 is mapped to sets it; any key trigger or mouse button clears it; with
+no connected slot it is cleared. `cChrInput__buttonRemap` has the same gate
+for player 0 (`sPad__isFocusOrMenuInput`, `0x1402B4170`): while the byte is 0
+(and the pause byte `+0xC49` is 0) it ignores the pad mask it was given and
+returns the keyboard's actions. So natively player 1's pad does nothing unless
+it is on player 0's slot and the byte has flipped to 1.
+
+In a netplay match the local player, host or client, is read by the plugin
+instead (`ReadAllPadSlots` and `RemapLocalInput` in controller.cpp): decoded
+buttons from all four hardware slots whose active and device-kind fields are
+nonzero, SOCD applied once to the combined mask, remapped through the player's
+own bindings with the source byte held on "pad" for player 0's remap, and the
+keyboard's actions (a remap of nothing as player 0) added while the process is
+foreground. It reads existing native poll results; it does not poll or
+reacquire devices itself. This avoids assuming the local controller is in
+hardware slot 0 or that the source byte is on "pad". Unused connected
+controllers can contribute input too. Until 2026-11-26 only the client was
+read this way; the host went through the native getter and gate (report of
+2026-11-25: a player could play as P2 and not as P1 in the same session).
+Offline routing is unchanged.
 
 `0x1402B3950` is a related getter that reads object-relative `+0x1D0` instead of
 `+0x1BC` and uses an alternate keyboard translator. Intro code that calls this

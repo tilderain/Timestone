@@ -1212,6 +1212,64 @@ static uint32_t ResolveTimelineInput(FrameInputRemapContext* context,
     return resolved;
 }
 
+// sMvc3Pad+0xC30: 0 while the game takes player 1 from the keyboard, 1 from
+// the pad. sMvc3SyncPad (0x1402B42C0) sets it on a press on the hardware slot
+// player 1 is mapped to and clears it on any key or mouse button. While it is
+// 0 the native getters and cChrInput__buttonRemap give player 1 the keyboard
+// alone: a pad on another slot, or one that never flips the byte, does nothing.
+static constexpr uint32_t PAD_INPUT_SOURCE = 0xC30;
+
+// A netplay player owns one team, on whichever hardware slot their controller
+// is and whichever source the game believes player 1 is using. (Until
+// 2026-11-26 only the client read every slot; the host read slot 0 through
+// the native getter, and a player whose pad was elsewhere could play as P2
+// and not as P1.) Reads what the native poll already decoded.
+static uint32_t ReadAllPadSlots(uint64_t pad)
+{
+    static uint32_t loggedSlots = 0;
+    uint32_t mergedInput = 0;
+    for (uint32_t slot = 0; slot < PAD_MAX_SLOTS; ++slot) {
+        const uint64_t slotBase = pad + slot * PAD_SLOT_STRIDE;
+        if (!*(const uint8_t*)(slotBase + PAD_SLOT_ACTIVE) ||
+            !*(const uint8_t*)(slotBase + PAD_SLOT_DEVICE_KIND))
+            continue;
+        const uint32_t input = *(const uint32_t*)(slotBase + PAD_SLOT_INPUT);
+        if (input && !(loggedSlots & (1u << slot))) {
+            loggedSlots |= 1u << slot;
+            HookLog("Input: match input from the controller on pad slot %u (the game's "
+                    "player 1 source is %s)\n", slot,
+                    *(const uint8_t*)(pad + PAD_INPUT_SOURCE) ? "the pad" : "the keyboard");
+        }
+        mergedInput |= input;
+    }
+    return ApplySOCD(mergedInput);
+}
+
+// The local player's pad through their own bindings, with the keyboard added.
+// Player 1's remap is the one that gives way to the keyboard, so the source
+// byte is held on "pad" for it; a remap of nothing as player 1 is then the
+// keyboard's part (nothing while the pad is the source). The client's team
+// carries a copy of the player's own bindings (TrainingBoot).
+static uint32_t RemapLocalInput(uint32_t team, uint32_t rawInput, uint8_t alternateMap)
+{
+    uint32_t logical;
+    using GetInstanceFn = uint64_t(__fastcall*)();
+    const uint64_t pad = ((GetInstanceFn)_addr(ADDR_PAD_GET_INSTANCE))();
+    if (team == 0 && pad) {
+        uint8_t* source = (uint8_t*)(pad + PAD_INPUT_SOURCE);
+        const uint8_t saved = *source;
+        *source = 1;
+        logical = obuttonRemap(0, rawInput, alternateMap);
+        *source = saved;
+    } else {
+        logical = obuttonRemap(team, rawInput, alternateMap);
+    }
+    // Keys typed into another window are not the player's.
+    if (IsGameProcessForeground())
+        logical |= obuttonRemap(0, 0, alternateMap);
+    return logical;
+}
+
 static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t rawInput,
                                          uint8_t alternateMap)
 {
@@ -1242,13 +1300,11 @@ static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t rawInput
         // Remap test input without P1's focus/menu shortcut.
         currentInput = obuttonRemap(1, rawTestInput, alternateMap);
     } else {
-        currentInput = obuttonRemap(playerIndex, rawInput, alternateMap);
-
-        // Merge P1's native keyboard input into the client's P2 controller input.
-        if (!Netplay_IsHost() && context->ownerTeam == 1 &&
-            playerIndex == 1 && IsGameProcessForeground()) {
-            currentInput |= obuttonRemap(0, 0, alternateMap);
-        }
+        const uint32_t localTeam = Netplay_IsHost() ? 0u : 1u;
+        if (context->ownerTeam == localTeam && playerIndex == localTeam)
+            currentInput = RemapLocalInput(localTeam, rawInput, alternateMap);
+        else
+            currentInput = obuttonRemap(playerIndex, rawInput, alternateMap);
     }
 
     uint32_t resolved = ResolveTimelineInput(
@@ -1299,6 +1355,11 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             {
                 raw = 0;
             }
+            else if (playerIndex == 0)
+            {
+                // The keyboard is merged after the remap (RemapLocalInput).
+                raw = ReadAllPadSlots(pad);
+            }
             else
             {
                 raw = oGetsCurrentInput_withSOCD(pad, playerIndex);
@@ -1312,17 +1373,7 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             }
             else if (playerIndex == 1)
             {
-                // A client owns one player, regardless of which hardware slot
-                // contains its controller. Keyboard input is merged later.
-                uint32_t mergedInput = 0;
-                for (uint32_t slot = 0; slot < PAD_MAX_SLOTS; ++slot) {
-                    const uint64_t slotBase = pad + slot * PAD_SLOT_STRIDE;
-                    if (*(const uint8_t*)(slotBase + PAD_SLOT_ACTIVE) &&
-                        *(const uint8_t*)(slotBase + PAD_SLOT_DEVICE_KIND)) {
-                        mergedInput |= *(const uint32_t*)(slotBase + PAD_SLOT_INPUT);
-                    }
-                }
-                raw = ApplySOCD(mergedInput);
+                raw = ReadAllPadSlots(pad);
             }
             else
             {
@@ -1398,11 +1449,7 @@ static uint32_t ReadLocalLogicalInput()
     uint32_t playerIndex =
         ((GetPlayerPadFn)_addr(ADGR_MGR_GET_PLAYER_CHAR))(manager, team);
     uint32_t rawInput = (uint32_t)hkGetsCurrentInput_withSOCD(pad, playerIndex);
-    uint32_t logicalInput = obuttonRemap(team, rawInput, alternateMap);
-
-    if (!Netplay_IsHost() && team == 1 && IsGameProcessForeground())
-        logicalInput |= obuttonRemap(0, 0, alternateMap);
-    return logicalInput;
+    return RemapLocalInput(team, rawInput, alternateMap);
 }
 
 extern "C" uint32_t Controller_CaptureOpeningMember()
