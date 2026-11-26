@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lobby layout editor</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; scrollbar-color: #454b5a #15171c; }
+  body { margin: 0; font: 13px/1.4 system-ui, sans-serif; background: #15171c; color: #d8dce4;
+         display: grid; grid-template-rows: auto 1fr; grid-template-columns: 1fr 340px; height: 100vh; }
+  header { grid-column: 1 / 3; display: flex; gap: 10px; align-items: center; padding: 8px 12px;
+           background: #1e2129; border-bottom: 1px solid #333844; }
+  header b { font-size: 14px; }
+  select, button, input { font: inherit; color: inherit; background: #2a2e39; border: 1px solid #454b5a;
+           border-radius: 4px; padding: 4px 8px; }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { background: #363b49; }
+  button:disabled { opacity: .45; cursor: default; }
+  #status { margin-left: auto; color: #8f97a8; }
+  #status.busy { color: #ffd63a; }
+  main { overflow: auto; padding: 12px; display: flex; align-items: flex-start; justify-content: center; }
+  #stage { position: relative; width: 100%; max-width: 1280px; user-select: none; }
+  #shot { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; cursor: default; }
+  aside { background: #1a1d24; border-left: 1px solid #333844; overflow: auto; padding: 12px; }
+  aside h3 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #8f97a8; }
+  aside h3:first-child { margin-top: 0; }
+  pre { margin: 0; padding: 6px 8px; background: #0f1115; border-radius: 4px; overflow-x: auto;
+        font: 11px/1.45 ui-monospace, monospace; color: #9aa3b5; }
+  pre .at { color: #ffd63a; }
+  .fields { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 6px 8px; align-items: center; }
+  .fields input { width: 100%; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .thumb { background: repeating-conic-gradient(#3a3f4b 0 25%, #2b2f38 0 50%) 0 0 / 16px 16px;
+           border: 1px solid #454b5a; border-radius: 4px; display: flex; align-items: center;
+           justify-content: center; }
+  .thumb img { max-width: 100%; max-height: 100%; }
+  #texThumb { height: 96px; margin-bottom: 6px; }
+  .muted { color: #8f97a8; }
+  .stack div { padding: 3px 6px; border-radius: 3px; cursor: pointer; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }
+  .stack div:hover { background: #2a2e39; }
+  .stack div.on { background: #3b3320; color: #ffd63a; }
+  .stack b { color: #5ce4ff; font-weight: normal; float: right; }
+  .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, .6); display: none;
+           align-items: center; justify-content: center; z-index: 10; }
+  .modal.open { display: flex; }
+  .sheet { background: #1e2129; border: 1px solid #454b5a; border-radius: 8px; padding: 14px;
+           width: min(1100px, 94vw); max-height: 92vh; display: flex; flex-direction: column; gap: 10px; }
+  .sheet .bar { display: flex; gap: 10px; align-items: center; }
+  .sheet .bar input[type=text] { flex: 1; }
+  #browser { display: grid; grid-template-columns: 250px 1fr; gap: 10px; min-height: 0; flex: 1; }
+  #folders { overflow: auto; font-size: 12px; border-right: 1px solid #333844; padding-right: 6px; }
+  #folders div { padding: 2px 6px; border-radius: 3px; cursor: pointer; white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; }
+  #folders div:hover { background: #2a2e39; }
+  #folders div.on { background: #3b3320; color: #ffd63a; }
+  #folders span { color: #8f97a8; float: right; margin-left: 6px; }
+  .sheet { height: 92vh; }
+  #cropModal .sheet { height: auto; }
+  #grid { overflow: auto; min-height: 300px; align-content: start; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .asset { border: 1px solid #333844; border-radius: 6px; padding: 6px; cursor: pointer; background: #181b21; }
+  .asset:hover { border-color: #ffd63a; }
+  .asset .thumb { height: 96px; }
+  .asset .name { font-size: 11px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { font-size: 10px; padding: 0 5px; border-radius: 8px; background: #3a3f4b; }
+  .badge.ok { background: #1f4a2c; color: #9be7ad; }
+  .badge.cost { background: #523a16; color: #ffc46b; }
+  #cropBox { position: relative; align-self: center; line-height: 0; }
+  #cropBox img { display: block; image-rendering: pixelated; }
+  #cropSel { position: absolute; border: 1px solid #ffd63a; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55); pointer-events: none; }
+  #cropWrap { overflow: hidden; align-self: center; }
+  #cropBox.grid::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(to right, rgba(255,255,255,.22) 1px, transparent 1px) 0 0 / var(--grid) var(--grid),
+                linear-gradient(to bottom, rgba(255,255,255,.22) 1px, transparent 1px) 0 0 / var(--grid) var(--grid); }
+  .sheet .fields { grid-template-columns: repeat(10, auto); justify-content: start; }
+  .sheet .fields input { width: 70px; }
+</style>
+</head>
+<body>
+<header>
+  <b>Lobby layout editor</b>
+  <select id="screens"></select>
+  <button id="undo" title="Ctrl+Z">Undo</button>
+  <button id="resetAll">Reset all</button>
+  <select id="add" title="Make a new element on this kind of screen">
+    <option value="">New element...</option>
+    <option value="sprite">Picture...</option>
+    <option value="frame">9-slice...</option>
+    <option value="fill">Box</option>
+    <option value="text">Text</option>
+  </select>
+  <label title="Moved and resized elements land on a grid of this many units">Snap
+    <select id="snap"></select></label>
+  <span class="muted" id="count"></span>
+  <span id="status">ready</span>
+</header>
+<main>
+  <div id="stage">
+    <img id="shot" alt="">
+    <svg id="overlay" viewBox="0 0 1280 720" preserveAspectRatio="none"></svg>
+  </div>
+</main>
+<aside id="side"></aside>
+
+<div class="modal" id="assetModal">
+  <div class="sheet">
+    <div class="bar">
+      <b id="assetTitle">Replace with a game texture</b>
+      <input type="text" id="search" placeholder="search by name or folder...">
+      <label><input type="checkbox" id="residentOnly"> only archives the lobby already has in memory</label>
+      <button id="assetClose">Cancel</button>
+    </div>
+    <div class="muted" id="assetInfo"></div>
+    <div id="browser"><div id="folders"></div><div id="grid"></div></div>
+  </div>
+</div>
+
+<div class="modal" id="cropModal">
+  <div class="sheet">
+    <div class="bar">
+      <b id="cropTitle"></b>
+      <span class="muted">drag on the picture to choose the part to use</span>
+    </div>
+    <div id="cropWrap" class="thumb"><div id="cropBox"><img id="cropImg" alt=""><div id="cropSel"></div></div></div>
+    <div class="fields">
+      <label>x</label><input type="number" id="cx"><label>y</label><input type="number" id="cy">
+      <label>w</label><input type="number" id="cw"><label>h</label><input type="number" id="ch">
+      <label title="The part chosen lands on a grid of this many pixels of the picture">snap</label><select id="cropSnap"></select>
+    </div>
+    <div class="bar">
+      <label id="naturalLabel"><input type="checkbox" id="natural" checked> size the element to the part chosen</label>
+      <span class="muted" id="cropNote"></span>
+      <span style="flex:1"></span>
+      <button id="cropWhole">Use the whole picture</button>
+      <button id="cropUse">Use this part</button>
+      <button id="cropCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const BOOT = /*BOOT*/null;
+const $ = id => document.getElementById(id);
+const S = {
+  screen: BOOT.screen, edits: BOOT.edits, assets: BOOT.assets,
+  sel: null,        // site selected
+  primary: null,    // the command of that site the handles are on
+  hover: null, stack: [], drag: null, pending: null, nudge: {x: 0, y: 0}, nudgeTimer: 0, busy: 0,
+  crop: null,
+  creating: '',     // the kind of element the texture browser is choosing a picture for
+};
+const DEFAULTS = {dx: 0, dy: 0, dw: 0, dh: 0, scale: 1, tex: null, uv: null, hidden: false, label: '',
+                  'new': null, text: null, color: null, swap: false};
+const editOf = site => Object.assign({}, DEFAULTS, S.edits[site] || {});
+const esc = text => String(text).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+function busy(delta) {
+  S.busy += delta;
+  $('status').textContent = S.busy > 0 ? 'drawing...' : 'ready';
+  $('status').className = S.busy > 0 ? 'busy' : '';
+}
+async function get(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error((await response.json()).error || response.statusText);
+  return response.json();
+}
+async function post(path, body) {
+  busy(1);
+  try {
+    const response = await fetch(path, {method: 'POST',
+      body: JSON.stringify(Object.assign({screen: S.screen.name}, body || {}))});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || response.statusText);
+    S.edits = result.edits;
+    if (result.site) { S.sel = result.site; S.primary = null; } // what was just made
+    applyScreen(result.screen);
+  } catch (error) {
+    S.pending = null;
+    draw();
+    $('status').textContent = String(error.message || error);
+  } finally {
+    busy(-1);
+  }
+}
+function showPicture() {
+  const shot = $('shot');
+  const src = '/screen?name=' + encodeURIComponent(S.screen.name) + '&v=' + S.screen.version;
+  if (shot.getAttribute('src') === src) { // nothing changed: no new picture will load
+    S.pending = null;
+    draw();
+    return;
+  }
+  busy(1);
+  // What was let go of stays drawn where it was dropped until the new picture is up.
+  shot.onload = shot.onerror = () => { shot.onload = shot.onerror = null; S.pending = null; busy(-1); draw(); };
+  shot.src = src;
+}
+async function loadScreen(name) {
+  applyScreen(await get('/api/screen?name=' + encodeURIComponent(name)));
+}
+function applyScreen(screen) {
+  const previous = S.primary;
+  const moved = S.pending && S.primary ? S.primary.bounds : null;
+  S.screen = screen;
+  // The same element again: commands keep their order from edit to edit.
+  S.primary = null;
+  if (S.sel) {
+    const same = S.screen.commands.filter(c => c.site === S.sel);
+    S.primary = same.find(c => previous && c.i === previous.i) || same[0] || null;
+    if (!S.primary) S.sel = null;
+  }
+  // The outline is now at its new place; the old picture under it is not yet.
+  if (S.pending && moved && S.primary)
+    S.pending.d = {x: 0, y: 0, ghost: {x: S.primary.bounds[0] - moved[0], y: S.primary.bounds[1] - moved[1]}, from: S.pending.from};
+  S.hover = null;
+  S.stack = [];
+  showPicture();
+  draw();
+  side();
+}
+const setEdit = (site, set) => post('/api/edit', {site, set});
+
+// ---------------------------------------------------------------------------
+// The picture and what is drawn over it
+// ---------------------------------------------------------------------------
+function point(event) {
+  const box = $('overlay').getBoundingClientRect();
+  return {x: (event.clientX - box.left) * 1280 / box.width, y: (event.clientY - box.top) * 720 / box.height};
+}
+// Topmost first: later commands are drawn over earlier ones.
+function hitAll(p) {
+  return S.screen.commands.filter(c => p.x >= c.bounds[0] && p.x < c.bounds[2] && p.y >= c.bounds[1] && p.y < c.bounds[3]).reverse();
+}
+const resizable = c => c && c.type !== 'text';
+
+// Grid snap, in the screen's units; 0 is off. With it on, a moved element's
+// top left corner and a resized one's bottom right corner land on the grid.
+const SNAPS = [0, 2, 4, 8, 16, 32, 64];
+const snapOf = id => parseInt($(id).value, 10) || 0;
+function fillSnap(id, key, asked, usual) {
+  // What the address asks for, else what was last chosen here, else the usual.
+  const kept = asked !== '' ? asked : localStorage.getItem(key);
+  const wanted = kept === null ? usual : parseInt(kept, 10) || 0;
+  $(id).innerHTML = SNAPS.map(g => `<option value="${g}"${g === wanted ? ' selected' : ''}>${g || 'off'}</option>`).join('');
+  $(id).addEventListener('change', () => { localStorage.setItem(key, $(id).value); draw(); });
+}
+function dragDelta(p) {
+  const raw = {x: p.x - S.drag.start.x, y: p.y - S.drag.start.y}, g = snapOf('snap');
+  if (!g || !S.primary) return {x: Math.round(raw.x), y: Math.round(raw.y)};
+  const b = S.primary.bounds, corner = S.drag.mode === 'size' ? [b[2], b[3]] : [b[0], b[1]];
+  return {x: Math.round((corner[0] + raw.x) / g) * g - corner[0],
+          y: Math.round((corner[1] + raw.y) / g) * g - corner[1]};
+}
+function rect(c, cls, extra) {
+  const b = c.bounds;
+  return `<rect x="${b[0]}" y="${b[1]}" width="${Math.max(1, b[2] - b[0])}" height="${Math.max(1, b[3] - b[1])}" ${cls} ${extra || ''}/>`;
+}
+function draw() {
+  const k = 1280 / ($('overlay').getBoundingClientRect().width || 1280); // one screen pixel, in UI units
+  let out = '';
+  const grid = snapOf('snap');
+  if (grid >= 8 && (S.drag || S.sel)) {
+    // The grid itself, while there is something to line up with it.
+    let lines = '';
+    for (let x = grid; x < 1280; x += grid) lines += `M${x} 0V720`;
+    for (let y = grid; y < 720; y += grid) lines += `M0 ${y}H1280`;
+    out += `<path d="${lines}" stroke="#fff" stroke-opacity=".13" stroke-width="${k}" fill="none" pointer-events="none"/>`;
+  }
+  if (S.hover && (!S.sel || S.hover.site !== S.sel))
+    out += rect(S.hover, `fill="none" stroke="#fff" stroke-opacity=".7" stroke-width="${k}"`);
+  if (S.sel) {
+    const live = S.drag && S.drag.moved ? S.drag : S.pending;
+    const d = live ? live.d : {x: S.nudge.x, y: S.nudge.y};
+    const sizing = live && live.mode === 'size';
+    // While an element is moved, the piece of the picture it is in goes with
+    // it: the real thing is drawn once it is let go.
+    const ghost = live && live.mode === 'move' ? (d.ghost || d) : !live && (d.x || d.y) ? d : null;
+    if (ghost && (ghost.x || ghost.y)) {
+      const from = live && live.from ? live.from : S.screen.commands.filter(c => c.site === S.sel).map(c => c.bounds);
+      out += `<clipPath id="ghost">${from.map(b => `<rect x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}"/>`).join('')}</clipPath>
+        <g transform="translate(${ghost.x} ${ghost.y})" pointer-events="none"><image href="${$('shot').src}" width="1280" height="720"
+        preserveAspectRatio="none" clip-path="url(#ghost)"/></g>`;
+    }
+    for (const c of S.screen.commands) {
+      if (c.site !== S.sel) continue;
+      const b = c.bounds.slice();
+      if (sizing) { b[2] += d.x; b[3] += d.y; } else { b[0] += d.x; b[2] += d.x; b[1] += d.y; b[3] += d.y; }
+      const main = c === S.primary;
+      out += `<rect x="${b[0]}" y="${b[1]}" width="${Math.max(1, b[2] - b[0])}" height="${Math.max(1, b[3] - b[1])}"
+        fill="${main ? 'rgba(255,214,58,.08)' : 'none'}" stroke="${main ? '#ffd63a' : '#5ce4ff'}"
+        stroke-width="${(main ? 2 : 1) * k}" ${main ? '' : `stroke-dasharray="${4 * k} ${3 * k}"`}/>`;
+      if (main && resizable(c))
+        out += `<rect data-handle="1" x="${b[2] - 5 * k}" y="${b[3] - 5 * k}" width="${10 * k}" height="${10 * k}"
+          fill="#ffd63a" stroke="#000" stroke-width="${k}" style="cursor:nwse-resize"/>`;
+    }
+  }
+  $('overlay').innerHTML = out;
+  $('overlay').style.cursor = S.drag ? (S.drag.mode === 'size' ? 'nwse-resize' : 'move') : S.hover ? 'pointer' : 'default';
+}
+function select(command) {
+  flushNudge();
+  S.sel = command ? command.site : null;
+  S.primary = command || null;
+  draw();
+  side();
+}
+
+$('overlay').addEventListener('mousedown', event => {
+  if (event.button !== 0) return;
+  const p = point(event);
+  if (event.target.dataset.handle) {
+    S.drag = {mode: 'size', start: p, d: {x: 0, y: 0}, moved: false};
+    return;
+  }
+  S.stack = hitAll(p);
+  if (!S.stack.length) { select(null); return; }
+  // A press on the selected element drags it, or on release without moving
+  // goes down to what is under it; a press elsewhere selects the top one.
+  const mine = S.stack.find(c => c.site === S.sel);
+  if (mine) S.primary = mine; else select(S.stack[0]);
+  S.drag = {mode: 'move', start: p, d: {x: 0, y: 0}, moved: false, wasSelected: !!mine};
+  draw();
+  side();
+});
+window.addEventListener('mousemove', event => {
+  const p = point(event);
+  if (S.drag) {
+    S.drag.d = dragDelta(p);
+    if (S.drag.d.x || S.drag.d.y) S.drag.moved = true;
+    draw();
+  } else if (event.target.closest && event.target.closest('#overlay')) {
+    const top = hitAll(p)[0] || null;
+    if (top !== S.hover) { S.hover = top; draw(); }
+  } else if (S.hover) {
+    S.hover = null;
+    draw();
+  }
+});
+window.addEventListener('mouseup', () => {
+  const drag = S.drag;
+  if (!drag) return;
+  S.drag = null;
+  if (drag.moved && S.sel) {
+    const edit = editOf(S.sel), d = drag.d;
+    S.pending = {mode: drag.mode, d, from: S.screen.commands.filter(c => c.site === S.sel).map(c => c.bounds)};
+    if (drag.mode === 'move') {
+      setEdit(S.sel, {dx: edit.dx + d.x, dy: edit.dy + d.y});
+    } else {
+      // The corner follows the pointer whatever the element is anchored by:
+      // growing a centred sprite also has to move its centre by half.
+      const column = S.primary.anchor % 3, row = Math.floor(S.primary.anchor / 3);
+      setEdit(S.sel, {dw: edit.dw + d.x, dh: edit.dh + d.y,
+                      dx: edit.dx + d.x * column / 2, dy: edit.dy + d.y * row / 2});
+    }
+    return;
+  }
+  if (drag.mode === 'move' && drag.wasSelected && S.stack.length > 1) {
+    const at = S.stack.indexOf(S.primary);
+    select(S.stack[(at + 1) % S.stack.length]);
+    return;
+  }
+  draw();
+});
+
+// Arrow keys move the selection; the picture is drawn again once they stop.
+function flushNudge() {
+  clearTimeout(S.nudgeTimer);
+  if (!S.sel || (!S.nudge.x && !S.nudge.y)) return;
+  const edit = editOf(S.sel), n = S.nudge;
+  S.nudge = {x: 0, y: 0};
+  setEdit(S.sel, {dx: edit.dx + n.x, dy: edit.dy + n.y});
+}
+window.addEventListener('keydown', event => {
+  if (event.target.tagName === 'INPUT' || event.target.tagName === 'SELECT') return;
+  if (event.key === 'Escape') {
+    if (closeModals()) return;
+    select(null);
+  } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+    event.preventDefault();
+    post('/api/undo');
+  } else if (S.sel && event.key.startsWith('Arrow')) {
+    event.preventDefault();
+    // With the grid on an arrow is one grid step, and Shift goes by single units.
+    const grid = snapOf('snap');
+    const step = grid ? (event.shiftKey ? 1 : grid) : (event.shiftKey ? 10 : 1);
+    S.nudge.x += event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
+    S.nudge.y += event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+    clearTimeout(S.nudgeTimer);
+    S.nudgeTimer = setTimeout(flushNudge, 350);
+    draw();
+  } else if (S.sel && (event.key === 'Delete' || event.key === 'Backspace')) {
+    event.preventDefault();
+    removeSelected();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The panel beside the picture
+// ---------------------------------------------------------------------------
+// Deleting an element makes its drawing call draw nothing. It stays in the
+// list of deleted elements, to be put back from there (or with Undo).
+function removeSelected() {
+  const c = S.primary;
+  if (!c) return;
+  flushNudge();
+  const site = c.site, label = describe(c);
+  S.sel = S.primary = null;
+  setEdit(site, {hidden: true, label});
+}
+function deletedList() {
+  const gone = Object.keys(S.edits).filter(site => S.edits[site].hidden).sort();
+  if (!gone.length) return '';
+  return '<h3>Deleted elements</h3><div class="stack">' + gone.map(site =>
+    `<div data-restore="${esc(site)}" title="Put it back">${esc(S.edits[site].label || 'element')}
+     <span class="muted">${esc(site.replace(/^.*:/, 'line '))}</span> <b>restore</b></div>`).join('') + '</div>';
+}
+function wireDeleted() {
+  $('side').querySelectorAll('[data-restore]').forEach(row => row.addEventListener('click', () =>
+    setEdit(row.dataset.restore, {hidden: false, label: ''})));
+}
+const describe = c => c.type === 'text' ? `"${c.str}"` : c.fill ? (c.added ? 'box' : 'flat fill') : c.tex.replace(/_BM.*$/, '');
+// Whether the part of the texture an element shows is the editor's to choose:
+// it is for anything that is, or started as, a picture, and for what was made
+// here. A frame of the lobby's own keeps the part its code gives it.
+const partEditable = c => c.type === 'sprite' || !!c.added || (c.type !== 'text' && editOf(c.site).swap);
+const hex = color => '#' + color.slice(0, 3).map(v => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+function side() {
+  const edited = Object.keys(S.edits).length;
+  $('count').textContent = edited ? edited + (edited === 1 ? ' element changed' : ' elements changed') : 'nothing changed';
+  const c = S.primary;
+  if (!c) {
+    $('side').innerHTML = `<h3>Nothing selected</h3>
+      <p>Click an element of the screen to select it. Drag to move it, drag its corner to resize it,
+      or use the arrow keys (Shift for 10).</p>
+      <p>Click a selected element again to reach the one underneath.</p>
+      <p>Press Delete to remove the selected element; Ctrl+Z takes back the last change.</p>
+      <p><b>New element</b>, at the top, adds a picture, a 9-slice, a box or a line of
+      text to this kind of screen.</p>
+      <p class="muted">An element is one drawing call in the screen code. Changing it changes
+      everything that call draws: every row of a list moves together.</p>` + deletedList();
+    wireDeleted();
+    return;
+  }
+  const edit = editOf(c.site);
+  const same = S.screen.commands.filter(x => x.site === c.site).length;
+  const kind = c.type === 'text' ? 'Text' : c.fill ? (c.added ? 'Box' : 'Flat fill') : c.type === 'sprite' ? 'Picture' : '9-slice';
+  let html = `<h3>${c.added ? 'New ' + kind.toLowerCase() : kind}</h3><div>${esc(describe(c))}</div>`;
+  if (c.added) {
+    // Made here: it has no line in the screen code, and its text and colour are its own.
+    html += `<div class="muted">made in the editor &middot; on every ${esc(S.screen.uiName)} screen</div>`;
+    if (c.type === 'text')
+      html += `<h3>Text</h3><input type="text" id="ownText" style="width:100%" value="${esc(c.str)}">`;
+    html += `<h3>Colour</h3><div class="fields"><label>colour</label><input type="color" id="ownColor" value="${hex(c.color)}">
+      <label>opacity</label><input type="number" id="ownAlpha" min="0" max="1" step="0.05" value="${Math.round(c.color[3] * 100) / 100}"></div>`;
+  } else {
+    html += `<div class="muted">${esc(c.site)} &middot; draws ${same} thing${same === 1 ? '' : 's'} on this screen</div>
+    <pre id="source"></pre>`;
+  }
+  if (c.type !== 'text' && !c.fill) {
+    const asset = S.assets.find(a => a.name === c.tex);
+    html += `<h3>Picture</h3><div class="thumb" id="texThumb"><img src="/thumb?name=${encodeURIComponent(c.tex)}" alt=""></div>
+      <div>${esc(c.tex)} ${asset ? `<span class="muted">${asset.w}&times;${asset.h}</span> ${badge(asset)}` : ''}</div>
+      <div class="row"><button id="replace">Replace picture...</button>
+      ${partEditable(c) ? '<button id="crop">Choose part...</button>' : ''}
+      <button id="swap" title="${c.type === 'sprite' ? 'Corners keep their size and the middle stretches, so it can be any size without its border smearing' : 'Drawn whole, scaled to its size'}">${c.type === 'sprite' ? 'Make it a 9-slice' : 'Make it a plain picture'}</button>
+      ${edit.tex || edit.uv ? '<button id="original">Original picture</button>' : ''}</div>`;
+  }
+  html += `<h3>Place and size <span class="muted">(change from ${c.added ? 'where it was made' : "the code's"})</span></h3><div class="fields">
+    <label>move x</label><input type="number" data-field="dx" value="${edit.dx}">
+    <label>move y</label><input type="number" data-field="dy" value="${edit.dy}">`;
+  if (c.type === 'text')
+    html += `<label>scale</label><input type="number" step="0.05" data-field="scale" value="${edit.scale}"><span></span><span></span>`;
+  else
+    html += `<label>wider</label><input type="number" data-field="dw" value="${edit.dw}">
+      <label>taller</label><input type="number" data-field="dh" value="${edit.dh}">`;
+  html += `</div><div class="muted" style="margin-top:6px">now at ${c.bounds[0]}, ${c.bounds[1]} &middot;
+    ${Math.round((c.bounds[2] - c.bounds[0]) * 100) / 100} &times; ${Math.round((c.bounds[3] - c.bounds[1]) * 100) / 100}</div>
+    <div class="row"><button id="deleteOne" title="Delete key">Delete${same > 1 ? ' all ' + same : ''}</button>
+    ${c.added ? '' : `<button id="resetOne" ${S.edits[c.site] ? '' : 'disabled'}>Reset this element</button>`}</div>`;
+  if (S.stack.length > 1) {
+    html += '<h3>Under the pointer</h3><div class="stack">';
+    S.stack.forEach((x, index) => { html += `<div data-stack="${index}" class="${x === c ? 'on' : ''}">${esc(describe(x))} <span class="muted">${esc(x.site.replace(/^.*:/, 'line '))}</span></div>`; });
+    html += '</div>';
+  }
+  $('side').innerHTML = html + deletedList();
+  wireDeleted();
+  $('deleteOne').onclick = removeSelected;
+  $('side').querySelectorAll('input[data-field]').forEach(input => input.addEventListener('change', () => {
+    const value = parseFloat(input.value);
+    if (!isNaN(value)) setEdit(c.site, {[input.dataset.field]: value});
+  }));
+  $('side').querySelectorAll('[data-stack]').forEach(row => row.addEventListener('click', () => select(S.stack[+row.dataset.stack])));
+  if ($('resetOne')) $('resetOne').onclick = () => post('/api/edit', {site: c.site, reset: true});
+  if ($('ownText')) $('ownText').addEventListener('change', () => setEdit(c.site, {text: $('ownText').value}));
+  const ownColor = () => {
+    const value = $('ownColor').value, alpha = parseFloat($('ownAlpha').value);
+    setEdit(c.site, {color: [1, 3, 5].map(at => parseInt(value.slice(at, at + 2), 16) / 255).concat(isNaN(alpha) ? 1 : alpha)});
+  };
+  if ($('ownColor')) { $('ownColor').addEventListener('change', ownColor); $('ownAlpha').addEventListener('change', ownColor); }
+  if ($('replace')) $('replace').onclick = () => openAssets();
+  if ($('crop')) $('crop').onclick = () => openCrop(c.tex);
+  if ($('swap')) $('swap').onclick = () => setEdit(c.site, {swap: !edit.swap});
+  if ($('original')) $('original').onclick = () => {
+    // Back to the code's picture, and its size with it.
+    setEdit(c.site, {tex: null, uv: null, dw: 0, dh: 0});
+  };
+  if (!c.added) get('/api/source?site=' + encodeURIComponent(c.site)).then(source => {
+    if (S.primary !== c || !$('source')) return;
+    $('source').innerHTML = source.lines.map((line, index) =>
+      `<span class="${source.first + index === source.line ? 'at' : ''}">${String(source.first + index).padStart(5)}  ${esc(line)}</span>`).join('\n');
+  }).catch(() => {});
+}
+const badge = asset => asset.resident ? `<span class="badge ok" title="This archive is in memory whenever the lobby is up">${esc(asset.archive)}</span>`
+  : asset.archive ? `<span class="badge cost" title="The lobby would have to load this archive first">${esc(asset.archive)}</span>`
+  : '<span class="badge" title="Unpacked by the preview under a name of its own">preview</span>';
+
+// ---------------------------------------------------------------------------
+// Texture browser
+// ---------------------------------------------------------------------------
+function closeModals(keepCreating) {
+  const open = document.querySelector('.modal.open');
+  if (open) open.classList.remove('open');
+  if (!keepCreating) S.creating = '';
+  return !!open;
+}
+// Making an element. A picture or a frame first needs its texture chosen; a
+// picture then the part of it to show. It lands in the middle of the screen,
+// selected, to be dragged from there.
+function create(kind) {
+  flushNudge();
+  if (kind === 'fill') post('/api/add', {kind});
+  else if (kind === 'text') {
+    const text = prompt('The text to show:', 'New text');
+    if (text !== null) post('/api/add', {kind, text});
+  } else {
+    S.creating = kind;
+    openAssets();
+  }
+}
+function openAssets(start) {
+  // Opens on the folder last looked at; the first time, on the folder the
+  // element's own picture is in.
+  if (typeof start === 'string') folder = start;
+  if (folder === null) {
+    const own = S.primary && S.assets.find(a => a.name === S.primary.tex);
+    folder = own ? own.folder : 'netroom';
+  }
+  $('assetTitle').textContent = S.creating === 'sprite' ? 'New picture: choose a game texture'
+    : S.creating === 'frame' ? 'New 9-slice: choose a game texture' : 'Replace with a game texture';
+  $('assetModal').classList.add('open');
+  fillGrid();
+  $('search').focus();
+}
+// Every texture that matches is in the list; the cells are made as the list
+// is scrolled to them, and a picture is only fetched when its cell is near.
+const GRID_STEP = 180;
+let gridFound = [], gridShown = 0;
+// The folder being looked at: '' is every folder, otherwise a path such as
+// "mnmain" or "res/arc/chr", which takes in the folders under it.
+let folder = null;
+const inFolder = (a, path) => !path || a.folder === path || a.folder.startsWith(path + '/');
+// The folders as a tree, a level at a time: the top ones, and under the one
+// chosen (and each folder on the way down to it) the folders it holds.
+function fillFolders(matching) {
+  const counts = new Map();
+  for (const a of matching) {
+    const parts = a.folder.split('/');
+    for (let depth = 1; depth <= parts.length; ++depth) {
+      const path = parts.slice(0, depth).join('/');
+      counts.set(path, (counts.get(path) || 0) + 1);
+    }
+  }
+  const children = parent => [...counts.keys()].filter(path =>
+    (parent ? path.startsWith(parent + '/') : true) && path.split('/').length === (parent ? parent.split('/').length + 1 : 1))
+    .sort((x, y) => x.localeCompare(y, undefined, {numeric: true}));
+  const row = (path, label, depth, count) => `<div data-folder="${esc(path)}" class="${path === folder ? 'on' : ''}"
+    style="padding-left:${6 + depth * 12}px" title="${esc(path || 'every folder')}">${esc(label)}<span>${count}</span></div>`;
+  let html = row('', 'All folders', 0, matching.length);
+  const open = folder ? folder.split('/') : [];
+  const walk = (parent, depth) => {
+    for (const path of children(parent)) {
+      html += row(path, path.split('/').pop(), depth, counts.get(path));
+      if (open.slice(0, depth + 1).join('/') === path) walk(path, depth + 1);
+    }
+  };
+  walk('', 0);
+  $('folders').innerHTML = html;
+  const on = $('folders').querySelector('.on');
+  if (on && on.scrollIntoView) on.scrollIntoView({block: 'nearest'});
+}
+function fillGrid() {
+  const words = $('search').value.toLowerCase().split(/\s+/).filter(Boolean);
+  const residentOnly = $('residentOnly').checked;
+  const matching = S.assets.filter(a => (!residentOnly || a.resident) &&
+    words.every(w => a.name.toLowerCase().includes(w) || a.folder.toLowerCase().includes(w)));
+  if (folder && !matching.some(a => inFolder(a, folder))) folder = ''; // nothing left in it
+  fillFolders(matching);
+  gridFound = matching.filter(a => inFolder(a, folder));
+  gridShown = 0;
+  $('assetInfo').textContent = gridFound.length + ' textures' + (folder ? ' in ' + folder : '') +
+    ', of ' + S.assets.length + ' in the game (search by name or folder)';
+  $('grid').innerHTML = '';
+  $('grid').scrollTop = 0;
+  moreGrid();
+}
+function moreGrid() {
+  const next = gridFound.slice(gridShown, gridShown + GRID_STEP);
+  gridShown += next.length;
+  $('grid').insertAdjacentHTML('beforeend', next.map(a => `<div class="asset" data-name="${esc(a.name)}">
+    <div class="thumb"><img loading="lazy" decoding="async" src="/thumb?name=${encodeURIComponent(a.name)}" alt="" onerror="this.closest('.asset').style.opacity=.25"></div>
+    <div class="name" title="${esc(a.name)}">${esc(a.name)}</div>
+    <div><span class="muted">${a.w}&times;${a.h}</span> ${badge(a)}</div></div>`).join(''));
+}
+$('grid').addEventListener('scroll', () => {
+  const grid = $('grid');
+  if (gridShown < gridFound.length && grid.scrollTop + grid.clientHeight > grid.scrollHeight - 600) moreGrid();
+});
+$('search').addEventListener('input', fillGrid);
+$('residentOnly').addEventListener('change', fillGrid);
+$('assetClose').onclick = closeModals;
+$('folders').addEventListener('click', event => {
+  const row = event.target.closest('[data-folder]');
+  if (!row) return;
+  // A second click on the folder chosen goes back up to the one it is in.
+  const path = row.dataset.folder;
+  folder = path === folder && path ? path.split('/').slice(0, -1).join('/') : path;
+  fillGrid();
+});
+$('grid').addEventListener('click', event => {
+  const cell = event.target.closest('.asset');
+  if (!cell) return;
+  const creating = S.creating;
+  closeModals(true);
+  if (creating === 'frame') {
+    S.creating = '';
+    post('/api/add', {kind: 'frame', tex: cell.dataset.name});
+  } else if (creating === 'sprite' || partEditable(S.primary)) openCrop(cell.dataset.name);
+  else setEdit(S.sel, {tex: cell.dataset.name, uv: null}); // a frame uses the whole picture
+});
+
+// ---------------------------------------------------------------------------
+// Choosing the part of a picture to use
+// ---------------------------------------------------------------------------
+function openCrop(name) {
+  const asset = S.assets.find(a => a.name === name);
+  const making = S.creating === 'sprite';
+  if (!asset || (!S.primary && !making)) return;
+  const c = making ? {tex: null, site: ''} : S.primary;
+  // Start from the part in use if this is the picture already shown.
+  let box = {x: 0, y: 0, w: asset.w, h: asset.h};
+  if (c.tex === name) {
+    const u0 = Math.min(c.uv[0], c.uv[2]), u1 = Math.max(c.uv[0], c.uv[2]);
+    const v0 = Math.min(c.uv[1], c.uv[3]), v1 = Math.max(c.uv[1], c.uv[3]);
+    box = {x: Math.round(u0 * asset.w), y: Math.round(v0 * asset.h),
+           w: Math.round((u1 - u0) * asset.w), h: Math.round((v1 - v0) * asset.h)};
+  }
+  const zoom = Math.max(0.25, Math.min(4, Math.min(1000 / asset.w, 440 / asset.h)));
+  S.crop = {asset, box, zoom, making};
+  // Only a picture has a size of its own to take from the part chosen.
+  const sizable = !making && c.type === 'sprite';
+  $('naturalLabel').style.display = sizable ? '' : 'none';
+  $('cropTitle').textContent = name + '  ' + asset.w + '×' + asset.h;
+  $('cropImg').src = '/asset?name=' + encodeURIComponent(name);
+  $('cropImg').style.width = asset.w * zoom + 'px';
+  $('cropImg').style.height = asset.h * zoom + 'px';
+  $('natural').checked = sizable && c.tex !== name;
+  $('cropNote').innerHTML = asset.resident || !asset.archive ? '' : `this picture is in <b>${esc(asset.archive)}</b>, which the lobby would have to load`;
+  $('cropModal').classList.add('open');
+  showCrop();
+}
+// The picture's grid, drawn over it while the snap is on and cells are big enough to see.
+function cropGrid() {
+  const g = snapOf('cropSnap') * (S.crop ? S.crop.zoom : 1);
+  $('cropBox').style.setProperty('--grid', g >= 6 ? g + 'px' : '0');
+  $('cropBox').classList.toggle('grid', g >= 6);
+}
+function showCrop() {
+  cropGrid();
+  const {box, zoom} = S.crop, sel = $('cropSel').style;
+  sel.left = box.x * zoom + 'px'; sel.top = box.y * zoom + 'px';
+  sel.width = box.w * zoom + 'px'; sel.height = box.h * zoom + 'px';
+  $('cx').value = box.x; $('cy').value = box.y; $('cw').value = box.w; $('ch').value = box.h;
+}
+function cropPoint(event) {
+  const r = $('cropImg').getBoundingClientRect(), a = S.crop.asset, g = snapOf('cropSnap') || 1;
+  const on = (value, most) => Math.max(0, Math.min(most, Math.round(value / S.crop.zoom / g) * g));
+  return {x: on(event.clientX - r.left, a.w), y: on(event.clientY - r.top, a.h)};
+}
+$('cropBox').addEventListener('mousedown', event => {
+  event.preventDefault();
+  const from = cropPoint(event);
+  const move = e => {
+    const to = cropPoint(e);
+    const least = snapOf('cropSnap') || 1; // never thinner than one grid cell
+    S.crop.box = {x: Math.min(from.x, to.x), y: Math.min(from.y, to.y),
+                  w: Math.max(least, Math.abs(to.x - from.x)), h: Math.max(least, Math.abs(to.y - from.y))};
+    S.crop.box.w = Math.min(S.crop.box.w, S.crop.asset.w - S.crop.box.x);
+    S.crop.box.h = Math.min(S.crop.box.h, S.crop.asset.h - S.crop.box.y);
+    showCrop();
+  };
+  const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+});
+for (const id of ['cx', 'cy', 'cw', 'ch']) $(id).addEventListener('change', () => {
+  const a = S.crop.asset, value = id => Math.max(0, parseInt($(id).value, 10) || 0);
+  const x = Math.min(value('cx'), a.w - 1), y = Math.min(value('cy'), a.h - 1);
+  S.crop.box = {x, y, w: Math.max(1, Math.min(value('cw'), a.w - x)), h: Math.max(1, Math.min(value('ch'), a.h - y))};
+  showCrop();
+});
+function useCrop(whole) {
+  const {asset, box} = S.crop;
+  const part = whole ? {x: 0, y: 0, w: asset.w, h: asset.h} : box;
+  if (S.crop.making) { // a new picture, the size of the part chosen
+    closeModals();
+    post('/api/add', {kind: 'sprite', tex: asset.name, uv: whole ? null
+      : [part.x / asset.w, part.y / asset.h, (part.x + part.w) / asset.w, (part.y + part.h) / asset.h]});
+    return;
+  }
+  const c = S.primary, edit = editOf(c.site);
+  const set = {tex: asset.name,
+               uv: whole ? null : [part.x / asset.w, part.y / asset.h, (part.x + part.w) / asset.w, (part.y + part.h) / asset.h]};
+  if ($('natural').checked) {
+    // The code's own size is what is drawn now, less what was already added.
+    set.dw = part.w - (c.size[0] - edit.dw);
+    set.dh = part.h - (c.size[1] - edit.dh);
+  }
+  closeModals();
+  setEdit(c.site, set);
+}
+$('cropWhole').onclick = () => useCrop(true);
+$('cropUse').onclick = () => useCrop(false);
+$('cropCancel').onclick = closeModals;
+
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+fillSnap('snap', 'lobbyEditorSnap', BOOT.snap, 8);
+fillSnap('cropSnap', 'lobbyEditorCropSnap', BOOT.cropSnap, 0);
+$('cropSnap').addEventListener('change', () => { if (S.crop) cropGrid(); });
+$('screens').innerHTML = BOOT.screens.map(name => `<option${name === S.screen.name ? ' selected' : ''}>${esc(name)}</option>`).join('');
+$('screens').addEventListener('change', () => { S.sel = S.primary = null; loadScreen($('screens').value); });
+$('undo').onclick = () => post('/api/undo');
+$('add').addEventListener('change', () => { const kind = $('add').value; $('add').value = ''; if (kind) create(kind); });
+$('resetAll').onclick = () => { if (confirm('Discard every change on every screen?')) post('/api/reset'); };
+window.addEventListener('resize', draw);
+$('shot').src = '/screen?name=' + encodeURIComponent(S.screen.name) + '&v=' + S.screen.version;
+if (BOOT.select) select(S.screen.commands.find(c => c.site === BOOT.select) || null);
+else side();
+if (S.primary && BOOT.openAssets) openAssets(BOOT.folder || undefined);
+if (S.primary && BOOT.crop) openCrop(BOOT.crop);
+draw();
+
+// For tools/lobby_editor/check.py: ?play=drag,x0,y0,x1,y1 presses the mouse at
+// one point of the screen and lets go at another, and ?play=size,dx,dy does
+// that with the selected element's corner. The page then waits for the
+// server to have taken the change, so the check can read it back.
+if (BOOT.play) {
+  const [kind, ...n] = BOOT.play.split(',').map((v, i) => i ? parseFloat(v) : v);
+  const box = $('overlay').getBoundingClientRect();
+  const fire = (type, target, x, y) => target.dispatchEvent(new MouseEvent(type, {
+    bubbles: true, button: 0, clientX: box.left + x * box.width / 1280, clientY: box.top + y * box.height / 720}));
+  const before = S.screen.version;
+  if (kind === 'drag') {
+    fire('mousedown', $('overlay'), n[0], n[1]);
+    fire('mousemove', $('overlay'), n[2], n[3]);
+    fire('mouseup', $('overlay'), n[2], n[3]);
+  } else if (kind === 'size' && S.primary) {
+    const b = S.primary.bounds;
+    fire('mousedown', document.querySelector('[data-handle]'), b[2], b[3]);
+    fire('mousemove', $('overlay'), b[2] + n[0], b[3] + n[1]);
+    fire('mouseup', $('overlay'), b[2] + n[0], b[3] + n[1]);
+  } else if (kind === 'newbox') {
+    $('add').value = 'fill';
+    $('add').dispatchEvent(new Event('change'));
+  } else if (kind === 'delete') {
+    window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Delete', bubbles: true}));
+  } else if (kind === 'crop' && S.crop) {
+    // In the picture's own pixels; then the part is used.
+    const r = $('cropImg').getBoundingClientRect(), z = S.crop.zoom;
+    const at = (type, target, x, y) => target.dispatchEvent(new MouseEvent(type, {
+      bubbles: true, cancelable: true, button: 0, clientX: r.left + x * z, clientY: r.top + y * z}));
+    at('mousedown', $('cropBox'), n[0], n[1]);
+    at('mousemove', window, n[2], n[3]);
+    at('mouseup', window, n[2], n[3]);
+    useCrop(false);
+  }
+  const wait = new XMLHttpRequest();
+  wait.open('GET', '/api/wait?after=' + before, false);
+  wait.send();
+}
+</script>
+</body>
+</html>

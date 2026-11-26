@@ -1,4 +1,5 @@
 #include "lobby_canvas.h"
+#include "lobby_layout.h"
 
 #include <cstdio>
 #include <cstring>
@@ -220,6 +221,9 @@ Tex StageIcon(int stageId)
 const TexInfo& GetTexInfo(Tex tex)
 {
     if (tex < TEX_ICON_FIRST) return kTextures[tex];
+#ifdef LOBBY_LAYOUT_EDIT
+    if (tex >= TEX_COUNT) return LayoutCustomTex(tex - TEX_COUNT);
+#endif
     if (tex >= TEX_COUNT) return kTextures[TEX_WHITE];
     if (!g_generatedReady) BuildGenerated();
     return g_generated[tex - TEX_ICON_FIRST];

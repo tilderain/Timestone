@@ -7,7 +7,8 @@ user's installed game so layouts can be inspected and previewed without
 launching it. Nothing extracted here belongs in the repository: the cache
 directory defaults to build/ui_cache, which is ignored.
 
-  extract <game-dir> [cache]      unpack the UI archives the lobby uses
+  extract [game-dir] [cache]      unpack the UI archives the lobby uses
+  find-game                       print the game folder found in the Steam libraries
   list <file.arc>                 list an archive's entries
   sdl <file.sdl> [frame]          summarise a scheduler layout
   render-sdl <file.sdl> <out.png> [frame] [cache]
@@ -32,6 +33,7 @@ import glob
 import json
 import math
 import os
+import re
 import struct
 import sys
 import zlib
@@ -48,6 +50,66 @@ LOBBY_ARCHIVES = ('cmn', 'netroom', 'mnmain', 'lic', 'mnchsstg', 'mnchs')
 ARCHIVE_FILTER = {'lic': 'lic_user_i', 'mnchsstg': 'chs_stgm', 'mnchs': 'chs_opt_sel_b'}
 UNDERLAY = 'meku_menu_co00_BM_NOMIP'
 DEFAULT_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'build', 'ui_cache')
+
+
+# --------------------------------------------------------------------------
+# The game folder
+# --------------------------------------------------------------------------
+STEAM_APP_ID = '357190'
+DEFAULT_INSTALL_DIR = 'ULTIMATE MARVEL VS. CAPCOM 3'
+
+
+def _vdf_values(text, key):
+    """Every value written straight after the quoted key, as Steam's text
+    KeyValues files have them."""
+    return [value.replace('\\\\', '\\') for value in
+            re.findall(r'"%s"\s+"((?:[^"\\]|\\.)*)"' % re.escape(key), text)]
+
+
+def _read_text(path):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as file:
+            return file.read()
+    except OSError:
+        return ''
+
+
+def find_game():
+    """The folder holding umvc3.exe, or None: looked for the way the Linux
+    installer does (tools/timestone_install_linux.cpp), in every Steam
+    library, after the library this repository is itself in, if it is in one."""
+    libraries = []
+
+    def add(path):
+        path = os.path.realpath(path)
+        if path not in libraries:
+            libraries.append(path)
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    while os.path.dirname(here) != here:
+        if os.path.basename(here) == 'steamapps':
+            add(os.path.dirname(here))
+            break
+        here = os.path.dirname(here)
+    home = os.environ.get('HOME', '')
+    if home:
+        for place in ('.steam/steam', '.local/share/Steam',
+                      '.var/app/com.valvesoftware.Steam/.local/share/Steam',  # Flatpak
+                      'snap/steam/common/.local/share/Steam',                 # Snap
+                      '.steam/root'):
+            steam = os.path.join(home, place)
+            add(steam)
+            for listing in ('config/libraryfolders.vdf', 'steamapps/libraryfolders.vdf'):
+                for path in _vdf_values(_read_text(os.path.join(steam, listing)), 'path'):
+                    add(path)
+    for library in libraries:
+        apps = os.path.join(library, 'steamapps')
+        manifest = _read_text(os.path.join(apps, 'appmanifest_%s.acf' % STEAM_APP_ID))
+        for folder in _vdf_values(manifest, 'installdir') + [DEFAULT_INSTALL_DIR]:
+            candidate = os.path.join(apps, 'common', folder)
+            if os.path.isfile(os.path.join(candidate, 'umvc3.exe')):
+                return candidate
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -127,8 +189,22 @@ def _dxt_alpha_blocks(blocks):
     return np.take_along_axis(palette, indices, 1)
 
 
-def tex_decode(data):
-    """Returns a PIL RGBA image for mip 0 of a TEX resource."""
+# The formats tex_decode reads.
+TEX_FORMATS = frozenset((0x13, 0x14, 0x19, 0x17, 0x1F, 0x2A, 0x20, 0x21, 0x23, 0x25))
+
+
+def tex_header(data):
+    """(width, height, format) from the first 16 bytes of a TEX resource, or None."""
+    if len(data) < 16 or data[:4] != b'TEX\0':
+        return None
+    _word, dims, info = struct.unpack_from('<III', data, 4)
+    return (dims >> 6) & 0x1FFF, (dims >> 19) & 0x1FFF, (info >> 8) & 0xFF
+
+
+def tex_decode(data, step=1):
+    """Returns a PIL RGBA image for mip 0 of a TEX resource. With `step`
+    above 1 only every step-th 4x4 block each way is read: a rough small
+    copy, made that many times squared faster, for thumbnails."""
     import numpy as np
     from PIL import Image
     if data[:4] != b'TEX\0':
@@ -140,9 +216,13 @@ def tex_decode(data):
     pixels = np.frombuffer(data, np.uint8, offset=start)
     bw, bh = (width + 3) // 4, (height + 3) // 4
     if fmt in (0x13, 0x14, 0x19):
-        texels = _dxt_color_blocks(pixels[:bw * bh * 8].reshape(-1, 8), True)
+        blocks = pixels[:bw * bh * 8].reshape(bh, bw, 8)[::step, ::step]
+        bh, bw = blocks.shape[:2]
+        texels = _dxt_color_blocks(blocks.reshape(-1, 8), True)
     elif fmt in (0x17, 0x1F, 0x2A, 0x20, 0x21, 0x23, 0x25):
-        blocks = pixels[:bw * bh * 16].reshape(-1, 16)
+        blocks = pixels[:bw * bh * 16].reshape(bh, bw, 16)[::step, ::step]
+        bh, bw = blocks.shape[:2]
+        blocks = blocks.reshape(-1, 16)
         texels = _dxt_color_blocks(blocks[:, 8:], False)
         texels[:, :, 3] = _dxt_alpha_blocks(blocks[:, :8])
     else:
@@ -155,6 +235,8 @@ def tex_decode(data):
         texels = np.stack([luma + 1.402 * cr, luma - 0.344 * cb - 0.714 * cr,
                            luma + 1.772 * cb, alpha], -1).clip(0, 255).astype(np.int32)
     image = texels.reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
+    if step > 1:
+        width, height = bw * 4, bh * 4
     return Image.fromarray(image[:height, :width].astype(np.uint8), 'RGBA')
 
 
@@ -494,7 +576,36 @@ class Renderer:
                       x - (cell * sx - advance) / 2, y, cell * sx, cell * sy, command.get('color'))
             x += advance
 
-    def render(self, commands, out_path, size=(1280, 720)):
+    def bounds(self, command):
+        """The rectangle a command covers, as (left, top, right, bottom), or
+        None for one that has none worth pointing at (a line). A turned
+        sprite gives the rectangle it would cover unturned."""
+        try:
+            kind = command['type']
+            sx, sy = command.get('scale', (1, 1))
+            if kind == 'sprite':
+                width, height = command['size'][0] * sx, command['size'][1] * sy
+            elif kind in ('frame', 'tileframe'):
+                texture = self.texture(command['tex'])
+                uv = command.get('uv', (0, 0, 1, 1))
+                width = (2 * texture.width * (uv[2] - uv[0]) / 3 + command['size'][0]) * sx
+                height = (2 * texture.height * (uv[3] - uv[1]) / 3 + command['size'][1]) * sy
+            elif kind == 'text':
+                _texture, widths, cell, _columns = self.font(command.get('font', 0))
+                width = sum(widths[ord(ch) - 0x20 if 0x20 <= ord(ch) < 0x7F else 0x1F]
+                            for ch in command['str']) * sx
+                height = cell * sy
+            else:
+                return None
+        except (KeyError, OSError):
+            return None
+        left, top = self.anchor_rect(width, height,
+                                     command.get('anchor', 3 if kind == 'text' else 4))
+        x, y = command['pos'][0] + left, command['pos'][1] + top
+        return (x, y, x + width, y + height)
+
+    def backdrop(self, size=(1280, 720)):
+        """What the commands are drawn over."""
         from PIL import Image
         canvas = Image.new('RGBA', size, (8, 8, 16, 255))
         # Stand-in for the live title art the lobby is drawn over in game.
@@ -502,6 +613,17 @@ class Renderer:
             canvas.alpha_composite(self.texture(UNDERLAY).convert('RGBA').resize(size))
         except (KeyError, OSError):
             pass
+        return canvas
+
+    def render(self, commands, out_path, size=(1280, 720)):
+        canvas = self.backdrop(size)
+        missing = self.draw(canvas, commands)
+        canvas.convert('RGB').save(out_path)
+        for item in sorted(missing):
+            print('warning:', item)
+
+    def draw(self, canvas, commands):
+        """Draws the commands onto `canvas`; returns the textures it lacked."""
         ordered = sorted(enumerate(commands), key=lambda item: (-item[1].get('depth', 0), item[0]))
         missing = set()
         for _index, command in ordered:
@@ -540,9 +662,7 @@ class Renderer:
                             (left - box[0], top - box[1], right - box[0], bottom - box[1]))
             except KeyError as error:
                 missing.add(str(error))
-        canvas.convert('RGB').save(out_path)
-        for item in sorted(missing):
-            print('warning:', item)
+        return missing
 
 
 def main(argv):
@@ -550,8 +670,19 @@ def main(argv):
         print(__doc__)
         return 0
     command = argv[1]
-    if command == 'extract' and len(argv) >= 3:
-        extract(argv[2], argv[3] if len(argv) > 3 else DEFAULT_CACHE)
+    if command == 'find-game':
+        game = find_game()
+        if not game:
+            print('Ultimate Marvel vs. Capcom 3 was not found in the Steam libraries',
+                  file=sys.stderr)
+            return 1
+        print(game)
+    elif command == 'extract':
+        game = argv[2] if len(argv) > 2 else find_game()
+        if not game:
+            print('give the game folder: it was not found in the Steam libraries', file=sys.stderr)
+            return 1
+        extract(game, argv[3] if len(argv) > 3 else DEFAULT_CACHE)
     elif command == 'list' and len(argv) >= 3:
         for name, type_hash, packed, size, _start in arc_entries(argv[2])[1]:
             print('%-64s %08X packed=%d size=%d' % (name, type_hash, packed, size))

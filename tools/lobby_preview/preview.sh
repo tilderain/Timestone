@@ -1,21 +1,24 @@
 #!/bin/sh
 # Renders every native-lobby screen to PNG without launching the game.
 #
-#   tools/lobby_preview/preview.sh <game-dir> [output-dir]
+#   tools/lobby_preview/preview.sh [game-dir] [output-dir]
 #
-# <game-dir> is the folder holding umvc3.exe; its UI archives are unpacked
-# into build/ui_cache (ignored by git) on first use.
+# [game-dir] is the folder holding umvc3.exe, looked for in the Steam
+# libraries if left out or given as ""; its UI archives are unpacked into
+# build/ui_cache (ignored by git) on first use.
 set -eu
 
-if [ $# -lt 1 ]; then
-    echo "usage: $0 <game-dir> [output-dir]" >&2
-    exit 2
-fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
-game=$1
 out=${2:-$root/build/lobby_preview}
 cache=$root/build/ui_cache
 tool=$root/tools/umvc3_ui/umvc3_ui.py
+game=${1:-}
+if [ -z "$game" ]; then
+    game=$(python3 "$tool" find-game) || {
+        echo "usage: $0 <game-dir> [output-dir]" >&2
+        exit 2
+    }
+fi
 
 mkdir -p "$out" "$root/build"
 if [ ! -f "$cache/nrodinpro_BM_HQ_NOMIP.fsd" ] || [ ! -f "$cache/lic_user_i188_BM_HQ_NOMIP.png" ] ||

@@ -5,6 +5,7 @@
 // geometry and the Painter. Not part of the interface in lobby_ui.h.
 
 #include "lobby_canvas.h"
+#include "lobby_layout.h"
 
 #include <cmath>
 #include <cstdint>
@@ -86,6 +87,8 @@ inline float Clamp01(float value) { return value < 0.0f ? 0.0f : value > 1.0f ? 
 inline float EaseOut(float t) { t = 1.0f - Clamp01(t); return 1.0f - t * t * t; }
 
 // Applies the screen transition (fade + slide) to everything drawn through it.
+// The trailing Site of each call is for the layout editor (lobby_layout.h):
+// never passed by the screens, and nothing at all in the plugin's build.
 class Painter {
 public:
     Painter(Canvas& canvas, float alpha, float dx) : canvas_(canvas), alpha_(alpha), dx_(dx) {}
@@ -94,32 +97,52 @@ public:
     Painter Faded(float alpha) const { return Painter(canvas_, alpha_ * alpha, dx_); }
 
     void Sprite(Tex tex, float x, float y, float w, float h, Uv uv, Anchor anchor,
-                Color color = kWhite) const
+                Color color = kWhite, Site site = {}) const
     {
+        bool asFrame = false; // only ever set by the layout editor
+        if (!EditSprite(site, tex, x, y, w, h, &uv, &asFrame)) return;
+        if (asFrame) {
+            // Over the rectangle the picture covered, whatever it is anchored by.
+            FrameAt(tex, x - w * (anchor % 3) / 2.0f, y - h * (anchor / 3) / 2.0f, w, h, uv, color);
+            return;
+        }
         canvas_.Sprite(tex, x + dx_, y, w, h, uv, anchor, WithAlpha(color, alpha_));
     }
 
     void SpriteTurned(Tex tex, float x, float y, float w, float h, Uv uv, float radians,
-                      Color color = kWhite) const
+                      Color color = kWhite, Site site = {}) const
     {
+        if (!EditSprite(site, tex, x, y, w, h, &uv)) return;
         canvas_.SpriteTurned(tex, x + dx_, y, w, h, uv, radians, WithAlpha(color, alpha_));
     }
 
-    void Fill(float x, float y, float w, float h, Color color) const
+    void Fill(float x, float y, float w, float h, Color color, Site site = {}) const
     {
+        Tex fill = TEX_WHITE; // a fill stays a fill: only its place and size are editable
+        if (!EditSprite(site, fill, x, y, w, h, nullptr)) return;
         canvas_.Sprite(TEX_WHITE, x + dx_, y, w, h, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
                        WithAlpha(color, alpha_));
     }
 
-    void Line(float x0, float y0, float x1, float y1, float width, Color color) const
+    void Line(float x0, float y0, float x1, float y1, float width, Color color,
+              Site site = {}) const
     {
+        if (!EditLine(site, x0, y0, x1, y1)) return;
         canvas_.Line(x0 + dx_, y0, x1 + dx_, y1, width, WithAlpha(color, alpha_));
     }
 
     // 9-slice frame described by the rectangle its visible art should cover
     // (top-left origin). The frame's transparent margin is added around it.
-    void Box(Tex tex, float x, float y, float w, float h, Color color = kWhite) const
+    void Box(Tex tex, float x, float y, float w, float h, Color color = kWhite,
+             Site site = {}) const
     {
+        bool asSprite = false; // only ever set by the layout editor
+        if (!EditSprite(site, tex, x, y, w, h, nullptr, &asSprite)) return;
+        if (asSprite) {
+            canvas_.Sprite(tex, x + dx_, y, w, h, GetFrameStyle(tex).uv, A_TL,
+                           WithAlpha(color, alpha_));
+            return;
+        }
         const FrameStyle& style = GetFrameStyle(tex);
         const float totalW = w + style.insetLeft + style.insetRight;
         const float totalH = h + style.insetTop + style.insetBottom;
@@ -131,43 +154,72 @@ public:
                       style.uv, A_TL, WithAlpha(color, alpha_));
     }
 
+    // 9-slice frame over a rectangle, cut from the window `uv` of its texture
+    // in equal thirds with no margin: what the layout editor makes, of any
+    // texture. The lobby's own frames go through Box and their FrameStyle.
+    void FrameOver(Tex tex, float x, float y, float w, float h, Uv uv, Color color = kWhite,
+                   Site site = {}) const
+    {
+        bool asSprite = false;
+        if (!EditSprite(site, tex, x, y, w, h, &uv, &asSprite)) return;
+        if (asSprite)
+            canvas_.Sprite(tex, x + dx_, y, w, h, uv, A_TL, WithAlpha(color, alpha_));
+        else
+            FrameAt(tex, x, y, w, h, uv, color);
+    }
+
     void Text(const char* text, float x, float y, float scale, Anchor anchor,
               Color color = kText, Font font = FONT_BODY, float stretch = 1.0f,
-              Blend blend = BLEND_NORMAL) const
+              Blend blend = BLEND_NORMAL, Site site = {}) const
     {
         if (!text || !text[0]) return;
+        if (!EditText(site, x, y, scale)) return;
         canvas_.Text(text, x + dx_, y, scale, anchor, WithAlpha(color, alpha_), font, stretch,
                      blend);
     }
 
     void TextFit(const char* text, float x, float y, float scale, float maxWidth,
-                 Anchor anchor, Color color = kText, Font font = FONT_BODY) const
+                 Anchor anchor, Color color = kText, Font font = FONT_BODY,
+                 Site site = {}) const
     {
         char fitted[192];
         FitText(fitted, sizeof(fitted), text, maxWidth, scale, font);
-        Text(fitted, x, y, scale, anchor, color, font);
+        Text(fitted, x, y, scale, anchor, color, font, 1.0f, BLEND_NORMAL, site);
     }
 
     // Like TextFit, but the whole text is always shown: it is drawn smaller
     // until it fits maxWidth, never cut. Returns the scale used.
     float TextShrink(const char* text, float x, float y, float scale, float maxWidth,
-                     Anchor anchor, Color color = kText, Font font = FONT_BODY) const
+                     Anchor anchor, Color color = kText, Font font = FONT_BODY,
+                     Site site = {}) const
     {
         const float width = TextWidth(text, font) * scale;
         if (width > maxWidth && width > 0.0f) scale *= maxWidth / width;
-        Text(text, x, y, scale, anchor, color, font);
+        Text(text, x, y, scale, anchor, color, font, 1.0f, BLEND_NORMAL, site);
         return scale;
     }
 
     // Small label with a dark drop for legibility over the busy backdrop.
     void Label(const char* text, float x, float y, float scale, Anchor anchor,
-               Color color = kText) const
+               Color color = kText, Site site = {}) const
     {
-        Text(text, x + 2.0f, y + 2.0f, scale, anchor, Color{0.0f, 0.0f, 0.0f, 0.75f});
-        Text(text, x, y, scale, anchor, color);
+        Text(text, x + 2.0f, y + 2.0f, scale, anchor, Color{0.0f, 0.0f, 0.0f, 0.75f}, FONT_BODY,
+             1.0f, BLEND_NORMAL, site);
+        Text(text, x, y, scale, anchor, color, FONT_BODY, 1.0f, BLEND_NORMAL, site);
     }
 
 private:
+    void FrameAt(Tex tex, float left, float top, float w, float h, Uv uv, Color color) const
+    {
+        if (uv.u0 > uv.u1) { const float u = uv.u0; uv.u0 = uv.u1; uv.u1 = u; }
+        if (uv.v0 > uv.v1) { const float v = uv.v0; uv.v0 = uv.v1; uv.v1 = v; }
+        float innerW = w - 2.0f * FrameBorderX(tex, uv);
+        float innerH = h - 2.0f * FrameBorderY(tex, uv);
+        if (innerW < 0.0f) innerW = 0.0f;
+        if (innerH < 0.0f) innerH = 0.0f;
+        canvas_.Frame(tex, left + dx_, top, innerW, innerH, uv, A_TL, WithAlpha(color, alpha_));
+    }
+
     Canvas& canvas_;
     float alpha_;
     float dx_;

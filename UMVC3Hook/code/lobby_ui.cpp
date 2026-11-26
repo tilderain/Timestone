@@ -2191,6 +2191,9 @@ void LobbyUi::Draw(Canvas& canvas)
     case Screen::Team: help = DrawTeam(canvas); break;
     case Screen::Settings: help = DrawSettings(canvas); break;
     }
+#ifdef LOBBY_LAYOUT_EDIT
+    LayoutDrawAdded(canvas, static_cast<int>(screen_)); // elements made in the layout editor
+#endif
     // The footer is drawn last so it stays readable above modal dimming.
     bool modal = DrawModal(canvas);
     if (updateActive_) {
