@@ -89,6 +89,8 @@ bool SteamRoom_IsActive();
 uint64_t SteamRoom_GetLobbyId();
 uint64_t SteamRoom_GetLocalId();
 void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const char* name);
+// Why the last SteamRoom_Create made no lobby; empty when no reason is known.
+const char* SteamRoom_GetCreateFailure();
 void SteamRoom_Leave();
 int SteamRoom_GetMemberCount();
 uint64_t SteamRoom_GetMember(int index);
