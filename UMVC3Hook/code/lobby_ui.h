@@ -5,6 +5,9 @@
 
 #include "lobby_canvas.h"
 #include "lobby_model.h"
+#include <filesystem>
+#include <vector>
+#include <string>
 
 namespace lobby {
 
@@ -79,6 +82,8 @@ public:
     uint32_t TakeSfx();
     // True once after the player chose to leave the lobby for the main menu.
     bool TakeMainMenuRequested();
+    void SetReplayDirectory(const std::filesystem::path& path) { replayDirectory_ = path; }
+    std::filesystem::path TakeReplayRequested();
     bool TakePrefsDirty();
     const UiPrefs& Prefs() const { return prefs_; }
 
@@ -132,7 +137,7 @@ public:
     void DrawPresetPicker(Canvas& canvas) const;
 
 private:
-    enum class Screen : uint8_t { Top, Browse, Create, Room, Team, Settings };
+    enum class Screen : uint8_t { Top, Browse, Create, Room, Team, Settings, Replays };
     enum class TextTarget : uint8_t { None, RoomName, Chat, PresetName };
     enum class Confirm : uint8_t { None, LeaveRoom, LeaveSeat, KickMember, Update, DeletePreset };
     // Pre-match steps shown as a modal once both seats of the local player's
@@ -150,6 +155,8 @@ private:
     bool MoveCursor(int& cursor, int count, const Input& input, bool wrap = true);
 
     void UpdateTop(const Input& input);
+    void UpdateReplays(const Input& input);
+    void ScanReplays();
     void UpdateBrowse(const Input& input);
     void UpdateCreate(const Input& input);
     void UpdateRoom(const Input& input);
@@ -188,6 +195,7 @@ private:
     void DrawBackdrop(Canvas& canvas) const;
     void DrawFooter(Canvas& canvas, const char* help) const;
     const char* DrawTop(Canvas& canvas) const; // returns footer help
+    const char* DrawReplays(Canvas& canvas) const;
     const char* DrawBrowse(Canvas& canvas) const; // returns footer help
     const char* DrawCreate(Canvas& canvas) const; // returns footer help
     const char* DrawRoom(Canvas& canvas) const; // returns footer help
@@ -251,6 +259,10 @@ private:
     bool leftByChoice_ = false;
     bool usingKeyboard_ = false;
 
+    struct ReplayEntry { std::filesystem::path path; std::string title, players; size_t frames; };
+    std::filesystem::path replayDirectory_, replayRequested_;
+    std::vector<ReplayEntry> replayEntries_;
+    int replayCursor_ = 0;
     int topCursor_ = 0;
     int browseCursor_ = 0;
     int browseScroll_ = 0;

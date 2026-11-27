@@ -114,6 +114,8 @@ bool LobbyFlow_IsSpectating();
 bool LobbyFlow_PlayerInCharSelect();
 // The two players of the match being watched, player 1 first.
 bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2);
+// Capture the two seated players in canonical P1/P2 order, on the game thread.
+void LobbyFlow_GetReplayRecordingNames(char* p1, char* p2, size_t capacity);
 // The spectator overlay's top-centre text for the battle HUD to draw, at the
 // level chosen: `line` (the set score; empty when not
 // shown) and `note` (the feed's state; null when not shown). False when

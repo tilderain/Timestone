@@ -1766,7 +1766,8 @@ void PumpSpectate()
         }
     }
     const uint64_t upstream = Spectate_Pump(view);
-    if (g_service && Spectate_GetState() != SpectateState::Off) g_service->SetUpstream(upstream);
+    if (g_service && Spectate_GetState() != SpectateState::Off && !Spectate_IsLocalReplay())
+        g_service->SetUpstream(upstream);
 }
 
 void StopSpectating()
@@ -2753,6 +2754,7 @@ void EnsureObjects()
     }
     if (!g_ui) {
         g_ui.reset(new LobbyUi(*g_service, kRosterSource, LoadPrefs(), kSettingsSource));
+        g_ui->SetReplayDirectory(Spectate_ReplayDirectory());
         // CHARACTER SELECT in the start prompt is the game's own screen when
         // its hooks went in, the team screen otherwise.
         g_ui->SetNativeCharSelect(charsel::Install());
@@ -2901,6 +2903,22 @@ void RunLobbyFrame(uint64_t titleArea)
         return;
     }
 
+    const auto replayPath = g_ui->TakeReplayRequested();
+    if (!replayPath.empty() && !saving && !g_mainMenuReleaseAt &&
+        g_phase == Phase::Lobby && !g_service->Room().inRoom &&
+        g_service->Busy() == RoomBusy::None && !Netplay_IsActive()) {
+        TrainingBootConfig config;
+        int cpuMode = 0;
+        bool fiveBars = false;
+        if (Spectate_LoadLocalReplay(replayPath)) {
+            if (Spectate_TakeLaunch(&config, &cpuMode, &fiveBars)) {
+                BeginSpectateLaunch(config, cpuMode, fiveBars);
+                return;
+            }
+            Spectate_Stop();
+        }
+        g_ui->ShowNotice("Could not load this local replay.");
+    }
     if (g_ui->TakeCharSelectRequested()) {
         // Opened once the match connection is up (UpdateMatchStart); the
         // prompt holds still under this until then.
@@ -2964,6 +2982,7 @@ void RunLobbyFrame(uint64_t titleArea)
 void LobbyFlow_Enable()
 {
     g_enabled = true;
+    Spectate_InitReplayDirectory();
     HookLog("LobbyFlow: in-game lobby enabled\n");
 }
 
@@ -2993,6 +3012,12 @@ bool LobbyFlow_GetScoreText(char* format, size_t formatSize, char* score, size_t
 
 bool LobbyFlow_GetSpectatorOverlayText(char* line, size_t size, const char** note, bool* desynced)
 {
+    if (g_enabled && !g_charSelArea && Spectate_IsLocalReplay()) {
+        if (line && size) line[0] = '\0';
+        if (note) *note = "REPLAY";
+        if (desynced) *desynced = false;
+        return true;
+    }
     return g_enabled && !g_charSelArea && WatchOverlayText(line, size, note, desynced);
 }
 
@@ -3677,7 +3702,9 @@ void LobbyFlow_GameTick()
     }
 
     if (matchSelect) MatchCharSelFrame();
-    if (g_spectating) {
+    if (g_spectating && Spectate_IsLocalReplay()) {
+        g_feedLostTick = 0; // no live peer to lose
+    } else if (g_spectating) {
         UpdateWatchText();
         const Member* local = LocalRoomMember();
         const ULONGLONG now = GetTickCount64();
@@ -3750,8 +3777,24 @@ bool LobbyFlow_PlayerInCharSelect()
     return g_enabled && g_charSelArea && !g_spectating && !g_charSelWatchJoin;
 }
 
+void LobbyFlow_GetReplayRecordingNames(char* p1, char* p2, size_t capacity)
+{
+    if (!p1 || !p2 || !capacity) return;
+    p1[0] = p2[0] = '\0';
+    if (!g_service || !g_service->Room().inRoom || g_spectating) return;
+    const Member* local = LocalRoomMember();
+    if (!local || local->slot < 0) return;
+    const RoomState& room = g_service->Room();
+    for (int i = 0; i < room.memberCount; ++i) {
+        const Member& m = room.members[i];
+        if (m.slot == local->slot && m.side == 0) snprintf(p1, capacity, "%s", m.name);
+        if (m.slot == local->slot && m.side == 1) snprintf(p2, capacity, "%s", m.name);
+    }
+}
+
 bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2)
 {
+    if (Spectate_IsLocalReplay()) return Spectate_GetLocalReplayNames(p1, p2);
     if (!g_enabled || !g_spectating || !g_watchNames[0][0] || !g_watchNames[1][0]) return false;
     if (p1) *p1 = g_watchNames[0];
     if (p2) *p2 = g_watchNames[1];

@@ -17,6 +17,7 @@
 // rolls back; a frame is simulated only once both inputs for it are known.
 
 #include <cstdint>
+#include <filesystem>
 
 struct TrainingBootConfig;
 struct CharSelPacket;
@@ -59,6 +60,12 @@ enum class SpectateState : uint8_t {
     Watching, // in the battle
 };
 
+// Local files use the existing deterministic viewer, with no live feed.
+void Spectate_InitReplayDirectory();
+const std::filesystem::path& Spectate_ReplayDirectory();
+bool Spectate_LoadLocalReplay(const std::filesystem::path& path);
+bool Spectate_IsLocalReplay();
+bool Spectate_GetLocalReplayNames(const char** p1, const char** p2);
 void Spectate_Start(int slot);
 void Spectate_Stop();
 SpectateState Spectate_GetState();
