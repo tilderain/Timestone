@@ -753,14 +753,14 @@ void __fastcall ReleaseShotId(void* manager, uint32_t id)
     oReleaseShotId(manager, id);
 }
 
-// One entry per distinct deleting destructor; `original` is that native
-// function. It is intercepted at slot 0 of each vtable that names it, never by
-// rewriting its code: installing an inline detour suspends every thread, which
-// cost a 60 ms stall the first time each class appeared in a match.
-struct UnitDeleteHook { void* target = nullptr; Deleting original = nullptr; };
-std::array<UnitDeleteHook, 256> g_unitDeleteHooks;
-size_t g_unitDeleteHookCount = 0;
-std::unordered_map<void*, size_t> g_unitDeleteVtables; // Patched vtable -> hook index.
+// Every unit vtable that has been seen, with the native deleting destructor its
+// slot 0 named. The slot is replaced, never the destructor's code: installing an
+// inline detour suspends every thread, which cost a 60 ms stall the first time
+// each class appeared in a match. Keyed by vtable with no fixed capacity: the
+// game has over 2000 unit classes, 306 of them shots, and the table lives for
+// the whole process.
+std::unordered_map<void*, Deleting> g_unitDeleteVtables;
+SRWLOCK g_unitDeleteLock = SRWLOCK_INIT;
 
 void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t nativeCaller)
 {
@@ -818,16 +818,17 @@ void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t native
     return result;
 }
 
-template<size_t Index> void* __fastcall UnitDeleting(void* shot, uint32_t flags)
+void* __fastcall UnitDeleting(void* shot, uint32_t flags)
 {
-    return DeleteUnit(shot, flags, g_unitDeleteHooks[Index].original, LIFE_CALLER());
+    const uintptr_t caller = LIFE_CALLER();
+    // A virtual call reached this through the object's own vtable.
+    AcquireSRWLockShared(&g_unitDeleteLock);
+    const auto known = g_unitDeleteVtables.find(Read<void*>(shot, 0));
+    const Deleting original = known != g_unitDeleteVtables.end() ? known->second : nullptr;
+    ReleaseSRWLockShared(&g_unitDeleteLock);
+    if (!original) LIFE_FAIL("deleting detour reached through an unregistered vtable", LIFE_VALUE(shot));
+    return DeleteUnit(shot, flags, original, caller);
 }
-
-template<size_t... Indices> constexpr auto UnitDeleteDetours(std::index_sequence<Indices...>)
-{
-    return std::array<Deleting, sizeof...(Indices)>{&UnitDeleting<Indices>...};
-}
-constexpr auto g_unitDeleteDetours = UnitDeleteDetours(std::make_index_sequence<256>{});
 
 Deleting RegisterDeleting(void* shot)
 {
@@ -835,21 +836,19 @@ Deleting RegisterDeleting(void* shot)
     // The live allocation has its final vtable. Share the factory/adoption path
     // and register once per vtable, not per allocation or whitelist.
     void* vtable = Read<void*>(shot, 0);
-    const auto known = g_unitDeleteVtables.find(vtable);
-    if (known != g_unitDeleteVtables.end()) return g_unitDeleteHooks[known->second].original;
-    void* target = Read<void*>(vtable, 0);
-    size_t index = 0;
-    while (index < g_unitDeleteHookCount && g_unitDeleteHooks[index].target != target) ++index;
-    if (index == g_unitDeleteHookCount) {
-        LIFE_REQUIRE(index != g_unitDeleteHooks.size());
-        g_unitDeleteHooks[index] = {target, (Deleting)target};
-        ++g_unitDeleteHookCount;
+    AcquireSRWLockExclusive(&g_unitDeleteLock);
+    auto known = g_unitDeleteVtables.find(vtable);
+    if (known == g_unitDeleteVtables.end()) {
+        void* target = Read<void*>(vtable, 0);
+        // Recorded before the slot changes, so the detour always finds it.
+        known = g_unitDeleteVtables.emplace(vtable, (Deleting)target).first;
+        if (!GameplayHooks_PatchPointer(static_cast<void**>(vtable), (void*)&UnitDeleting))
+            LIFE_FAIL("could not patch native unit deleting slot",
+                LIFE_VALUE(shot), LIFE_VALUE(vtable), LIFE_VALUE(target));
     }
-    if (!GameplayHooks_PatchPointer(static_cast<void**>(vtable), (void*)g_unitDeleteDetours[index]))
-        LIFE_FAIL("could not patch native unit deleting slot",
-            LIFE_VALUE(shot), LIFE_VALUE(vtable), LIFE_VALUE(target), LIFE_VALUE(index));
-    g_unitDeleteVtables.emplace(vtable, index);
-    return g_unitDeleteHooks[index].original;
+    const Deleting original = known->second;
+    ReleaseSRWLockExclusive(&g_unitDeleteLock);
+    return original;
 }
 
 void RegisterUnit(void* shot)
