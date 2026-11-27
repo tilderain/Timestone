@@ -4,6 +4,8 @@
 #include "netplay.h"
 #include "steam_lobby.h"
 #include "trainingboot.h"
+#include "lobby_flow.h"
+#include "replay_file.h"
 
 #include <Windows.h>
 #include <atomic>
@@ -150,6 +152,7 @@ struct Game {
     bool started = false;
     uint32_t seed = 0;
     uint8_t opening[2] = {0, 0};
+    replay::Names replayNames{};
     std::vector<uint32_t> inputs; // two per frame: player 1, player 2
     std::vector<Check> checks;
     uint8_t finish = FINISH_NONE;
@@ -265,6 +268,31 @@ bool g_selectPreView = false;
 
 // --- Recording state ---------------------------------------------------------------
 bool g_recording = false;
+std::atomic<bool> g_localReplay{false};
+std::filesystem::path g_replayDirectory;
+uint64_t g_replaySequence = 0;
+
+void ArchiveReplay(const Game& game)
+{
+    if (g_localReplay.load() || g_replayDirectory.empty() || !game.started ||
+        game.Frames() <= 0 || static_cast<size_t>(game.Frames()) > replay::kMaxFrames) return;
+    static_assert(sizeof(WireConfig) == replay::kConfig);
+    replay::Game file;
+    file.id = game.id;
+    file.seed = game.seed;
+    file.openingP1 = game.opening[0];
+    file.openingP2 = game.opening[1];
+    file.stamp = GetTickCount64();
+    memcpy(file.config.data(), &game.config, sizeof(game.config));
+    file.inputs = game.inputs;
+    file.names = game.replayNames;
+    const auto path = g_replayDirectory / ("Replay_" + std::to_string(file.stamp) + "_" +
+        std::to_string(GetCurrentProcessId()) + "_" + std::to_string(++g_replaySequence) + ".tsr");
+    std::string error;
+    const bool saved = replay::write(path, file, error);
+    HookLog("Replay: %s (%d frames)%s%s\n", saved ? "saved" : "save failed", game.Frames(),
+            error.empty() ? "" : ": ", error.c_str());
+}
 
 // --- Viewing state -----------------------------------------------------------------
 std::atomic<SpectateState> g_state{SpectateState::Off};
@@ -844,6 +872,7 @@ void Spectate_RecEnd()
     // Backed out of the select screen before any game: spectators are told.
     if (g_games.empty() && g_select.pre) g_select.ended = true;
     if (!g_games.empty() && g_games.back().finish == FINISH_NONE) {
+        ArchiveReplay(g_games.back());
         g_games.back().finish = FINISH_END;
         HookLog("Spectate: match over after game %u (%d frames)\n", g_games.back().id,
                 g_games.back().Frames());
@@ -873,6 +902,7 @@ void Spectate_RecGameStart(uint32_t gameId, uint32_t roundSeed, uint32_t opening
         const WireConfig config = ConfigFromBoot();
         if (!g_games.empty() && g_games.back().finish == FINISH_NONE) {
             // No restart was seen for the game before this one.
+            ArchiveReplay(g_games.back());
             g_games.back().finish = FINISH_RESTART;
             g_games.back().next = config;
         }
@@ -883,6 +913,7 @@ void Spectate_RecGameStart(uint32_t gameId, uint32_t roundSeed, uint32_t opening
     game->seed = roundSeed;
     game->opening[0] = static_cast<uint8_t>(openingP1 <= 2 ? openingP1 : 0);
     game->opening[1] = static_cast<uint8_t>(openingP2 <= 2 ? openingP2 : 0);
+    LobbyFlow_GetReplayRecordingNames(game->replayNames[0].data(), game->replayNames[1].data(), 64);
     game->inputs.reserve(2 * 60 * 120);
     HookLog("Spectate: game %u started (seed 0x%08X, opening %u/%u)\n", gameId, roundSeed,
             game->opening[0], game->opening[1]);
@@ -918,6 +949,7 @@ void Spectate_RecRestart(uint32_t restartSeed)
 {
     if (!g_recording || g_games.empty() || g_games.back().finish != FINISH_NONE) return;
     Game& game = g_games.back();
+    ArchiveReplay(game);
     game.finish = FINISH_RESTART;
     game.finishSeed = restartSeed;
     game.next = ConfigFromBoot();
@@ -953,6 +985,72 @@ void Spectate_RecSelect(int team, const CharSelPacket& packet)
 // ---------------------------------------------------------------------------
 // Watching
 // ---------------------------------------------------------------------------
+void Spectate_InitReplayDirectory()
+{
+    wchar_t executable[32768];
+    const DWORD length = GetModuleFileNameW(nullptr, executable, 32768);
+    if (!length || length >= 32768) {
+        HookLog("Replay: cannot locate game executable\n");
+        return;
+    }
+    auto dir = std::filesystem::path(executable).parent_path() / "Timestone" / "replays";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec || !std::filesystem::is_directory(dir, ec) || ec) {
+        HookLog("Replay: cannot create replay directory\n");
+        return;
+    }
+    g_replayDirectory = std::move(dir);
+    HookLog("Replay: local directory ready\n");
+}
+
+const std::filesystem::path& Spectate_ReplayDirectory() { return g_replayDirectory; }
+bool Spectate_IsLocalReplay() { return g_localReplay.load(std::memory_order_acquire); }
+
+bool Spectate_LoadLocalReplay(const std::filesystem::path& path)
+{
+    if (g_recording || g_state.load() != SpectateState::Off || path.empty()) return false;
+    replay::Game file;
+    std::string error;
+    if (!replay::read(path, file, error)) {
+        HookLog("Replay: load failed: %s\n", error.c_str());
+        return false;
+    }
+    WireConfig wire{};
+    static_assert(sizeof(wire) == replay::kConfig);
+    memcpy(&wire, file.config.data(), sizeof(wire));
+    TrainingBootConfig probe;
+    if (!ConfigToBoot(wire, probe)) return false;
+    g_games.clear();
+    ResetViewer();
+    Game& game = PushGame(file.id, wire);
+    game.started = true;
+    game.seed = file.seed;
+    game.opening[0] = static_cast<uint8_t>(file.openingP1);
+    game.opening[1] = static_cast<uint8_t>(file.openingP2);
+    game.inputs = std::move(file.inputs);
+    game.replayNames = file.names;
+    game.finish = FINISH_END;
+    g_slot = -1;
+    g_upstream = 0;
+    g_subSent = false;
+    g_viewing.store(false);
+    g_localReplay.store(true, std::memory_order_release);
+    g_state.store(SpectateState::Ready);
+    HookLog("Replay: loaded %d local frames\n", game.Frames());
+    return true;
+}
+
+bool Spectate_GetLocalReplayNames(const char** p1, const char** p2)
+{
+    if (!Spectate_IsLocalReplay()) return false;
+    const Game* game = FindGame(g_playGame);
+    if (!game) return false;
+    if (p1) *p1 = game->replayNames[0][0] ? game->replayNames[0].data() : "Player 1";
+    if (p2) *p2 = game->replayNames[1][0] ? game->replayNames[1].data() : "Player 2";
+    return true;
+}
+
 void Spectate_Start(int slot)
 {
     if (g_recording) return;
@@ -969,6 +1067,7 @@ void Spectate_Start(int slot)
 void Spectate_Stop()
 {
     if (g_state.load() == SpectateState::Off) return;
+    g_localReplay.store(false, std::memory_order_release);
     g_state.store(SpectateState::Off);
     g_viewing.store(false);
     g_slot = -1;
@@ -991,7 +1090,7 @@ bool Spectate_TakeLaunch(TrainingBootConfig* config, int* cpuMode, bool* fiveBar
 {
     if (g_state.load() != SpectateState::Ready || g_games.empty() || !config) return false;
     const Game& game = g_games.back();
-    if (game.finish == FINISH_END) return false; // arrived as it ended
+    if (game.finish == FINISH_END && !Spectate_IsLocalReplay()) return false; // arrived as it ended
     // A game already restarted is not worth replaying: boot what follows it.
     const bool restarted = game.finish == FINISH_RESTART;
     const WireConfig& wire = restarted ? game.next : game.config;
@@ -1090,6 +1189,12 @@ SpectateStep Spectate_Next(int32_t frame, int32_t actionStep, int32_t* fastForwa
     }
     const int32_t available = game->Frames() - frame;
     g_statBuffered = available > 0 ? available : 0;
+    if (Spectate_IsLocalReplay()) {
+        g_statWaiting = false;
+        // A local file has no live edge.
+        return available <= 0 || actionStep >= kResultStep - 1
+            ? SpectateStep::Leave : SpectateStep::Play;
+    }
     // On the result screen with the players already gone from it: go with
     // them now. Playing out the second or so this side is behind would only
     // start the next game's loading that much after theirs, and that is what
@@ -1290,6 +1395,8 @@ SpectateStatus Spectate_GetStatus()
 // ---------------------------------------------------------------------------
 uint64_t Spectate_Pump(const SpectateRoom& room)
 {
+    // Do not advertise a historical game as a live spectator source.
+    if (Spectate_IsLocalReplay()) return 0;
     const ULONGLONG now = GetTickCount64();
     SteamRoom_SpecPump();
 
