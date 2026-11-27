@@ -16,3 +16,6 @@ HRESULT D3D9Ex_Check(IDirect3DDevice9* device);
 // One log line of what the Ex backend was doing, written when a Direct3D call
 // has failed: the game treats any such failure as fatal.
 void D3D9Ex_LogState();
+// For the memory line (EnvironmentLog_Memory): how many textures are alive
+// that carry a system-memory copy. Zero without the Ex device.
+unsigned D3D9Ex_StagedTextures();

@@ -3140,6 +3140,7 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
         if (g_entrancePending) g_updateOfferPending = true;
         HookLog("LobbyFlow: title area ready for the lobby (area=%llx)\n",
                 static_cast<unsigned long long>(titleArea));
+        EnvironmentLog_Memory("lobby");
     }
     // The area can respawn its menu units on a later frame of the same visit.
     RetireNativeTitleUnits(titleArea);

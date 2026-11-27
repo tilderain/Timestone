@@ -23,3 +23,9 @@ void EnvironmentLog_Controllers();
 // mode of the monitor the window is on. Written only when it changes.
 void EnvironmentLog_Display(HWND window, unsigned width, unsigned height, bool windowed,
                             bool vsync);
+
+// How much memory the process and its picture are using, in one line: asked
+// for wherever a long session might be growing (each game's boot, each return
+// to the lobby), so a log shows whether a figure climbs from game to game.
+// `when` names the moment.
+void EnvironmentLog_Memory(const char* when);

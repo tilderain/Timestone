@@ -1,6 +1,7 @@
 // Boot directly into a configured battle, bypassing title/menu/character select.
 #include "../pch.h"
 #include "trainingboot.h"
+#include "environment_log.h"
 #include "chr_colors.h"
 #include "mk10utils.h"
 #include "netplay.h"
@@ -923,6 +924,9 @@ void BootIntoTraining(bool queueAreaTransition)
             (int)c.stageId, (int)c.timerValue, (int)c.simpleMode[0], (int)c.simpleMode[1],
             (int)c.autoJump[0], (int)c.autoJump[1], (int)g_cpuMode,
             queueAreaTransition ? "" : " (restart)");
+    // Before this game's characters and stage are loaded: the previous
+    // game's are gone, so a figure that climbs from line to line is a leak.
+    EnvironmentLog_Memory("game boot");
 }
 
 bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg)

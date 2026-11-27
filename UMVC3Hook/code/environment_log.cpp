@@ -3,6 +3,9 @@
 
 #include <cpuid.h>
 #include <psapi.h>
+#include <dxgi1_4.h>
+#include "d3d9ex.h"
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -97,7 +100,70 @@ bool StartsWithNoCase(const char* text, const char* prefix, size_t length)
            (text[length] == '\\' || text[length] == '/');
 }
 
+// What this process holds on each graphics adapter it draws with, as Windows'
+// video memory manager counts it (every Direct3D version's allocations are in
+// the figure): dedicated memory, then what has spilled into shared memory,
+// each against the budget Windows currently gives the process. dxgi.dll is
+// loaded by name: nothing else here needs it.
+void DescribeVideoMemory(char* out, size_t size)
+{
+    snprintf(out, size, "unknown");
+    using CreateFactory = HRESULT(WINAPI*)(REFIID, void**);
+    const HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
+    const auto create = reinterpret_cast<CreateFactory>(reinterpret_cast<void*>(
+        dxgi ? GetProcAddress(dxgi, "CreateDXGIFactory1") : nullptr));
+    IDXGIFactory1* factory = nullptr;
+    if (!create || FAILED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+        return;
+    int used = 0;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT index = 0; factory->EnumAdapters1(index, &adapter) == S_OK; ++index) {
+        IDXGIAdapter3* memory = nullptr;
+        // Left at zero by a query that fails; an adapter the game does not
+        // draw with holds nothing of ours and is left out.
+        DXGI_QUERY_VIDEO_MEMORY_INFO local = {}, shared = {};
+        if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3),
+                                              reinterpret_cast<void**>(&memory)))) {
+            memory->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local);
+            memory->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &shared);
+            memory->Release();
+        }
+        adapter->Release();
+        if ((local.CurrentUsage || shared.CurrentUsage) && static_cast<size_t>(used) < size)
+            used += snprintf(out + used, size - used,
+                             "%sadapter %u dedicated %llu of %llu MB, shared %llu of %llu MB",
+                             used ? "; " : "", index, local.CurrentUsage >> 20, local.Budget >> 20,
+                             shared.CurrentUsage >> 20, shared.Budget >> 20);
+    }
+    factory->Release();
+    if (!used) snprintf(out, size, "nothing reported");
+}
+
 } // namespace
+
+void EnvironmentLog_Memory(const char* when)
+{
+    const HANDLE self = GetCurrentProcess();
+    PROCESS_MEMORY_COUNTERS_EX process = {};
+    GetProcessMemoryInfo(self, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&process),
+                         sizeof(process));
+    MEMORYSTATUSEX system = {};
+    system.dwLength = sizeof(system);
+    GlobalMemoryStatusEx(&system);
+    DWORD handles = 0;
+    GetProcessHandleCount(self, &handles);
+    char video[256];
+    DescribeVideoMemory(video, sizeof(video));
+    // "committed" is what only this process can be holding (private bytes);
+    // "commit left" is what Windows can still promise to all programs.
+    HookLog("Memory: %s | process committed %llu MB, in RAM %llu MB | system RAM free %llu MB, "
+            "commit left %llu MB | handles %lu, GDI %lu, USER %lu | video: %s | "
+            "9Ex textures with a memory copy %u\n",
+            when, static_cast<uint64_t>(process.PrivateUsage) >> 20,
+            static_cast<uint64_t>(process.WorkingSetSize) >> 20, system.ullAvailPhys >> 20,
+            system.ullAvailPageFile >> 20, handles, GetGuiResources(self, GR_GDIOBJECTS),
+            GetGuiResources(self, GR_USEROBJECTS), video, D3D9Ex_StagedTextures());
+}
 
 void EnvironmentLog_Boot()
 {

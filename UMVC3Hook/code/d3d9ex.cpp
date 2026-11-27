@@ -4,6 +4,7 @@
 #include "launchmenu_utils.h"
 #include "lag_diagnostics.h"
 #include "frame_pacing.h"
+#include "environment_log.h"
 #include "../IniSafe.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <atomic>
@@ -930,6 +931,26 @@ HRESULT WINAPI PresentFrame(IDirect3DDevice9* device, const RECT* src, const REC
     }
     if (result == S_PRESENT_OCCLUDED) return D3D_OK;
     if (result == S_PRESENT_MODE_CHANGED) return D3DERR_DEVICELOST;
+    // Out of memory on a Present loses that picture and nothing else: the game
+    // and the match go on, and memory may be there again a frame later
+    // (2026-11-26: one such failure closed the game as a lobby's textures were
+    // being made, after a long session). So the frame is skipped and the game
+    // told it was shown, until every Present has failed for two seconds; then
+    // it is handled as any other failure is. A removed device is never retried.
+    static double failingSince = 0.0; // 0: the last Present was not out of memory
+    if (result == E_OUTOFMEMORY || result == D3DERR_OUTOFVIDEOMEMORY) {
+        const double tick = NowMs();
+        if (failingSince == 0.0) {
+            failingSince = tick;
+            HookLog("D3D9Ex: Present ran out of memory (0x%08X); skipping frames\n", (unsigned)result);
+            EnvironmentLog_Memory("Present out of memory");
+        }
+        if (tick - failingSince < 2000.0) return D3D_OK;
+    } else if (failingSince != 0.0) {
+        HookLog("D3D9Ex: Present no longer out of memory after %.0f ms (0x%08X)\n",
+                NowMs() - failingSince, (unsigned)result);
+        failingSince = 0.0;
+    }
     Check(result, "D3D9Ex Present (restart required)");
     return result;
 }
@@ -1001,6 +1022,13 @@ const char* D3D9Ex_BackendName()
 {
     if (exDevice) return "Direct3D 9Ex (flip)";
     return fellBack ? "Direct3D 9 (9Ex unavailable)" : "Direct3D 9";
+}
+unsigned D3D9Ex_StagedTextures()
+{
+    AcquireSRWLockShared(&stagingLock);
+    const size_t count = stagingByTexture.size();
+    ReleaseSRWLockShared(&stagingLock);
+    return static_cast<unsigned>(count);
 }
 void D3D9Ex_LogState()
 {
