@@ -363,6 +363,27 @@ void SetStatusf(const char* format, uint64_t value)
     HookLog("SteamLobby: %s\n", g_status);
 }
 
+// Why the last lobby creation did not happen, in words for the player.
+char g_createFailure[96] = {};
+
+void SetCreateFailure(const char* reason)
+{
+    snprintf(g_createFailure, sizeof(g_createFailure), "%s", reason);
+    HookLog("SteamLobby: lobby not created: %s\n", reason);
+}
+
+// EResult values CreateLobby reports (steam_api: LobbyCreated_t).
+const char* CreateFailureText(int result)
+{
+    switch (result) {
+    case 3:  return "No connection to Steam.";
+    case 15: return "Steam denied access to lobbies\nfor this account.";
+    case 16: return "Steam did not answer in time.";
+    case 25: return "Steam says too many lobbies are open.\nPlease try again in a moment.";
+    default: return "Steam could not make the lobby.";
+    }
+}
+
 void SetVersionMismatch(const char* remoteProtocol)
 {
     SteamLobby_FormatVersionMismatch(remoteProtocol, g_versionMismatch, sizeof(g_versionMismatch));
@@ -572,6 +593,8 @@ bool TakeCallResult(T& result, int callbackId)
     if (!g_api.IsCallCompleted(g_utils, g_pendingHandle, &failed)) return false;
     if (failed || !g_api.GetCallResult(g_utils, g_pendingHandle, &result,
                                        sizeof(result), callbackId, &failed) || failed) {
+        if (g_pendingCall == PendingCall::Create)
+            SetCreateFailure("Steam did not answer the request.");
         g_pendingCall = PendingCall::None;
         g_pendingHandle = 0;
         SetStatus("Steam request failed");
@@ -599,11 +622,11 @@ void ConnectionOptions(SteamNetworkingConfigValue_t (&options)[4])
     options[2].m_eValue = k_ESteamNetworkingConfig_SendTimeSincePreviousPacket;
     options[2].m_eDataType = k_ESteamNetworkingConfig_Int32;
     options[2].m_val.m_int32 = 1;
-    // No handicap on the direct route: ICE and SDR compete on their own scores.
+    // 30 ms penalty because steam servers are just that much better at life
     options[3] = {};
     options[3].m_eValue = k_ESteamNetworkingConfig_P2P_Transport_ICE_Penalty;
     options[3].m_eDataType = k_ESteamNetworkingConfig_Int32;
-    options[3].m_val.m_int32 = 0;
+    options[3].m_val.m_int32 = 30;
 }
 
 void RefreshPeerUsername()
@@ -1332,6 +1355,10 @@ void SteamLobby_Pump()
             g_pendingCall = PendingCall::None;
             g_pendingHandle = 0;
             if (result.m_eResult != k_EResultOK || !result.m_ulSteamIDLobby) {
+                HookLog("SteamLobby: CreateLobby answered EResult %d (lobby %llu)\n",
+                        static_cast<int>(result.m_eResult),
+                        static_cast<unsigned long long>(result.m_ulSteamIDLobby));
+                SetCreateFailure(CreateFailureText(static_cast<int>(result.m_eResult)));
                 SetStatus("Steam lobby creation failed");
             } else {
                 g_lobbyId = result.m_ulSteamIDLobby;
@@ -1875,10 +1902,32 @@ uint64_t SteamRoom_GetLocalId()
 void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const char* name)
 {
     if (LocalLobby_Enabled()) { LocalLobby_Create(maxMembers, slotCount, name); return; }
-    if (!g_roomMode || !SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
-    if (g_lobbyId) {
-        SetStatus("Already in a Steam lobby");
+    g_createFailure[0] = '\0';
+    if (!g_roomMode) {
+        SetCreateFailure("The lobby service is not running.");
         return;
+    }
+    if (!SteamLobby_Initialize()) {
+        SetCreateFailure(g_status);
+        return;
+    }
+    // A lobby search still waiting on Steam must not cost the player their
+    // lobby: its results are of no use once they are hosting.
+    if (g_pendingCall == PendingCall::Search) {
+        HookLog("SteamLobby: dropped the unanswered lobby search to create a lobby\n");
+        g_pendingCall = PendingCall::None;
+        g_pendingHandle = 0;
+    }
+    if (g_pendingCall != PendingCall::None) {
+        SetCreateFailure("Steam is busy with another request.\nPlease try again.");
+        return;
+    }
+    // A lobby this game still holds without being in a room (one left over
+    // from the launcher, say) is left so that the new one can be made.
+    if (g_lobbyId) {
+        HookLog("SteamLobby: leaving leftover lobby %llu to create a new one\n",
+                static_cast<unsigned long long>(g_lobbyId));
+        SteamRoom_Leave();
     }
     if (maxMembers < 2) maxMembers = 2;
     if (maxMembers > kRoomMaxCapacity) maxMembers = kRoomMaxCapacity;
@@ -1890,6 +1939,11 @@ void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const 
                                         maxMembers + kRoomListingHeadroom);
     g_pendingCall = PendingCall::Create;
     SetStatus("Creating lobby...");
+}
+
+const char* SteamRoom_GetCreateFailure()
+{
+    return g_createFailure;
 }
 
 void SteamRoom_Leave()

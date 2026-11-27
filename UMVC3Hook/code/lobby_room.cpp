@@ -1178,10 +1178,15 @@ void SteamRoomService::Pump()
     const bool inRoom = SteamRoom_IsActive();
     const bool pending = SteamLobby_GetPendingKind() != 0;
     if ((joining_ || creating_) && !pending) {
-        if (!inRoom && !error_[0])
-            SetError(creating_ ? "Failed to create game session."
+        if (!inRoom && !error_[0]) {
+            char createError[160];
+            const char* reason = SteamRoom_GetCreateFailure();
+            snprintf(createError, sizeof(createError), "Failed to create game session.%s%s",
+                     reason[0] ? "\n" : "", reason);
+            SetError(creating_ ? createError
                      : SteamLobby_GetLastJoinRefusal() == 4 ? "LOBBY IS FULL"
                      : "Could not enter the lobby.");
+        }
         joining_ = false;
         creating_ = false;
     }
