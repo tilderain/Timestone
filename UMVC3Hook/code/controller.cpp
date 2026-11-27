@@ -1293,10 +1293,13 @@ static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t rawInput
         context->injectedAtButtonRemap = true;
         return watched;
     }
-    uint32_t currentInput;
+    uint32_t currentInput = 0;
     uint32_t rawTestInput = 0;
-    if (!g_isResimulating &&
-        AutoTest_GetInput(context->frame, inputTeam, &rawTestInput)) {
+    if (g_isResimulating) {
+        // A resimulated frame takes its input from the snapshot or the
+        // recorded history (ResolveTimelineInput); what is pressed now is
+        // not read at all.
+    } else if (AutoTest_GetInput(context->frame, inputTeam, &rawTestInput)) {
         // Remap test input without P1's focus/menu shortcut.
         currentInput = obuttonRemap(1, rawTestInput, alternateMap);
     } else {
