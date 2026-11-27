@@ -722,7 +722,7 @@ void LobbyUi::ScanReplays()
 void LobbyUi::UpdateReplays(const Input& input)
 {
     if (input.cancel) { GoTo(Screen::Top); return; }
-    if (input.x) { ScanReplays(); return; }
+    if (input.actionX) { ScanReplays(); return; }
     if (replayEntries_.empty()) return;
     MoveCursor(replayCursor_, static_cast<int>(replayEntries_.size()), input);
     if (input.confirm) {
