@@ -10,6 +10,7 @@
 #include "steam_lobby.h"
 #include "umvc3menu.h"
 #include "d3d9reset.h"
+#include "discord_presence.h"
 #include "d3d9ex.h"
 #include "lag_diagnostics.h"
 #include <Windows.h>
@@ -189,6 +190,18 @@ void EscMenuImGui_Update()
     g_openShared.store(g_open, std::memory_order_release);
 }
 
+static const char* DiscordStatusText(DiscordPresenceStatus status)
+{
+    switch (status) {
+    case DiscordPresenceStatus::Off: return nullptr;
+    case DiscordPresenceStatus::Connecting: return "Discord: connecting...";
+    case DiscordPresenceStatus::AppNotRunning: return "Discord: desktop app not running";
+    case DiscordPresenceStatus::Connected: return "Discord: connected";
+    case DiscordPresenceStatus::Refused: return "Discord refused the status. Untick and tick to retry.";
+    }
+    return nullptr;
+}
+
 void EscMenuImGui_Draw()
 {
     if (!g_open)
@@ -236,6 +249,18 @@ void EscMenuImGui_Draw()
     // if (saveFailed)
     //     ImGui::TextUnformatted("Could not save; previous setting retained.");
     EscMenuImGui_DrawDisplaySettings();
+    bool showDiscordStatus = DiscordPresence_IsEnabled();
+    static bool discordSaveFailed = false;
+    if (ImGui::Checkbox("Show on Discord status", &showDiscordStatus))
+        discordSaveFailed = !DiscordPresence_SetEnabled(showDiscordStatus);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Shows your lobby, opponent, characters and match time on your Discord\n"
+                          "status, with a Join button for public lobbies. Timestone only looks for\n"
+                          "the Discord desktop app while this is on.");
+    if (const char* status = DiscordStatusText(DiscordPresence_GetStatus()))
+        ImGui::TextDisabled("%s", status);
+    if (discordSaveFailed)
+        ImGui::TextUnformatted("Could not save the Discord setting.");
     ImGui::Separator();
     const auto capture = LagDiagnostics_GetCaptureStatus();
     const bool capturing = capture == LagCaptureStatus::Starting ||

@@ -1899,6 +1899,14 @@ uint64_t SteamRoom_GetLocalId()
     return g_localSteamId;
 }
 
+uint64_t SteamRoom_GetOwnerId()
+{
+    if (LocalLobby_Enabled() || !SteamRoom_IsActive() || !g_matchmaking ||
+        !g_api.GetLobbyOwner)
+        return 0;
+    return g_api.GetLobbyOwner(g_matchmaking, g_lobbyId);
+}
+
 void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const char* name)
 {
     if (LocalLobby_Enabled()) { LocalLobby_Create(maxMembers, slotCount, name); return; }
@@ -2109,6 +2117,14 @@ void SteamLobby_QueueJoin(uint64_t lobbyId)
 {
     if (LocalLobby_Enabled()) return;
     QueueJoinLobby(lobbyId);
+}
+
+bool SteamLobby_QueueJoinConnectString(const char* connect)
+{
+    uint64_t lobbyId = 0;
+    if (!connect || !ParseLobbyConnectString(connect, lobbyId)) return false;
+    SteamLobby_QueueJoin(lobbyId);
+    return true;
 }
 
 uint64_t SteamLobby_QueuedJoin()

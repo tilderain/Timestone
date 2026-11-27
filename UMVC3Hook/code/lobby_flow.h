@@ -12,6 +12,8 @@
 #include <cstddef>
 #include <cstdint>
 
+struct PresenceSnapshot;
+
 // On by default; -launcher or [Launch] NativeLobby=0 opts out. Must be called
 // before the title area is reached.
 void LobbyFlow_Enable();
@@ -120,6 +122,11 @@ bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2);
 // there is neither. Game thread.
 bool LobbyFlow_GetSpectatorOverlayText(char* line, size_t size, const char** note,
                                        bool* desynced);
+
+// Discord rich presence: what the player is doing, in the lobby's own terms
+// (phase, room, set, teams). Game thread; leaves `out` untouched when the
+// lobby is disabled or `out` is null.
+void LobbyFlow_FillPresence(PresenceSnapshot* out);
 
 // ImGui fallback drawn from the overlay pass: tells the player the lobby is
 // still starting, or that the native UI could not be brought up.

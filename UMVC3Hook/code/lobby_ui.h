@@ -100,6 +100,12 @@ public:
     void OfferUpdate(const char* installed, const char* available);
     // True once after the player said yes to OfferUpdate.
     bool TakeUpdateAccepted();
+    // Asks whether to show the player's activity on Discord. Shown only on the
+    // lobby's top screen with nothing else open; false when it was not shown.
+    bool AskDiscordSetup();
+    // True once after the question was answered; *yes is the answer. Backing out
+    // of it is a no.
+    bool TakeDiscordSetupAnswer(bool* yes);
     // Shows (or with nullptr, clears) the update progress modal. It takes all
     // input; cancel is reported by TakeUpdateCancelled when allowed.
     void SetUpdateProgress(const UpdateView* view);
@@ -134,7 +140,7 @@ public:
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team, Settings };
     enum class TextTarget : uint8_t { None, RoomName, Chat, PresetName };
-    enum class Confirm : uint8_t { None, LeaveRoom, LeaveSeat, KickMember, Update, DeletePreset };
+    enum class Confirm : uint8_t { None, LeaveRoom, LeaveSeat, KickMember, Update, DeletePreset, DiscordSetup };
     // Pre-match steps shown as a modal once both seats of the local player's
     // match slot are taken. Each is answered by both players in turn.
     enum class Handshake : uint8_t {
@@ -322,6 +328,8 @@ private:
     char notice_[512] = {};
     char updateOffer_[192] = {}; // the Confirm::Update question
     bool updateAccepted_ = false;
+    bool discordAnswered_ = false; // the Confirm::DiscordSetup question was answered
+    bool discordYes_ = false;
     bool updateActive_ = false;  // progress modal shown
     bool updateCancelled_ = false;
     UpdateView update_ = {};

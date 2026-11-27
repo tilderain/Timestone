@@ -2,6 +2,8 @@
 #include "lobby_flow.h"
 #include "lobby_local.h"
 #include "lobby_music.h"
+#include "discord_presence.h"
+#include "discord_presence_format.h"
 
 #include "LaunchMenu.h"
 #include "assist_names.h"
@@ -2866,6 +2868,25 @@ void PumpUpdate()
     }
 }
 
+// Asks once whether to show the player's activity on Discord, until it is
+// answered (RichPresenceSetup=1). Nothing looks for Discord before a yes.
+void PumpDiscordSetup()
+{
+    static bool answered = false; // this session, even if the answer could not be saved
+    bool yes = false;
+    if (g_ui->TakeDiscordSetupAnswer(&yes)) {
+        answered = true;
+        if (!DiscordPresence_SetEnabled(yes))
+            g_ui->ShowNotice("Could not save the Discord setting.");
+        return;
+    }
+    if (answered || g_mainMenuReleaseAt || !DiscordPresence_NeedsSetup()) return;
+    // Not while an update check, download or install is running: its offer
+    // or progress would cover the question.
+    if (g_updateFlow != UpdateFlow::Idle && g_updateFlow != UpdateFlow::Offered) return;
+    g_ui->AskDiscordSetup();
+}
+
 void RunLobbyFrame(uint64_t titleArea)
 {
     g_service->Pump();
@@ -2883,6 +2904,7 @@ void RunLobbyFrame(uint64_t titleArea)
     if (g_mainMenuReleaseAt) input = Input{};
     g_ui->Update(input);
     PumpUpdate();
+    PumpDiscordSetup();
     if (g_ui->TakePrefsDirty()) SavePrefs(g_ui->Prefs());
     const uint32_t sfx = g_ui->TakeSfx();
     if (sfx & SFX_MATCH_FOUND) Native_FocusGameWindow();
@@ -3748,6 +3770,95 @@ bool LobbyFlow_IsSpectating()
 bool LobbyFlow_PlayerInCharSelect()
 {
     return g_enabled && g_charSelArea && !g_spectating && !g_charSelWatchJoin;
+}
+
+namespace {
+
+// One character name for the presence line, empty for an empty slot.
+void CopyTeamName(char* out, size_t size, int32_t id)
+{
+    snprintf(out, size, "%s", id >= 1 && id <= 50 ? RosterCharacterName(id) : "");
+}
+
+} // namespace
+
+void LobbyFlow_FillPresence(PresenceSnapshot* out)
+{
+    if (!g_enabled || !out) return;
+
+    if (g_releasedToMainMenu) {
+        out->activity = PresenceActivity::OfflineMenu;
+        return;
+    }
+    if (!g_service) {
+        out->activity = PresenceActivity::LobbyMenu;
+        return;
+    }
+
+    const RoomState& room = g_service->Room();
+    if (room.inRoom) {
+        out->lobbyId = room.id;
+        out->ownerId = SteamRoom_GetOwnerId();
+        snprintf(out->roomName, sizeof(out->roomName), "%s", room.settings.name);
+        out->memberCount = room.memberCount;
+        out->memberLimit = room.settings.maxMembers;
+        // The host publishes both limits as lobby data: "private" for an
+        // invitation-only room and "vis" for a friends-only one (lobby_room.cpp).
+        // RoomSettings::visibility is never filled by RefreshRoom, so it cannot
+        // answer this.
+        out->roomPublic = strcmp(SteamRoom_GetData("private"), "1") != 0 &&
+                          strcmp(SteamRoom_GetData("vis"), "1") != 0;
+    }
+
+    const Member* local = LocalRoomMember();
+    if (local) {
+        out->seat = local->side < 2 ? local->slot : -1;
+        out->queuePos = local->queueSlot >= 0 && local->queuePos >= 1 ? local->queuePos : -1;
+    }
+
+    switch (g_phase) {
+    case Phase::Lobby:
+    case Phase::Returning:
+        out->activity = room.inRoom ? PresenceActivity::InRoom : PresenceActivity::LobbyMenu;
+        break;
+    case Phase::Connecting:
+    case Phase::Handshake:
+        out->activity = PresenceActivity::InRoom;
+        out->startingMatch = true;
+        break;
+    case Phase::WatchJoining:
+        out->activity = PresenceActivity::Spectating;
+        break;
+    case Phase::Launching:
+    case Phase::InMatch:
+        out->activity = g_spectating ? PresenceActivity::Spectating : PresenceActivity::InMatch;
+        break;
+    }
+
+    if (out->activity == PresenceActivity::Spectating) {
+        // Names are only current once the feed is up; while still joining
+        // they may belong to an earlier match, so the line is left out.
+        if (g_spectating) {
+            snprintf(out->watchP1, sizeof(out->watchP1), "%s", g_watchNames[0]);
+            snprintf(out->watchP2, sizeof(out->watchP2), "%s", g_watchNames[1]);
+        }
+    } else if (out->activity == PresenceActivity::InMatch) {
+        snprintf(out->opponent, sizeof(out->opponent), "%s", g_pairing.opponentName);
+        // The teams actually being played: random members are drawn into the
+        // boot config at launch (as BeginLaunch reports them to the room), and
+        // g_pairing keeps the players' own choices.
+        const TrainingBootConfig& boot = TrainingBoot_GetConfig();
+        const bool p1 = g_pairing.localSide == 0;
+        for (int i = 0; i < 3; ++i) {
+            CopyTeamName(out->localTeam[i], sizeof(out->localTeam[i]),
+                         p1 ? boot.p1Chars[i] : boot.p2Chars[i]);
+            CopyTeamName(out->opponentTeam[i], sizeof(out->opponentTeam[i]),
+                         p1 ? boot.p2Chars[i] : boot.p1Chars[i]);
+        }
+        out->firstTo = g_setFirstTo;
+        out->winsLocal = g_setWins[0];
+        out->winsOpponent = g_setWins[1];
+    }
 }
 
 bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2)

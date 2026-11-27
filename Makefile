@@ -125,6 +125,8 @@ CPP_SRC   := \
 	$(SRCDIR)/code/native_charsel.cpp \
 	$(SRCDIR)/code/native_result.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
+	$(SRCDIR)/code/discord_presence_format.cpp \
+	$(SRCDIR)/code/discord_presence.cpp \
 	$(SRCDIR)/code/online_rewards.cpp \
 	$(SRCDIR)/code/load_diag.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
@@ -266,6 +268,21 @@ $(BUILDDIR)/test_character_restore: tools/test_character_restore.cpp \
 	$(HOST_CXX) -std=c++20 -O2 -Wall -Wextra -Werror \
 		-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie \
 		tools/test_character_restore.cpp $(SRCDIR)/code/rollback_character_restore.cpp -o $@
+endif
+
+ifeq ($(DISCORD_PRESENCE_TEST),1)
+.PHONY: discord-presence-test
+all: discord-presence-test
+discord-presence-test: $(BUILDDIR)/test_discord_presence
+	./$(BUILDDIR)/test_discord_presence
+
+$(BUILDDIR)/test_discord_presence: tools/test_discord_presence.cpp \
+	$(SRCDIR)/code/discord_presence_format.cpp \
+	$(SRCDIR)/code/discord_presence_format.h Makefile
+	@mkdir -p $(@D)
+	$(HOST_CXX) -std=c++20 -O2 -Wall -Wextra -Werror \
+		-I$(SRCDIR)/code -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie \
+		tools/test_discord_presence.cpp $(SRCDIR)/code/discord_presence_format.cpp -o $@
 endif
 
 # ---------- Release build ----------

@@ -21,6 +21,7 @@
 #include "rollback.h"
 #include "rollback_snapdump.h"
 #include "controller.h"
+#include "discord_presence.h"
 #include "autotest.h"
 #include "rollback_cleanup.h"
 #include "rollback_diagnostics.h"
@@ -754,6 +755,10 @@ static void __fastcall HookedMove(void* sMvc3Main)
     ApplyAdvancedLaunchConfig();
     // In-game lobby: room upkeep during a match and the return-to-room request.
     LobbyFlow_GameTick();
+    // Discord presence: a snapshot every 30 ticks, and the worker that
+    // publishes it. Normal Launch never gets here (gameplay hooks are
+    // inactive), so it publishes nothing.
+    DiscordPresence_GameTick();
 
     // These setters rewrite live sMain timing and subsystem state. Applying
     // them from the initialization thread can race native startup before the

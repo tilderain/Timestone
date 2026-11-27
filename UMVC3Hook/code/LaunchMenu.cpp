@@ -7,6 +7,7 @@
 #include "assist_names.h"
 #include "chr_colors.h"
 #include "controller.h"
+#include "discord_presence.h"
 #include "launch_music.h"
 #include "launchmenu_dark.h"
 #include "launchmenu_controls.h"
@@ -675,6 +676,9 @@ void CleanupNetworkOnExit()
 {
     if (InterlockedExchange(&g_exitCleanupStarted, 1) != 0)
         return;
+
+    // Before the netplay early return: both exit paths clear the presence.
+    DiscordPresence_Shutdown();
 
     // If netplay took over the host/peer, let it do the cleanup
     if (Netplay_IsActive()) {
