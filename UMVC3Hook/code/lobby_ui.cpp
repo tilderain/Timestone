@@ -2,6 +2,7 @@
 #include "lobby_ui_internal.h"
 #include "space_bg.h"
 #include "lobby_music.h"
+#include "replay_file.h"
 
 #include <algorithm>
 #include <cmath>
@@ -46,14 +47,15 @@ struct Prompt {
     const char* label;
 };
 
-enum TopItem { TOP_SEARCH, TOP_CREATE, TOP_TEAM, TOP_SETTINGS, TOP_MAIN_MENU, kTopCount };
+enum TopItem { TOP_SEARCH, TOP_CREATE, TOP_TEAM, TOP_SETTINGS, TOP_REPLAYS, TOP_MAIN_MENU, kTopCount };
 const char* const kTopItems[kTopCount] = {"SEARCH LOBBY", "CREATE LOBBY", "TEAM SETUP", "SETTINGS",
-                                          "MAIN MENU"};
+                                          "REPLAYS", "MAIN MENU"};
 const char* const kTopHelp[] = {
     "Search for a lobby and join the players inside.",
     "Set your conditions and create a lobby.",
     "Choose the team you bring to a match and how you enter battle.",
     "Change the display, connection and music settings.",
+    "Watch a saved match offline.",
     "Leave the lobby and return to the game's main menu.",
 };
 
@@ -636,6 +638,7 @@ void LobbyUi::Update(const Input& input)
     case Screen::Room: UpdateRoom(input); break;
     case Screen::Team: UpdateTeam(input); break;
     case Screen::Settings: UpdateSettings(input); break;
+    case Screen::Replays: UpdateReplays(input); break;
     }
 }
 
@@ -673,10 +676,59 @@ void LobbyUi::UpdateTop(const Input& input)
         settingsCursor_ = 0;
         GoTo(Screen::Settings);
         break;
+    case TOP_REPLAYS:
+        ScanReplays();
+        GoTo(Screen::Replays);
+        break;
     default:
         mainMenuRequested_ = true;
         Play(SFX_MENU_EXIT);
         break;
+    }
+}
+
+std::filesystem::path LobbyUi::TakeReplayRequested()
+{
+    auto path = std::move(replayRequested_);
+    replayRequested_.clear();
+    return path;
+}
+
+void LobbyUi::ScanReplays()
+{
+    replayEntries_.clear();
+    replayCursor_ = 0;
+    if (replayDirectory_.empty()) return;
+    std::error_code ec;
+    auto it = std::filesystem::directory_iterator(replayDirectory_, ec);
+    const std::filesystem::directory_iterator end;
+    unsigned visited = 0;
+    for (; !ec && it != end && visited++ < 512; it.increment(ec)) {
+        if (!it->is_regular_file(ec) || it->path().extension() != ".tsr") continue;
+        replay::Game file;
+        std::string error;
+        if (!replay::read(it->path(), file, error)) continue;
+        const auto utf8 = it->path().stem().u8string();
+        std::string name(utf8.begin(), utf8.end());
+        std::string players = file.names[0][0] ? file.names[0].data() : "Player 1";
+        players += " vs ";
+        players += file.names[1][0] ? file.names[1].data() : "Player 2";
+        replayEntries_.push_back({it->path(), std::move(name), std::move(players), file.frames()});
+    }
+    std::sort(replayEntries_.begin(), replayEntries_.end(),
+        [](const ReplayEntry& a, const ReplayEntry& b) { return a.title < b.title; });
+}
+
+void LobbyUi::UpdateReplays(const Input& input)
+{
+    if (input.cancel) { GoTo(Screen::Top); return; }
+    if (input.x) { ScanReplays(); return; }
+    if (replayEntries_.empty()) return;
+    MoveCursor(replayCursor_, static_cast<int>(replayEntries_.size()), input);
+    if (input.confirm) {
+        replayRequested_ = replayEntries_[replayCursor_].path;
+        Play(SFX_CONFIRM);
+        GoTo(Screen::Top);
     }
 }
 
@@ -2210,6 +2262,7 @@ void LobbyUi::Draw(Canvas& canvas)
     case Screen::Room: help = DrawRoom(canvas); break;
     case Screen::Team: help = DrawTeam(canvas); break;
     case Screen::Settings: help = DrawSettings(canvas); break;
+    case Screen::Replays: help = DrawReplays(canvas); break;
     }
 #ifdef LOBBY_LAYOUT_EDIT
     LayoutDrawAdded(canvas, static_cast<int>(screen_)); // elements made in the layout editor
@@ -2289,6 +2342,10 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     } else if (screen_ == Screen::Top) {
         add(BTN_CONFIRM, "Select");
         add(BTN_CANCEL, "Main Menu");
+    } else if (screen_ == Screen::Replays) {
+        add(BTN_CONFIRM, "Play");
+        add(BTN_X, "Refresh");
+        add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Settings && resolutionOpen_) {
         add(BTN_CONFIRM, "Apply");
         add(BTN_CANCEL, "Close");
@@ -2440,7 +2497,7 @@ const char* LobbyUi::DrawTop(Canvas& canvas) const
         p.TextFit(service_.StatusText(), 84.0f, 494.0f, 0.62f, 450.0f, A_ML, kRed);
 
     for (int i = 0; i < kTopCount; ++i) {
-        const float y = 198.0f + i * 68.0f;
+        const float y = 190.0f + i * 62.0f;
         const float shift = i * 12.0f; // native main-menu stagger
         const bool selected = i == topCursor_;
         if (selected) {
@@ -2467,6 +2524,28 @@ const char* LobbyUi::DrawTop(Canvas& canvas) const
     }
 
     return kTopHelp[topCursor_];
+}
+
+const char* LobbyUi::DrawReplays(Canvas& canvas) const
+{
+    const float t = EaseOut(screenFrame_ / static_cast<float>(kTransitionFrames));
+    const Painter p(canvas, t, (1.0f - t) * 36.0f);
+    p.Label("REPLAYS", 76.0f, 68.0f, 1.0f, A_ML, kYellow);
+    if (replayEntries_.empty()) return "No valid local replays. Refresh or go back.";
+    const int start = std::max(0, replayCursor_ - 6);
+    for (int row = 0; row < 7 && start + row < static_cast<int>(replayEntries_.size()); ++row) {
+        const int i = start + row;
+        const ReplayEntry& entry = replayEntries_[i];
+        const float y = 150.0f + row * 66.0f;
+        p.Box(TEX_SLANT_ROW, kSafeLeft, y - 29.0f, kSafeRight-kSafeLeft, 58.0f,
+              i == replayCursor_ ? Color{0.42f,0.44f,0.5f,0.96f} : Color{0.2f,0.22f,0.28f,0.9f});
+        p.TextFit(entry.title.c_str(), 152.0f, y-10.0f, 0.75f, 690.0f, A_ML, kText);
+        p.TextFit(entry.players.c_str(), 152.0f, y+11.0f, 0.56f, 690.0f, A_ML, kDim);
+        char frames[64];
+        snprintf(frames, sizeof(frames), "%u frames", static_cast<unsigned>(entry.frames));
+        p.Label(frames, kSafeRight-30.0f, y, 0.62f, A_MR, kYellow);
+    }
+    return "Choose a saved replay. Play starts local playback.";
 }
 
 const char* LobbyUi::DrawBrowse(Canvas& canvas) const
